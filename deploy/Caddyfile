@@ -1,0 +1,73 @@
+# Caddy: TLS termination and reverse proxy for pttd (see README.md in this directory).
+#
+# Environment (set by compose.yaml):
+#   PTT_DOMAIN   public hostname, required
+#   ACME_EMAIL   optional Let's Encrypt account email; empty registers without one
+#   PTT_TLS      certificate source: "acme" (default, production) or "internal" (CI and
+#                local development: Caddy's own CA, nothing leaves the machine)
+{
+	# No admin API: config changes arrive by recreating the container, never at runtime.
+	admin off
+
+	# Only matters under `tls internal`: clients are given the CA explicitly instead.
+	skip_install_trust
+
+	servers {
+		# HTTP/3 needs UDP 443, which the firewalls do not allow.
+		protocols h1 h2
+	}
+}
+
+(tls_acme) {
+	tls {
+		protocols tls1.3
+		# Let's Encrypt only, with no fallback CA: the app trusts only ISRG Root X1 and X2, so a
+		# certificate from any other CA (by default Caddy falls back to ZeroSSL once an email is
+		# set) would lock every phone out.
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			email "{$ACME_EMAIL}"
+		}
+	}
+}
+
+(tls_internal) {
+	tls internal {
+		protocols tls1.3
+	}
+}
+
+{$PTT_DOMAIN} {
+	import tls_{$PTT_TLS:acme}
+
+	# No `log` directive: no access log, so no record of who connected when.
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		-Server
+	}
+
+	# pttd serves these only on its internal listener; refuse them here as well, so a routing
+	# mistake in pttd can never expose them publicly.
+	@internal path /metrics /metrics/* /internal /internal/*
+	handle @internal {
+		header Content-Type application/json
+		header Cache-Control no-store
+		respond `{"error":"not_found"}` 404
+	}
+
+	# WebSocket upgrades (/v1/ws) pass through; X-Forwarded-For carries the client address.
+	handle {
+		reverse_proxy pttd:8080
+	}
+}
+
+# Container healthcheck target: loopback inside the Caddy container only, never published.
+http://127.0.0.1:8081 {
+	bind 127.0.0.1
+	respond "ok" 200
+}
