@@ -15,12 +15,21 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # CLI tool versions. Renovate does not track these yet (it would need a custom manager);
-  # bump them by hand. Actions themselves are pinned by SHA and kept current by Renovate.
+  # CLI tool versions, kept current by the regex custom manager in renovate.json (it reads the
+  # "# renovate:" comment above each line). Actions are pinned by SHA and tracked natively.
+  # renovate: datasource=github-releases depName=golangci/golangci-lint
   GOLANGCI_LINT_VERSION: v2.15.0
+  # renovate: datasource=github-releases depName=sqlc-dev/sqlc extractVersion=^v(?<version>.+)$
   SQLC_VERSION: 1.31.1
+  # renovate: datasource=go depName=golang.org/x/vuln
   GOVULNCHECK_VERSION: v1.9.0
+  # renovate: datasource=go depName=github.com/rhysd/actionlint
   ACTIONLINT_VERSION: v1.7.12
+  # A Renovate bump of this version fails the gitleaks job until GITLEAKS_SHA256 is updated
+  # to match, which is the intended review point.
+  # renovate: datasource=github-releases depName=gitleaks/gitleaks
+  GITLEAKS_VERSION: v8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
 jobs:
   server:
@@ -49,13 +58,9 @@ jobs:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           working-directory: server
 
+      # Includes the migration up/down test (TestMigrationsUpDownUp in internal/db).
       - name: Test
         run: go test -race ./...
-
-      # Also part of the test run above; repeated as its own step so the spec's
-      # "migration up/down test" gate is visible in the checks list.
-      - name: Migration up/down test
-        run: go test -race -count=1 -run '^TestMigrationsUpDownUp$' -v ./internal/db/
 
       - uses: sqlc-dev/setup-sqlc@bac53b7fb28c039a6c7f5736fd1e89744021bdd6 # v5.0.0
         with:
@@ -156,7 +161,7 @@ jobs:
         with:
           scan-args: |-
             --format=json
-            --output=osv-results.json
+            --output-file=osv-results.json
             --recursive
             ./
 
@@ -164,6 +169,8 @@ jobs:
       # advisories, are reported as warnings; govulncheck in the server job gates those by
       # reachability.
       - name: Fail on high or critical findings
+        env:
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
         run: |
           if [ ! -s osv-results.json ]; then
             echo "::error::OSV-Scanner wrote no results; see the 'Scan lockfiles' step."
@@ -175,6 +182,11 @@ jobs:
              "\($p.ecosystem)/\($p.name)@\($p.version)", (.ids | join(",")), $src] | @tsv
           ' osv-results.json > findings.tsv
           if [ ! -s findings.tsv ]; then
+            # A non-zero exit with nothing to report means the scan itself broke.
+            if [ "$SCAN_OUTCOME" = "failure" ]; then
+              echo "::error::OSV-Scanner failed but reported no findings; see the 'Scan lockfiles' step."
+              exit 1
+            fi
             echo "No known vulnerabilities."
             exit 0
           fi
@@ -184,4 +196,43 @@ jobs:
           if [ "$high" -gt 0 ]; then
             echo "::error::${high} high or critical (CVSS >= 7.0) finding(s)."
             exit 1
+          fi
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (checksum-verified)
+        run: |
+          set -euo pipefail
+          version="${GITLEAKS_VERSION#v}"
+          tarball="gitleaks_${version}_linux_x64.tar.gz"
+          base="https://github.com/gitleaks/gitleaks/releases/download/${GITLEAKS_VERSION}"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo "$tarball" "$base/$tarball"
+          curl -fsSLo checksums.txt "$base/gitleaks_${version}_checksums.txt"
+          # The hash pinned in this workflow is authoritative; the release's checksums file must
+          # agree with it, and so must the downloaded tarball.
+          grep -qxF "${GITLEAKS_SHA256}  ${tarball}" checksums.txt
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum --check --strict -
+          tar -xzf "$tarball" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      # PRs scan only their own commits; pushes to main scan the full history.
+      - name: Scan git history
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE_SHA" ]; then
+            gitleaks git --redact --no-banner --log-opts="${BASE_SHA}..${HEAD_SHA}" .
+          else
+            gitleaks git --redact --no-banner .
           fi
