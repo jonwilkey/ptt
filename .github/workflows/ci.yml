@@ -236,3 +236,192 @@ jobs:
           else
             gitleaks git --redact --no-banner .
           fi
+
+  # ---- OpenTofu (infra/tofu) -------------------------------------------------------------
+  #
+  # The repository and its Actions logs are public: identifying values come only from secrets
+  # (masked in logs), and the human-readable plan is never printed. Only a summary (counts plus
+  # "<actions> <address>" lines) goes to the log and the PR comment.
+
+  tofu:
+    name: OpenTofu fmt and validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.13.2
+          tofu_wrapper: false
+
+      - name: tofu fmt
+        run: tofu fmt -check -recursive -diff infra/tofu
+
+      - name: tofu init and validate
+        run: |
+          for dir in infra/tofu/bootstrap infra/tofu/prod; do
+            echo "::group::${dir}"
+            tofu -chdir="${dir}" init -backend=false -input=false -lockfile=readonly
+            tofu -chdir="${dir}" validate
+            echo "::endgroup::"
+          done
+
+  tofu-plan:
+    name: OpenTofu plan (prod)
+    needs: tofu
+    # Only after bootstrap (TOFU_ENABLED), only for PRs from this repository: fork PRs get no
+    # OIDC token or secrets. Never switch this to pull_request_target.
+    if: >-
+      vars.TOFU_ENABLED == 'true' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # OIDC token for the ptt-tofu-plan role (sub ...:pull_request)
+      pull-requests: write # sticky plan-summary comment
+    concurrency:
+      group: tofu-plan-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2 # the PR merge commit and its base parent
+
+      - name: Detect infra/tofu changes
+        id: changes
+        run: |
+          if git diff --quiet HEAD^1 HEAD -- infra/tofu; then
+            echo "tofu=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tofu=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        if: steps.changes.outputs.tofu == 'true'
+        with:
+          tofu_version: 1.13.2
+          tofu_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: steps.changes.outputs.tofu == 'true'
+        with:
+          role-to-assume: ${{ secrets.AWS_TOFU_PLAN_ROLE_ARN }}
+          role-session-name: tofu-plan-pr-${{ github.event.pull_request.number }}
+          aws-region: us-west-2
+          mask-aws-account-id: true
+
+      - name: tofu init
+        if: steps.changes.outputs.tofu == 'true'
+        working-directory: infra/tofu/prod
+        env:
+          TOFU_STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+        run: tofu init -input=false -no-color -lockfile=readonly -backend-config="bucket=${TOFU_STATE_BUCKET}" > /dev/null
+
+      - name: tofu plan
+        id: plan
+        if: steps.changes.outputs.tofu == 'true'
+        working-directory: infra/tofu/prod
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY_PLAN }}
+          TF_VAR_zone_name: ${{ secrets.TOFU_ZONE_NAME }}
+          TF_VAR_record_name: ${{ secrets.TOFU_RECORD_NAME }}
+          TF_VAR_admin_users: ${{ secrets.TOFU_ADMIN_USERS }}
+        run: |
+          # The human-readable plan (stdout) is discarded: it would land in a public log.
+          set +e
+          tofu plan -lock=false -no-color -detailed-exitcode \
+            -out="$RUNNER_TEMP/prod.tfplan" > /dev/null 2> "$RUNNER_TEMP/plan.err"
+          code=$?
+          set -e
+          echo "exitcode=${code}" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 1 ]; then
+            # No error text: diagnostics can quote identifying values and the log is public.
+            errors=$(grep -c 'Error: ' "$RUNNER_TEMP/plan.err" || true)
+            echo "tofu plan failed with ${errors} error(s); see a maintainer-run plan for details."
+          fi
+          rm -f "$RUNNER_TEMP/plan.err"
+
+      - name: Summarize plan
+        if: steps.plan.outputs.exitcode == '0' || steps.plan.outputs.exitcode == '2'
+        working-directory: infra/tofu/prod
+        run: |
+          tofu show -json "$RUNNER_TEMP/prod.tfplan" > "$RUNNER_TEMP/plan.json"
+          jq -r '
+            [ .resource_changes[]?
+              | { a: (.change.actions | join(",")), addr: .address }
+              | select(.a != "no-op" and .a != "read") ] as $c
+            | [ (.output_changes // {})[] | select(.actions != ["no-op"]) ] as $o
+            | ( "create: \([$c[] | select(.a == "create")] | length), "
+              + "update: \([$c[] | select(.a == "update")] | length), "
+              + "delete: \([$c[] | select(.a == "delete")] | length), "
+              + "replace: \([$c[] | select(.a == "delete,create" or .a == "create,delete")] | length), "
+              + "outputs: \($o | length)" ),
+              ( $c[] | "\(.a) \(.addr)" )
+          ' "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/summary.txt"
+          rm -f "$RUNNER_TEMP/plan.json" "$RUNNER_TEMP/prod.tfplan"
+          cat "$RUNNER_TEMP/summary.txt"
+
+      - name: Post plan summary as a sticky PR comment
+        if: always() && steps.plan.outputs.exitcode != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SUMMARY_FILE: ${{ runner.temp }}/summary.txt
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- tofu-plan:infra/tofu/prod -->';
+            const code = process.env.PLAN_EXITCODE;
+            const status = { '0': 'No changes', '2': 'Changes planned' }[code] ?? 'Plan failed';
+            let summary = '';
+            if (code === '0' || code === '2') {
+              try {
+                summary = fs.readFileSync(process.env.SUMMARY_FILE, 'utf8').trim();
+              } catch {
+                summary = '(summary unavailable; see the run)';
+              }
+            }
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const lines = [
+              marker,
+              '### OpenTofu plan: `infra/tofu/prod`',
+              '',
+              `**${status}** for ${context.payload.pull_request.head.sha.slice(0, 7)} ([run](${run}))`,
+            ];
+            if (summary) {
+              lines.push('', '```text', summary, '```');
+            }
+            lines.push(
+              '',
+              '_Summary only (resource addresses and actions). The full plan is not published ' +
+                'because this repository is public; run `tofu plan` locally to see details._',
+            );
+            const body = lines.join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(
+              (c) => c.user?.type === 'Bot' && c.body?.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Fail if plan errored
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::tofu plan failed; see the plan step log."
+          exit 1
