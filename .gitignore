@@ -5,7 +5,8 @@
 *.test
 *.out
 *.prof
-coverage.*
+coverage.out
+coverage.html
 cover.out
 go.work
 go.work.sum
@@ -13,17 +14,15 @@ go.work.sum
 # ---- Android / Gradle ----
 .gradle/
 .kotlin/
-build/
+/android/**/build/
+/android/**/captures/
 local.properties
-captures/
 .externalNativeBuild/
 .cxx/
 *.apk
 *.aab
 *.keystore
 *.jks
-# Not secret, but kept out of the repo for now.
-google-services.json
 
 # ---- OpenTofu / Terraform ----
 # .terraform.lock.hcl is intentionally NOT ignored: commit it.
@@ -33,9 +32,16 @@ google-services.json
 *.tfplan
 crash.log
 crash.*.log
+override.tf
+*_override.tf
+override.tofu
+*_override.tofu
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+
+# ---- Ansible ----
+*.retry
 
 # ---- Env files (templates are committed) ----
 .env
@@ -45,7 +51,7 @@ crash.*.log
 !*.env.example
 
 # ---- Decrypted secrets (only sops-encrypted files are committed) ----
-infra/secrets/*.dec.*
+*.dec.*
 *.plain.*
 *.agekey
 
@@ -59,3 +65,4 @@ infra/secrets/*.dec.*
 .DS_Store
 Thumbs.db
 .claude/settings.local.json
+.claude/worktrees/

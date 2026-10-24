@@ -20,6 +20,7 @@ The full design is in [docs/spec.md](docs/spec.md).
 | `infra/secrets/` | sops-encrypted secrets (age) — never commit plaintext |
 | `docs/` | Spec, runbooks (`docs/runbooks/`), ADRs (`docs/adr/`) |
 | `.github/workflows/` | CI/CD |
+| `renovate.json` | Renovate dependency-update policy |
 
 ## Conventions
 
@@ -27,6 +28,7 @@ The full design is in [docs/spec.md](docs/spec.md).
 - The server and the app are versioned separately by
   [release-please](https://github.com/googleapis/release-please), with tags `server-vX.Y.Z` and
   `android-vX.Y.Z`.
-- `main` is protected: every change lands by pull request with CI green.
+- Private GitHub repo; both admins have admin access. `main` is protected: every change lands
+  by pull request with CI green.
 - Any deviation from the spec's "Decisions already made" table needs an ADR in
   [docs/adr/](docs/adr/) before the change is made.
