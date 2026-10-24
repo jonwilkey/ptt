@@ -27,11 +27,12 @@ the module that creates the key must not depend on that key to read its own stat
 
 - `infra/tofu/bootstrap` creates one symmetric KMS key (`ENCRYPT_DECRYPT`, alias
   `alias/ptt-tofu-state`) next to the state bucket. Its key policy only enables IAM policies for
-  the account; the `ptt-tofu-plan` and `ptt-tofu-apply` roles get `kms:Decrypt`, `kms:Encrypt`
-  and `kms:GenerateDataKey` on that key and nothing else.
-- `infra/tofu/prod` encrypts both state and saved plans with `key_provider "aws_kms"` and
-  `method "aes_gcm"`, `enforced = true`, and no fallback method. It refers to the key by alias,
-  so no account-specific ARN is committed.
+  the account; the `ptt-tofu-plan` and `ptt-tofu-apply` roles get `kms:GenerateDataKey` and
+  `kms:Decrypt` (the only calls OpenTofu's `aws_kms` key provider makes) on that key, and only
+  with the encryption context `stack = prod`.
+- `infra/tofu/prod` encrypts both state and saved plans with `key_provider "aws_kms"`
+  (`encryption_context = { stack = "prod" }`) and `method "aes_gcm"`, `enforced = true`, and no
+  fallback method. It refers to the key by alias, so no account-specific ARN is committed.
 - Automatic key rotation is off: the key only wraps OpenTofu's per-run data keys and its material
   never leaves KMS, so rotation adds cost (each of the first two rotations adds $1/month) for
   little benefit here. It can be turned on later without re-encrypting anything.
