@@ -1,10 +1,10 @@
 # Copy to terraform.tfvars (git-ignored) for a local run and fill in real values. This repository
 # is public: never commit the real file.
 #
-# CI does not use this file. It passes the same values from GitHub Actions variables
-# (TOFU_ZONE_NAME -> TF_VAR_zone_name, TOFU_RECORD_NAME -> TF_VAR_record_name,
-# TOFU_ADMIN_USERS -> TF_VAR_admin_users) and, only when (re)creating the server,
-# tailscale_auth_key from a secret (TF_VAR_tailscale_auth_key).
+# CI does not use this file. It passes the same values from GitHub Actions secrets (secrets,
+# not variables, so they are masked in public logs): TOFU_ZONE_NAME -> TF_VAR_zone_name,
+# TOFU_RECORD_NAME -> TF_VAR_record_name, TOFU_ADMIN_USERS -> TF_VAR_admin_users, and, only
+# when (re)creating the server, a Tailscale auth key -> TF_VAR_tailscale_auth_key.
 #
 # Never put the Vultr API key or AWS credentials here: they come from the environment
 # (VULTR_API_KEY, AWS_PROFILE / OIDC).
@@ -58,9 +58,6 @@ admin_users = [
 
 # Tags on the Vultr instance.
 # tags = ["ptt", "prod", "managed-by-opentofu"]
-
-# AWS provider region (Route 53 is global).
-# aws_region = "us-west-2"
 
 # TTL of the A/AAAA records, in seconds.
 # dns_ttl = 300

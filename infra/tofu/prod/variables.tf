@@ -30,7 +30,7 @@ variable "hostname" {
 }
 
 variable "backup_hour_utc" {
-  description = "UTC hour (0-23) for Vultr's daily automatic backup. 10 = 02:00 PST / 03:00 PDT, at or after the nightly 02:00 Pacific SQLite snapshot and before the 04:00 Pacific reboot window."
+  description = "UTC hour (0-23) for Vultr's daily automatic backup. 10 = 03:00 PDT / 02:00 PST: after the nightly 02:00 Pacific SQLite snapshot in summer, but the same hour as the snapshot in winter (PST), when a backup that starts at 02:00 may miss that night's snapshot and contain the previous one (the live WAL database is still crash-consistent). 11 would collide with the 04:00 PDT reboot window."
   type        = number
   default     = 10
 
@@ -56,6 +56,8 @@ variable "admin_users" {
     name            = string
     ssh_public_keys = list(string)
   }))
+  # Not secret, but identifying (user names, key comments); keeps them out of public CI logs.
+  sensitive = true
 
   validation {
     condition     = length(var.admin_users) > 0
@@ -93,14 +95,8 @@ variable "tailscale_auth_key" {
 
 # ---- DNS -----------------------------------------------------------------------------------
 
-variable "aws_region" {
-  description = "AWS region for the provider (Route 53 itself is global)."
-  type        = string
-  default     = "us-west-2"
-}
-
 # zone_name and record_name have no defaults on purpose: this repository is public, so real
-# values live in a git-ignored terraform.tfvars locally and in GitHub Actions variables in CI.
+# values live in a git-ignored terraform.tfvars locally and in GitHub Actions secrets in CI.
 
 variable "zone_name" {
   description = "Existing public Route 53 hosted zone, read as a data source, e.g. example.com."

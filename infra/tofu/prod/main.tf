@@ -40,9 +40,10 @@ resource "vultr_firewall_rule" "public" {
 # (reserved_ip_id below), so the OS configures it automatically. prevent_destroy guards against
 # losing the address by accident.
 #
-# IPv6 is not reserved: Vultr allows one reserved IP as the main IP, and an extra reserved /64
-# would need manual network configuration in the OS. The AAAA record follows the instance's
-# own IPv6 address instead and OpenTofu updates it on a rebuild (TTL 300 s).
+# IPv6 is not reserved (docs/adr/0004-ipv6-not-reserved.md): Vultr allows one reserved IP as
+# the main IP, and an extra reserved /64 would need manual network configuration in the OS. The
+# AAAA record follows the instance's own IPv6 address instead and OpenTofu updates it on a
+# rebuild (TTL 300 s).
 
 resource "vultr_reserved_ip" "v4" {
   region  = var.region
