@@ -17,8 +17,9 @@ import (
 
 const (
 	preMigratePrefix = "pre-migrate-"
-	// snapshotTimeFormat is fixed-width UTC, so file names sort chronologically.
-	snapshotTimeFormat = "20060102T150405Z"
+	// snapshotTimeFormat is fixed-width UTC, so file names sort chronologically. Millisecond
+	// precision lets a forced snapshot follow another within the same second.
+	snapshotTimeFormat = "20060102T150405.000Z"
 	// PreMigrateKeep is how many of the newest pre-migration snapshots are always retained.
 	PreMigrateKeep = 5
 	// PreMigrateKeepVersions is how many distinct schema versions keep their first (oldest)
@@ -68,14 +69,20 @@ func (m *Migrator) SnapshotIfPending(ctx context.Context, snapshotDir string, no
 	if err != nil || current == 0 {
 		return "", err
 	}
-	return m.SnapshotNow(ctx, snapshotDir, now)
+	return m.snapshot(ctx, snapshotDir, now, true)
 }
 
-// SnapshotNow writes a pre-migration snapshot of the database at its current version and
-// prunes old ones. If a snapshot at the current version was taken within SnapshotReuseWindow,
-// that one is returned instead. It is also used before destructive operations such as
-// migrate down.
-func (m *Migrator) SnapshotNow(ctx context.Context, snapshotDir string, now time.Time) (string, error) {
+// SnapshotFresh always writes a new snapshot of the database at its current version (never
+// reusing a recent one) and prunes old ones. Use it before destructive operations such as
+// migrate down, where a reused copy could miss writes made since it was taken.
+func (m *Migrator) SnapshotFresh(ctx context.Context, snapshotDir string, now time.Time) (string, error) {
+	return m.snapshot(ctx, snapshotDir, now, false)
+}
+
+// snapshot writes a pre-migration snapshot at the current version and prunes old ones. With
+// reuse, a snapshot at the current version taken within SnapshotReuseWindow is returned
+// instead, so a crash-looping upgrade doesn't churn through snapshots.
+func (m *Migrator) snapshot(ctx context.Context, snapshotDir string, now time.Time, reuse bool) (string, error) {
 	current, _, err := m.Versions(ctx)
 	if err != nil {
 		return "", err
@@ -87,6 +94,9 @@ func (m *Migrator) SnapshotNow(ctx context.Context, snapshotDir string, now time
 		return "", fmt.Errorf("list snapshots: %w", err)
 	}
 	for _, s := range slices.Backward(existing) {
+		if !reuse {
+			break
+		}
 		if s.version != current {
 			continue
 		}

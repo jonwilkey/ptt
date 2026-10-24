@@ -237,7 +237,7 @@ func TestMigrateCommands(t *testing.T) {
 	}
 	// down keeps a copy of what it is about to drop.
 	snaps, err := os.ReadDir(vars[config.EnvSnapshotDir])
-	if err != nil || len(snaps) != 1 || snaps[0].Name() != "pre-migrate-20261024T150405Z-v1.db" {
+	if err != nil || len(snaps) != 1 || snaps[0].Name() != "pre-migrate-20261024T150405.000Z-v1.db" {
 		t.Fatalf("snapshots after down = %v, %v", snaps, err)
 	}
 	if r := run(t, vars, "migrate", "down"); r.code != 1 || !strings.Contains(r.stderr, "no migrations are applied") {

@@ -207,7 +207,7 @@ func migrate(ctx context.Context, args []string, env Env) error {
 		if current == 0 {
 			return errors.New("migrate down: no migrations are applied")
 		}
-		if _, err := m.SnapshotNow(ctx, cfg.SnapshotDir, env.Now()); err != nil {
+		if _, err := m.SnapshotFresh(ctx, cfg.SnapshotDir, env.Now()); err != nil {
 			return err
 		}
 		return m.Down(ctx)

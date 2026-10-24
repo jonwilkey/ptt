@@ -75,7 +75,7 @@ func TestMigrateUpSnapshotsExistingDatabaseWithPendingMigrations(t *testing.T) {
 		t.Fatalf("MigrateUp: %v", err)
 	}
 
-	wantName := "pre-migrate-20261024T150405Z-v1.db"
+	wantName := "pre-migrate-20261024T150405.000Z-v1.db"
 	if oldVersion != 1 {
 		t.Fatalf("test assumes the embedded migrations end at version 1, got %d; update wantName", oldVersion)
 	}
@@ -191,11 +191,11 @@ func migratedTemp(t *testing.T) *Migrator {
 func TestSnapshotNowSameSecondReuses(t *testing.T) {
 	m := migratedTemp(t)
 	snapDir := filepath.Join(t.TempDir(), "snapshots")
-	first, err := m.SnapshotNow(t.Context(), snapDir, testNow)
+	first, err := m.snapshot(t.Context(), snapDir, testNow, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := m.SnapshotNow(t.Context(), snapDir, testNow)
+	second, err := m.snapshot(t.Context(), snapDir, testNow, true)
 	if err != nil {
 		t.Fatalf("same-second restart: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestSnapshotNowCrashLoopWithinWindowKeepsOne(t *testing.T) {
 	snapDir := filepath.Join(t.TempDir(), "snapshots")
 	var first string
 	for i := range 7 {
-		p, err := m.SnapshotNow(t.Context(), snapDir, testNow.Add(time.Duration(i)*time.Minute))
+		p, err := m.snapshot(t.Context(), snapDir, testNow.Add(time.Duration(i)*time.Minute), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +230,7 @@ func TestSnapshotNowSameVersionKeepsFirst(t *testing.T) {
 	var made []string
 	// Spaced beyond the reuse window, so every call writes a new file.
 	for i := range 7 {
-		p, err := m.SnapshotNow(t.Context(), snapDir, testNow.Add(time.Duration(i)*(SnapshotReuseWindow+time.Minute)))
+		p, err := m.snapshot(t.Context(), snapDir, testNow.Add(time.Duration(i)*(SnapshotReuseWindow+time.Minute)), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -239,5 +239,50 @@ func TestSnapshotNowSameVersionKeepsFirst(t *testing.T) {
 	want := append([]string{made[0]}, made[2:]...)
 	if got := listDir(t, snapDir); !slices.Equal(got, want) {
 		t.Fatalf("kept %v, want first plus newest five %v", got, want)
+	}
+}
+
+func TestSnapshotFreshNeverReuses(t *testing.T) {
+	m := migratedTemp(t)
+	ctx := t.Context()
+	snapDir := filepath.Join(t.TempDir(), "snapshots")
+
+	// A startup snapshot exists and is well inside the reuse window...
+	reused, err := m.snapshot(ctx, snapDir, testNow, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ...then data changes before an operator runs migrate down.
+	if _, err := m.db.ExecContext(ctx, `INSERT INTO users (id, display_name, created_at) VALUES ('u2', 'Parent Two', 2)`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same second, even: the forced snapshot must still be new and include the write.
+	fresh, err := m.SnapshotFresh(ctx, snapDir, testNow.Add(time.Millisecond))
+	if err != nil {
+		t.Fatalf("SnapshotFresh: %v", err)
+	}
+	if fresh == reused {
+		t.Fatalf("SnapshotFresh reused %q", reused)
+	}
+	if got := listDir(t, snapDir); len(got) != 2 {
+		t.Fatalf("snapshot dir = %v, want both snapshots", got)
+	}
+	func() {
+		sdb, err := Open(ctx, fresh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = sdb.Close() }()
+		var n int
+		if err := sdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE id = 'u2'`).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("fresh snapshot missing the latest write: n=%d err=%v", n, err)
+		}
+	}()
+
+	// The upgrade path still reuses the recent snapshot.
+	again, err := m.snapshot(ctx, snapDir, testNow.Add(time.Minute), true)
+	if err != nil || again != fresh {
+		t.Fatalf("reuse after fresh = %q, %v; want %q", again, err, fresh)
 	}
 }
