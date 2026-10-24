@@ -21,15 +21,17 @@ in front of `pttd`. See `docs/spec.md` ("Infrastructure as code" › "Runtime" a
   the compose network; port 9090 (`/metrics`, `/internal/status`) is published on the host's
   `127.0.0.1` only. On SIGTERM it drains for 15 s; compose waits 20 s.
 - **Caddy** (official image, pinned by digest) publishes TCP 80 and 443. It also runs with a
-  read-only root filesystem, all capabilities dropped except `NET_BIND_SERVICE`, and
-  `no-new-privileges`. Certificates and the ACME account live in `/opt/ptt/caddy/data`, which
-  survives container recreation. Decisions in the `Caddyfile`:
+  read-only root filesystem, all capabilities dropped, and `no-new-privileges`; Docker lets
+  containers bind ports below 1024 without `NET_BIND_SERVICE`. On stop it lets in-flight
+  requests finish for up to 10 s (compose waits 15 s). Certificates and the ACME account live
+  in `/opt/ptt/caddy/data`, which survives container recreation. Decisions in the `Caddyfile`:
   - TLS 1.3 only; certificates only from Let's Encrypt (no ZeroSSL fallback), because the app
     trusts only ISRG Root X1 and X2.
   - HTTP/3 is off: it needs UDP 443, which the firewalls do not allow.
   - No `log` directive, so no access log. Caddy's own logs (startup, certificates, errors) go to
-    the Docker log; a request that fails inside Caddy (for example a 502 while `pttd` is down)
-    is logged with its client address, with credentials redacted.
+    the Docker log, through a filter: an error entry for a request (for example a 502 while
+    `pttd` is down) keeps only the method, host, status, duration, and error, with no client
+    address or path.
   - The admin API is off; the healthcheck uses a plain-HTTP listener on the container's
     loopback (`127.0.0.1:8081`), which is not published.
   - `/metrics` and `/internal/*` are answered with a JSON 404 by Caddy itself, in addition to
@@ -38,8 +40,8 @@ in front of `pttd`. See `docs/spec.md` ("Infrastructure as code" › "Runtime" a
     client address.
 - **IPv6.** The Docker daemon runs with `userland-proxy: false`, so published ports are DNATed and
   Caddy sees real client addresses. Docker then forwards IPv6 to a container only if its network
-  has IPv6, so the project network sets `enable_ipv6: true`. Docker Engine 27 and later assigns
-  it a ULA `/64` automatically.
+  has IPv6, so the project network sets `enable_ipv6: true`. Docker Engine 28 or later (the
+  minimum) assigns it a ULA `/64` automatically.
 
 ## Variables
 
@@ -56,7 +58,7 @@ Compose reads `.env` next to `compose.yaml` (see `.env.example`):
 
 ## Running it locally
 
-Needs Docker Engine 27+ with the compose plugin, and ports 80 and 443 free.
+Needs Docker Engine 28+ with the compose plugin, and ports 80 and 443 free.
 
 ```sh
 docker buildx build --load -t ptt/pttd:ci server/
@@ -93,7 +95,9 @@ sudo docker compose -f /opt/ptt/compose.yaml exec pttd /pttd admin status
 curl -fsS http://127.0.0.1:9090/metrics   # on the host only
 ```
 
-After a deploy, from anywhere: `deploy/smoke.sh https://<domain>`.
+After a deploy, from anywhere: `deploy/smoke.sh https://<domain>`. Add
+`--cacert isrg-roots.pem`, a bundle of ISRG Root X1 and X2 from
+<https://letsencrypt.org/certificates/>, to trust only what the app trusts.
 
 ### Restoring a SQLite snapshot
 

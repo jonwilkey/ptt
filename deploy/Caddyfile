@@ -12,6 +12,24 @@
 	# Only matters under `tls internal`: clients are given the CA explicitly instead.
 	skip_install_trust
 
+	# Shutdown: let in-flight requests finish, inside compose's stop_grace_period.
+	grace_period 10s
+
+	# Errors only, without client identity or request paths (spec: logs hold no page records).
+	log default {
+		output stderr
+		format filter {
+			fields {
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>uri delete
+				request>headers delete
+				request>tls delete
+			}
+		}
+	}
+
 	servers {
 		# HTTP/3 needs UDP 443, which the firewalls do not allow.
 		protocols h1 h2

@@ -43,9 +43,10 @@ services:
     # Renovate keeps the tag and digest current.
     image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
     read_only: true
-    # Caddy runs as root inside its container but needs only to bind 80 and 443.
+    # Caddy runs as root inside its container but needs no capabilities: Docker sets
+    # net.ipv4.ip_unprivileged_port_start=0 in container network namespaces, so binding 80 and
+    # 443 needs no NET_BIND_SERVICE.
     cap_drop: [ALL]
-    cap_add: [NET_BIND_SERVICE]
     security_opt: [no-new-privileges:true]
     environment:
       PTT_DOMAIN: ${PTT_DOMAIN:?PTT_DOMAIN must be set to the public hostname}
@@ -77,11 +78,14 @@ services:
     depends_on:
       pttd:
         condition: service_healthy
+    # The Caddyfile's grace_period (10 s) lets in-flight requests finish first.
+    stop_grace_period: 15s
     restart: unless-stopped
 
 networks:
   default:
     # Required: the daemon runs with userland-proxy off, so Docker forwards IPv6 to a published
     # port only when the container's network has IPv6 (and Caddy then sees real client
-    # addresses). Docker Engine 27+ assigns a ULA /64 automatically when no subnet is given.
+    # addresses). Docker Engine 28+ (the minimum) assigns a ULA /64 automatically when no
+    # subnet is given.
     enable_ipv6: true

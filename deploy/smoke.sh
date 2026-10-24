@@ -7,7 +7,10 @@
 #   --resolve <host:port:addr> Connect to addr instead of resolving host (curl --resolve), e.g.
 #                              ptt.example.com:443:127.0.0.1 or ptt.example.com:443:[::1].
 #                              The same address is used for the plain-HTTP check.
-#   --cacert <file>            Trust this CA (e.g. Caddy's local CA under `tls internal`)
+#   --cacert <file>            Trust only the CAs in this file: Caddy's local CA under
+#                              `tls internal`, or, for production, a bundle of ISRG Root X1
+#                              and X2 (https://letsencrypt.org/certificates/), which matches
+#                              what the app trusts. Default: the system trust store.
 #   --insecure                 Skip certificate verification (last resort for local runs)
 #   --http-port <port>         Port of the plain-HTTP listener (default 80)
 #
@@ -78,6 +81,8 @@ if [[ ! "$base_url" =~ ^https://([^/:]+|\[[0-9a-fA-F:]+\])(:([0-9]+))?$ ]]; then
 	exit 2
 fi
 host="${BASH_REMATCH[1]}"
+# An explicit :443 is dropped so base_url matches the redirect target Caddy sends.
+[ "${BASH_REMATCH[3]}" != 443 ] || base_url="https://$host"
 
 curl_base=(--silent --show-error --connect-timeout 5 --max-time 15 --proto '=https,http')
 http_resolve=()
@@ -85,6 +90,10 @@ if [ -n "$resolve" ]; then
 	# host:port:addr; addr may be a bracketed IPv6 address containing colons.
 	if [[ ! "$resolve" =~ ^([^:]+):([0-9]+):(.+)$ ]]; then
 		echo "smoke: --resolve must be host:port:addr, got '$resolve'" >&2
+		exit 2
+	fi
+	if [ "${BASH_REMATCH[1]}" != "$host" ]; then
+		echo "smoke: --resolve host '${BASH_REMATCH[1]}' does not match the base_url host '$host'" >&2
 		exit 2
 	fi
 	curl_base+=(--resolve "$resolve")
@@ -143,14 +152,14 @@ else
 	fail "HSTS: want Strict-Transport-Security with max-age >= 31536000, got '${hsts}'"
 fi
 
-# 3. TLS 1.2 and older are refused. Only a failed handshake counts: not resolving, not connecting,
-# or timing out (curl exit 6, 7, 28) proves nothing.
+# 3. TLS 1.2 and older are refused. Only a failed handshake (curl exit 35) counts as refused;
+# any other failure (not resolving, not connecting, timing out, ...) proves nothing.
 rc=0
 curl "${https[@]}" --tlsv1 --tls-max 1.2 --output /dev/null "$base_url/healthz" 2> "$tmp/tls12.err" || rc=$?
 case "$rc" in
 0) fail "TLS 1.2: handshake succeeded, want it refused" ;;
-6 | 7 | 28) fail "TLS 1.2: could not test, curl exit $rc $(curl_error tls12)" ;;
-*) pass "TLS 1.2 refused ($(curl_error tls12))" ;;
+35) pass "TLS 1.2 refused ($(curl_error tls12))" ;;
+*) fail "TLS 1.2: could not test, curl exit $rc $(curl_error tls12)" ;;
 esac
 
 # 4. Unknown paths are a JSON 404, and 5. the internal endpoints are not exposed.
@@ -176,10 +185,11 @@ else
 fi
 code="$(request redirect "${curl_base[@]}" "${http_resolve[@]}" "$http_url/healthz")"
 location="$(header redirect location)"
-if [[ "$code" =~ ^30[178]$ ]] && [[ "$location" == "https://$host"* ]]; then
+# base_url carries the HTTPS port when it is not 443, so the target must match it exactly.
+if [[ "$code" =~ ^30[178]$ ]] && [[ "$location" == "$base_url/"* ]]; then
 	pass "$http_url redirects ($code) to $location"
 else
-	fail "$http_url/healthz: want a redirect to https://$host, got $code location='$location' $(curl_error redirect)"
+	fail "$http_url/healthz: want a redirect to $base_url/, got $code location='$location' $(curl_error redirect)"
 fi
 
 if [ "$failures" -gt 0 ]; then
