@@ -2,6 +2,13 @@
 #   bootstrap/terraform.tfstate  this module (admins only; CI roles cannot read it)
 #   prod/terraform.tfstate       infra/tofu/prod, encrypted by OpenTofu with the KMS key below
 
+# Hardcoded on purpose and repeated, with the same values, in versions.tf (backend) and in
+# prod/versions.tf (backend and KMS key provider). Change all of them together.
+locals {
+  region          = "us-west-2"
+  state_kms_alias = "alias/ptt-tofu-state"
+}
+
 data "aws_caller_identity" "current" {}
 
 data "aws_partition" "current" {}
@@ -175,6 +182,6 @@ resource "aws_kms_key" "state" {
 }
 
 resource "aws_kms_alias" "state" {
-  name          = var.state_kms_alias
+  name          = local.state_kms_alias
   target_key_id = aws_kms_key.state.key_id
 }

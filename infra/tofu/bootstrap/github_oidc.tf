@@ -1,8 +1,9 @@
 # GitHub Actions authenticates to AWS with short-lived OIDC tokens; no AWS keys are stored
 # anywhere. Two roles:
-#   ptt-tofu-plan   any ref or PR of the repo: read prod state, take the lock, read Route 53.
+#   ptt-tofu-plan   only pull_request jobs and pushes to main of the repo: read prod state,
+#                   take the lock, read Route 53. Fork PRs never get an OIDC token.
 #   ptt-tofu-apply  only jobs in the "production" environment (approval required): write prod
-#                   state and change the ptt A/AAAA records. Nothing else in the account.
+#                   state and change the server's A/AAAA records. Nothing else in the account.
 
 locals {
   github_oidc_host = "token.actions.githubusercontent.com"
@@ -60,10 +61,15 @@ data "aws_iam_policy_document" "plan_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
+    # Exact subjects only: PR jobs (sub "...:pull_request") and runs on main. Other branches,
+    # tags, and environments cannot assume this role.
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "${local.github_oidc_host}:sub"
-      values   = ["repo:${var.github_repository}:*"]
+      values = [
+        "repo:${var.github_repository}:pull_request",
+        "repo:${var.github_repository}:ref:refs/heads/main",
+      ]
     }
   }
 }
@@ -110,11 +116,19 @@ data "aws_iam_policy_document" "common" {
     resources = [local.prod_lock_arn]
   }
 
+  # OpenTofu's aws_kms key provider calls only GenerateDataKey and Decrypt, always with the
+  # encryption context set in prod/versions.tf.
   statement {
     sid       = "StateEncryptionKey"
     effect    = "Allow"
-    actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
     resources = [aws_kms_key.state.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:stack"
+      values   = ["prod"]
+    }
   }
 
   statement {
@@ -189,7 +203,7 @@ data "aws_iam_policy_document" "apply" {
 
 resource "aws_iam_role" "plan" {
   name                 = "ptt-tofu-plan"
-  description          = "GitHub Actions (${var.github_repository}, any ref): tofu plan for infra/tofu/prod"
+  description          = "GitHub Actions (${var.github_repository}, pull requests and main): tofu plan for infra/tofu/prod"
   assume_role_policy   = data.aws_iam_policy_document.plan_trust.json
   max_session_duration = 3600
 }

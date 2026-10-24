@@ -1,7 +1,7 @@
 # Credentials come from the admin's environment (AWS_PROFILE, SSO, or similar), never from files
 # in this repository.
 provider "aws" {
-  region = var.region
+  region = local.region
 
   default_tags {
     tags = {

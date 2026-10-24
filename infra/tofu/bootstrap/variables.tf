@@ -1,5 +1,9 @@
 # Deployment-specific values (repository, bucket, domain) have no defaults on purpose: this
 # repository is public, so real values live only in a git-ignored terraform.tfvars.
+#
+# The AWS region and the KMS alias are not variables: they are literals here (locals in
+# state.tf) and in prod/versions.tf and both backend blocks, which cannot use resources, so a
+# single hardcoded value keeps them consistent.
 
 variable "github_repository" {
   description = "GitHub repository (owner/name) whose Actions workflows may assume the OpenTofu roles."
@@ -18,19 +22,13 @@ variable "github_apply_environment" {
 }
 
 variable "state_bucket_name" {
-  description = "Globally unique name of the S3 bucket holding OpenTofu state. Use the same value as `bucket` in infra/tofu/backend.hcl and the TOFU_STATE_BUCKET Actions variable."
+  description = "Globally unique name of the S3 bucket holding OpenTofu state. Use the same value as `bucket` in infra/tofu/backend.hcl and the TOFU_STATE_BUCKET Actions secret."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.state_bucket_name))
     error_message = "state_bucket_name must be a valid S3 bucket name."
   }
-}
-
-variable "region" {
-  description = "AWS region for the state bucket and the KMS key. Must match `region` in both backend blocks and the KMS key provider in prod/versions.tf."
-  type        = string
-  default     = "us-west-2"
 }
 
 variable "zone_name" {
@@ -45,17 +43,6 @@ variable "record_name" {
   validation {
     condition     = can(regex("^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$", var.record_name))
     error_message = "record_name must be a lower-case fully qualified domain name without a trailing dot."
-  }
-}
-
-variable "state_kms_alias" {
-  description = "Alias of the KMS key used by OpenTofu state encryption. prod/versions.tf refers to it by this name."
-  type        = string
-  default     = "alias/ptt-tofu-state"
-
-  validation {
-    condition     = startswith(var.state_kms_alias, "alias/")
-    error_message = "state_kms_alias must start with \"alias/\"."
   }
 }
 

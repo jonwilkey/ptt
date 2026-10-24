@@ -3,5 +3,5 @@
 #   tofu -chdir=bootstrap init -backend-config=../backend.hcl
 #   tofu -chdir=prod init -backend-config=../backend.hcl
 # Each module sets its own key (bootstrap/... or prod/...) and the region in its versions.tf.
-# CI passes the same value with -backend-config="bucket=${{ vars.TOFU_STATE_BUCKET }}".
+# CI passes the same value from the TOFU_STATE_BUCKET secret with -backend-config="bucket=...".
 bucket = "example-ptt-tofu-state"
