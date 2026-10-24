@@ -301,7 +301,7 @@ Every piece of infrastructure is declared in the repo, so the whole server can b
 **Repository layout (one monorepo)**
 
 ```
-family-ptt/
+ptt/
   android/              Android app (Gradle)
   server/               Go service pttd, migrations, sqlc queries
   deploy/               compose.yaml, Caddyfile, env templates
