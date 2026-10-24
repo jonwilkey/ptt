@@ -1,0 +1,9 @@
+---
+# The single production host, reached over the tailnet by its MagicDNS name. The SSH
+# login is not set here: admins connect as themselves, CI passes `-u deploy`.
+all:
+  children:
+    prod:
+      hosts:
+        ptt-prod:
+          ansible_host: ptt-prod

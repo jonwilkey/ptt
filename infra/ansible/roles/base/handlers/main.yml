@@ -1,0 +1,31 @@
+---
+# Handlers run in the order listed here, whatever order they were notified in.
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Check the full sshd configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  listen: Restart ssh
+
+# Debian's ssh.service uses KillMode=process: open sessions (including Ansible's
+# own connection) survive the restart.
+- name: Restart sshd
+  ansible.builtin.systemd_service:
+    name: ssh.service
+    state: restarted
+  listen: Restart ssh
+
+- name: Reload nftables
+  ansible.builtin.systemd_service:
+    name: nftables.service
+    state: reloaded
+
+- name: Restart apt timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: restarted
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer

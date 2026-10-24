@@ -1,0 +1,12 @@
+---
+# Ansible collections used by the playbooks. Exact versions are pinned so CI and
+# laptops resolve the same code; Renovate (ansible-galaxy manager) bumps them.
+collections:
+  - name: ansible.posix
+    version: 2.2.2
+  - name: community.general
+    version: 13.5.0
+  - name: community.docker
+    version: 5.4.0
+  - name: community.sops
+    version: 2.5.0

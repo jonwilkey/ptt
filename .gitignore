@@ -55,6 +55,9 @@ override.tofu
 *.plain.*
 *.agekey
 
+# ---- Ansible: deployment-specific values (site.yml.example is committed) ----
+infra/ansible/inventory/group_vars/prod/site.yml
+
 # ---- IDE / OS ----
 .idea/
 *.iml

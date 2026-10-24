@@ -1,0 +1,43 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+#
+# Host firewall. Deliberately NO `flush ruleset`: Docker and Tailscale maintain
+# their own tables, and flushing would delete them. Only our table is replaced:
+# declaring it first makes the delete succeed when it does not exist yet, and the
+# whole file is applied atomically.
+#
+# Only the input hook is filtered. Forwarding is left to Docker; note that ports
+# Docker publishes on a public address are DNATed to containers and pass through
+# forward, not input, so the cloud firewall (TCP 80/443 only) is what limits them.
+
+table inet {{ base_firewall_table }}
+delete table inet {{ base_firewall_table }}
+
+table inet {{ base_firewall_table }} {
+  chain input {
+    type filter hook input priority filter; policy drop;
+
+    ct state established,related accept
+    ct state invalid drop
+    iifname "lo" accept
+
+    # ICMP essentials (errors are also covered by "related" above).
+    meta l4proto icmp icmp type { echo-request, destination-unreachable, time-exceeded, parameter-problem } accept
+    # ICMPv6 essentials, including neighbor discovery and router advertisements
+    # (Vultr IPv6 uses SLAAC).
+    meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-query } accept
+
+    # DHCP replies for the provider-assigned addresses.
+    udp sport 67 udp dport 68 accept
+    ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
+
+    # Public: HTTP (ACME and redirect) and HTTPS, served by Caddy.
+    tcp dport { {{ base_firewall_public_tcp_ports | join(', ') }} } accept
+
+    # Tailscale direct (peer-to-peer) WireGuard connections.
+    udp dport {{ base_firewall_tailscale_udp_port }} accept
+
+    # Tailnet: SSH and the node exporter only.
+    iifname "{{ base_firewall_tailnet_interface }}" tcp dport { {{ base_firewall_tailnet_tcp_ports | join(', ') }} } accept
+  }
+}

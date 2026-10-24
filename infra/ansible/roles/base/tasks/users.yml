@@ -1,0 +1,71 @@
+---
+- name: Create SSH login groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - "{{ base_admin_group }}"
+    - "{{ base_deploy_user }}"
+
+- name: Create admin users
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: ["{{ base_admin_group }}"]
+    append: true
+    shell: /bin/bash
+    create_home: true
+  loop: "{{ base_admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Set admin authorized keys (exclusive)
+  ansible.posix.authorized_key:
+    user: "{{ item.name }}"
+    key: "{{ item.ssh_keys | join('\n') }}"
+    exclusive: true
+    state: present
+  loop: "{{ base_admin_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create the CI deploy user
+  ansible.builtin.user:
+    name: "{{ base_deploy_user }}"
+    group: "{{ base_deploy_user }}"
+    shell: /bin/bash
+    create_home: true
+    comment: CI deploys (Ansible over Tailscale)
+
+- name: Set the deploy user's authorized keys (exclusive)
+  ansible.posix.authorized_key:
+    user: "{{ base_deploy_user }}"
+    key: "{{ base_deploy_ssh_keys | join('\n') }}"
+    key_options: "{{ base_deploy_key_options }}"
+    exclusive: true
+    state: present
+
+- name: Grant passwordless sudo
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ item.file }}"
+    content: |
+      # Managed by Ansible. Accounts have no password (SSH keys only), so sudo
+      # cannot ask for one.
+      {{ item.rule }}
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  loop:
+    - file: 90-ptt-admins
+      rule: "%{{ base_admin_group }} ALL=(ALL:ALL) NOPASSWD: ALL"
+    - file: 90-ptt-deploy
+      rule: "{{ base_deploy_user }} ALL=(ALL:ALL) NOPASSWD: ALL"
+  loop_control:
+    label: "{{ item.file }}"
+
+- name: Remove former admin users
+  ansible.builtin.user:
+    name: "{{ item }}"
+    state: absent
+    remove: false
+  loop: "{{ base_admin_users_removed }}"

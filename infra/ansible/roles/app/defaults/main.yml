@@ -1,0 +1,33 @@
+---
+# Required, no defaults (pass with -e or set in inventory/group_vars/prod/site.yml):
+#   pttd_image: full image reference pinned by digest,
+#               <registry>/<name>@sha256:<64 hex digits>
+#   ptt_domain: public hostname Caddy serves
+# Optional:
+#   ghcr_token: registry token (CI: the job's short-lived GITHUB_TOKEN with
+#               packages:read). When set, the role logs in to ghcr.io before pulling
+#               and logs out afterwards.
+
+app_dir: /opt/ptt
+app_data_dir: /data
+# The pttd container runs as this uid/gid (distroless "nonroot").
+app_container_uid: 65532
+app_container_gid: 65532
+
+# Runtime files copied verbatim from the repository's deploy/ directory.
+app_deploy_src_dir: "{{ playbook_dir }}/../../deploy"
+
+# sops-encrypted files decrypted into {{ app_dir }}/secrets/. Each entry:
+#   {src: <path relative to app_secrets_src_dir>, dest: <file name>}
+# Text files only (the content passes through Ansible as a string).
+app_secrets: []
+app_secrets_src_dir: "{{ playbook_dir }}/../secrets"
+
+app_ghcr_registry: ghcr.io
+# GHCR checks the token, not the user name; any non-empty name works.
+app_ghcr_username: "{{ lookup('ansible.builtin.env', 'GITHUB_ACTOR') | default('ptt-deploy', true) }}"
+
+# Images are pinned by digest, so pulling only when missing is enough, and reruns
+# from a laptop do not need registry credentials.
+app_compose_pull: missing
+app_compose_wait_timeout: 300

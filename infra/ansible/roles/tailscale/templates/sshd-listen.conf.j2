@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Listen only on this node's Tailscale addresses. If the node is re-registered
+# and its addresses change, rerun Ansible (from the Vultr console if SSH is down).
+ListenAddress {{ tailscale_ip4.stdout }}
+ListenAddress {{ tailscale_ip6.stdout }}

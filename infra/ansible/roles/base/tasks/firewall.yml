@@ -1,0 +1,46 @@
+---
+# Docker and Tailscale keep their own nftables/iptables tables. The ruleset below
+# replaces only its own table, so loading it never wipes their chains.
+- name: Install the nftables ruleset
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/sbin/nft -c -f %s
+  notify: Reload nftables
+
+# Debian's nftables.service runs `nft flush ruleset` on stop/restart, which would
+# also delete Docker's and Tailscale's rules. Remove only our table instead.
+- name: Create the nftables service drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/nftables.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Stop nftables.service from flushing the whole ruleset
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nftables.service.d/10-ptt-no-flush.conf
+    content: |
+      # Managed by Ansible. Do not flush Docker's and Tailscale's tables.
+      [Service]
+      ExecStop=
+      ExecStop=-/usr/sbin/nft delete table inet {{ base_firewall_table }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+# Started before the handlers run: a reload of an inactive unit fails. On the
+# first run, starting it loads the new ruleset; the reload is then a no-op.
+- name: Enable and start nftables
+  ansible.builtin.systemd_service:
+    name: nftables.service
+    enabled: true
+    state: started
+
+- name: Apply pending systemd and firewall changes
+  ansible.builtin.meta: flush_handlers

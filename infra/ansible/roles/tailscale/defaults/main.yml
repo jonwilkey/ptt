@@ -1,0 +1,20 @@
+---
+# Pre-authorized, tagged auth key. Only used when the node is not logged in (cloud-init
+# normally joins it already). Pass with -e or from a secret; never commit it.
+tailscale_auth_key: ""
+tailscale_tags:
+  - tag:ptt-server
+tailscale_hostname: ptt-prod
+# The server needs no MagicDNS names, and pointing the host's resolv.conf at
+# 100.100.100.100 can break DNS inside Docker containers (pttd must resolve FCM).
+tailscale_accept_dns: false
+
+tailscale_apt_url: https://pkgs.tailscale.com/stable/debian
+tailscale_codename: "{{ ansible_facts['distribution_release'] }}"
+# Must be the same paths cloud-init (Tailscale's install.sh) uses, or apt fails with
+# "Conflicting values set for option Signed-By".
+tailscale_apt_keyring: /usr/share/keyrings/tailscale-archive-keyring.gpg
+tailscale_apt_source_file: /etc/apt/sources.list.d/tailscale.list
+
+# Make sshd listen only on this node's Tailscale addresses.
+tailscale_ssh_tailnet_only: true

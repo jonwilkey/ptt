@@ -1,0 +1,13 @@
+---
+# Committed, generic settings for the prod group. This repository is public:
+# nothing deployment-specific belongs here (no names, usernames, SSH keys,
+# domains, IPs, or tailnet names) and no secrets.
+#
+# Real values go in the git-ignored ./site.yml next to this file (copy
+# site.yml.example), or come from CI as extra vars built from GitHub Actions
+# variables. The roles assert that every required value is set.
+
+# sops-encrypted files (relative to infra/secrets/) decrypted into
+# /opt/ptt/secrets/<dest>. Each entry: {src: <file in infra/secrets>, dest: <name>}.
+# The FCM service-account key is added in milestone 2.
+app_secrets: []

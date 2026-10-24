@@ -1,0 +1,29 @@
+// {{ ansible_managed }}
+// Loaded after Debian's 50unattended-upgrades and overrides it.
+// Check with: sudo unattended-upgrade --dry-run --debug
+
+// Replace Debian's default origin list: security updates, plus the Tailscale and
+// Docker repositories so those stay patched too.
+#clear Unattended-Upgrade::Origins-Pattern;
+Unattended-Upgrade::Origins-Pattern {
+{% for pattern in base_unattended_origins_patterns %}
+        "{{ pattern }}";
+{% endfor %}
+};
+
+// Keep our edited conffiles (for example /etc/nftables.conf) instead of skipping
+// the upgrade because dpkg would prompt.
+Dpkg::Options {
+        "--force-confdef";
+        "--force-confold";
+};
+
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// Reboot when an update requires it (kernel, libc, ...), at 04:00 local
+// ({{ base_timezone }}), even if someone is logged in.
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "{{ base_unattended_reboot_time }}";
