@@ -57,6 +57,15 @@ func (m *Migrator) Versions(ctx context.Context) (current, latest int64, err err
 	return current, latest, nil
 }
 
+// LatestVersion is the newest migration embedded in the binary; it needs no database access.
+func (m *Migrator) LatestVersion() int64 {
+	var latest int64
+	for _, s := range m.provider.ListSources() {
+		latest = max(latest, s.Version)
+	}
+	return latest
+}
+
 // Pending reports whether any embedded migration has not been applied.
 func (m *Migrator) Pending(ctx context.Context) (bool, error) {
 	pending, err := m.provider.HasPending(ctx)

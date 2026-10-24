@@ -120,7 +120,7 @@ func statusServer(t *testing.T, s httpapi.Status) *httptest.Server {
 func TestAdminStatus(t *testing.T) {
 	srv := statusServer(t, httpapi.Status{
 		Version: "1.2.3", UptimeSeconds: 2*86400 + 3*3600 + 4*60 + 5,
-		ActiveSessions: 0, ActivePages: 2, DBOK: true, SchemaVersion: 1,
+		ActiveSessions: 0, ActivePages: 2, DBOK: true, SchemaVersion: 1, BinarySchemaVersion: 1,
 	})
 	r := run(t, map[string]string{config.EnvInternalAddr: hostPort(srv)}, "admin", "status")
 	if r.code != 0 {
@@ -140,6 +140,14 @@ func TestAdminStatus(t *testing.T) {
 	}
 }
 
+func TestAdminStatusSchemaBehind(t *testing.T) {
+	srv := statusServer(t, httpapi.Status{Version: "1.2.3", DBOK: true, SchemaVersion: 1, BinarySchemaVersion: 2})
+	r := run(t, map[string]string{config.EnvInternalAddr: hostPort(srv)}, "admin", "status")
+	if r.code != 0 || !strings.Contains(r.stdout, "schema version:  1 (BEHIND binary's 2)") {
+		t.Fatalf("admin status = %+v", r)
+	}
+}
+
 func TestAdminStatusDatabaseError(t *testing.T) {
 	srv := statusServer(t, httpapi.Status{Version: "1.2.3", DBOK: false})
 	r := run(t, map[string]string{config.EnvInternalAddr: hostPort(srv)}, "admin", "status")
@@ -149,7 +157,7 @@ func TestAdminStatusDatabaseError(t *testing.T) {
 }
 
 func TestAdminStatusJSON(t *testing.T) {
-	want := httpapi.Status{Version: "1.2.3", UptimeSeconds: 42, ActivePages: 1, DBOK: true, SchemaVersion: 1}
+	want := httpapi.Status{Version: "1.2.3", UptimeSeconds: 42, ActivePages: 1, DBOK: true, SchemaVersion: 1, BinarySchemaVersion: 1}
 	srv := statusServer(t, want)
 	r := run(t, map[string]string{config.EnvInternalAddr: hostPort(srv)}, "admin", "status", "--json")
 	if r.code != 0 {
@@ -181,6 +189,35 @@ func TestMigrateCommands(t *testing.T) {
 		config.EnvDBPath:      filepath.Join(dir, "pttd.db"),
 		config.EnvSnapshotDir: filepath.Join(dir, "snapshots"),
 		config.EnvLogLevel:    "error",
+	}
+
+	// status and down refuse to create a missing database.
+	for _, action := range []string{"status", "down"} {
+		r := run(t, vars, "migrate", action)
+		if r.code != 1 || !strings.Contains(r.stderr, "does not exist") {
+			t.Fatalf("%s on missing db = %+v", action, r)
+		}
+		if _, err := os.Stat(vars[config.EnvDBPath]); !os.IsNotExist(err) {
+			t.Fatalf("%s created the database: %v", action, err)
+		}
+	}
+	nested := map[string]string{config.EnvDBPath: filepath.Join(dir, "no", "such", "dir", "pttd.db")}
+	if r := run(t, nested, "migrate", "status"); r.code != 1 {
+		t.Fatalf("status on missing dir = %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "no")); !os.IsNotExist(err) {
+		t.Fatalf("status created the directory: %v", err)
+	}
+
+	// Create the database, then roll it back to empty so status shows a pending migration.
+	if r := run(t, vars, "migrate", "up"); r.code != 0 {
+		t.Fatalf("up = %+v", r)
+	}
+	if r := run(t, vars, "migrate", "down"); r.code != 0 {
+		t.Fatalf("down to 0 = %+v", r)
+	}
+	if err := os.RemoveAll(vars[config.EnvSnapshotDir]); err != nil {
+		t.Fatal(err)
 	}
 
 	r := run(t, vars, "migrate", "status")

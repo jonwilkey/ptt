@@ -55,7 +55,7 @@ func TestHealthzWithRealDatabase(t *testing.T) {
 	h := a.PublicHandler()
 
 	code, body := get(t, h, "/healthz")
-	if code != http.StatusOK || body["status"] != "ok" || body["version"] != "test" {
+	if code != http.StatusOK || body["status"] != "ok" {
 		t.Fatalf("healthy: %d %v", code, body)
 	}
 
@@ -90,7 +90,7 @@ func TestInternalStatusWithRealDatabase(t *testing.T) {
 	}
 	want := map[string]any{
 		"version": "test", "active_sessions": 0.0, "active_pages": 0.0,
-		"db_ok": true, "schema_version": 1.0,
+		"db_ok": true, "schema_version": 1.0, "binary_schema_version": 1.0,
 	}
 	for k, v := range want {
 		if body[k] != v {

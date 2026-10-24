@@ -50,7 +50,7 @@ func PrintStatus(w io.Writer, s *httpapi.Status) error {
 		{"version", s.Version},
 		{"uptime", formatUptime(time.Duration(s.UptimeSeconds) * time.Second)},
 		{"database", db},
-		{"schema version", fmt.Sprint(s.SchemaVersion)},
+		{"schema version", schemaLine(s)},
 		{"active sessions", fmt.Sprint(s.ActiveSessions)},
 		{"active pages", fmt.Sprint(s.ActivePages)},
 	}
@@ -76,4 +76,15 @@ func formatUptime(d time.Duration) string {
 		return fmt.Sprintf("%dd %s", days, d.Truncate(time.Minute))
 	}
 	return d.String()
+}
+
+func schemaLine(s *httpapi.Status) string {
+	switch {
+	case s.BinarySchemaVersion == 0 || s.SchemaVersion == s.BinarySchemaVersion:
+		return fmt.Sprint(s.SchemaVersion)
+	case s.SchemaVersion < s.BinarySchemaVersion:
+		return fmt.Sprintf("%d (BEHIND binary's %d)", s.SchemaVersion, s.BinarySchemaVersion)
+	default:
+		return fmt.Sprintf("%d (newer than binary's %d; rollback mode)", s.SchemaVersion, s.BinarySchemaVersion)
+	}
 }

@@ -42,14 +42,31 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 }
 
 func TestHealthzHealthy(t *testing.T) {
-	h := NewPublic(PublicOptions{Version: "1.2.3", Health: func(context.Context) error { return nil }})
+	h := NewPublic(PublicOptions{Health: func(context.Context) error { return nil }})
 	rec := do(t, h, http.MethodGet, "/healthz", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	got := decode[HealthResponse](t, rec)
-	if got != (HealthResponse{Status: "ok", Version: "1.2.3"}) {
+	if got != (HealthResponse{Status: "ok"}) {
 		t.Errorf("body = %+v", got)
+	}
+	// The unauthenticated endpoint does not advertise the build.
+	if strings.Contains(rec.Body.String(), "version") {
+		t.Errorf("public healthz exposes a version: %s", rec.Body)
+	}
+}
+
+func TestHealthzHead(t *testing.T) {
+	for name, check := range map[string]HealthFunc{
+		"healthy":   func(context.Context) error { return nil },
+		"unhealthy": func(context.Context) error { return errors.New("down") },
+	} {
+		want := map[string]int{"healthy": http.StatusOK, "unhealthy": http.StatusServiceUnavailable}[name]
+		rec := do(t, NewPublic(PublicOptions{Health: check}), http.MethodHead, "/healthz", nil)
+		if rec.Code != want {
+			t.Errorf("HEAD %s: status %d, want %d", name, rec.Code, want)
+		}
 	}
 }
 
@@ -65,13 +82,13 @@ func TestHealthzUnhealthy(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewPublic(PublicOptions{Version: "dev", Health: func(context.Context) error { return tt.err }})
+			h := NewPublic(PublicOptions{Health: func(context.Context) error { return tt.err }})
 			rec := do(t, h, http.MethodGet, "/healthz", nil)
 			if rec.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503", rec.Code)
 			}
 			got := decode[HealthResponse](t, rec)
-			want := HealthResponse{Status: "unavailable", Version: "dev", Reason: tt.wantReason}
+			want := HealthResponse{Status: "unavailable", Reason: tt.wantReason}
 			if got != want {
 				t.Errorf("body = %+v, want %+v", got, want)
 			}
@@ -116,6 +133,9 @@ func TestMethodNotAllowedIsJSON(t *testing.T) {
 	rec := do(t, h, http.MethodPost, "/healthz", nil)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q, want \"GET, HEAD\"", got)
 	}
 	if got := decode[ErrorResponse](t, rec); got.Error != "method_not_allowed" {
 		t.Errorf("body = %+v", got)
@@ -231,12 +251,14 @@ func TestInternalStatus(t *testing.T) {
 		DBPing:         func(context.Context) error { return nil },
 		SchemaVersion:  func(context.Context) (int64, error) { return 1, nil },
 		ActivePages:    func(context.Context) (int64, error) { return 3, nil },
+
+		BinarySchemaVersion: 2,
 	}
 	rec := do(t, NewInternal(opts), http.MethodGet, "/internal/status", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	want := Status{Version: "1.2.3", UptimeSeconds: 90, ActiveSessions: 0, ActivePages: 3, DBOK: true, SchemaVersion: 1}
+	want := Status{Version: "1.2.3", UptimeSeconds: 90, ActiveSessions: 0, ActivePages: 3, DBOK: true, SchemaVersion: 1, BinarySchemaVersion: 2}
 	if got := decode[Status](t, rec); got != want {
 		t.Errorf("status = %+v, want %+v", got, want)
 	}
@@ -246,7 +268,7 @@ func TestInternalStatus(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"version", "uptime_seconds", "active_sessions", "active_pages", "db_ok", "schema_version"} {
+	for _, k := range []string{"version", "uptime_seconds", "active_sessions", "active_pages", "db_ok", "schema_version", "binary_schema_version"} {
 		if _, ok := raw[k]; !ok {
 			t.Errorf("status JSON missing %q: %s", k, rec.Body)
 		}
@@ -263,13 +285,15 @@ func TestInternalStatusDatabaseDown(t *testing.T) {
 		DBPing:         func(context.Context) error { return down },
 		SchemaVersion:  func(context.Context) (int64, error) { return 0, down },
 		ActivePages:    func(context.Context) (int64, error) { return 0, down },
+
+		BinarySchemaVersion: 1,
 	}
 	rec := do(t, NewInternal(opts), http.MethodGet, "/internal/status", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if got := decode[Status](t, rec); got.DBOK || got.ActivePages != 0 || got.SchemaVersion != 0 {
-		t.Errorf("status = %+v, want db_ok=false and zero db fields", got)
+	if got := decode[Status](t, rec); got.DBOK || got.ActivePages != 0 || got.SchemaVersion != 0 || got.BinarySchemaVersion != 1 {
+		t.Errorf("status = %+v, want db_ok=false, zero db fields, binary version still reported", got)
 	}
 }
 

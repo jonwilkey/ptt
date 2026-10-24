@@ -42,6 +42,8 @@ type Env struct {
 	Now func() time.Time
 }
 
+const healthcheckTimeout = 4 * time.Second
+
 // errUsage marks errors caused by bad arguments; they exit 2 rather than 1.
 var errUsage = errors.New("usage")
 
@@ -143,6 +145,9 @@ func healthcheck(ctx context.Context, args []string, env Env) error {
 		if err != nil {
 			return err
 		}
+		// Under the image's 5 s HEALTHCHECK timeout, so a hung server reports failure itself.
+		ctx, cancel := context.WithTimeout(ctx, healthcheckTimeout)
+		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/healthz", nil)
 		if err != nil {
 			return err
@@ -174,7 +179,12 @@ func migrate(ctx context.Context, args []string, env Env) error {
 		return err
 	}
 	logger := newLogger(env.Stderr, cfg.LogLevel)
-	sqlDB, err := db.Open(ctx, cfg.DBPath)
+	openDB := db.Open
+	if action != "up" {
+		// Inspecting or rolling back must not conjure an empty database at a mistyped path.
+		openDB = db.OpenExisting
+	}
+	sqlDB, err := openDB(ctx, cfg.DBPath)
 	if err != nil {
 		return err
 	}

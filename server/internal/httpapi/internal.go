@@ -19,6 +19,9 @@ type Status struct {
 	ActivePages    int64  `json:"active_pages"`
 	DBOK           bool   `json:"db_ok"`
 	SchemaVersion  int64  `json:"schema_version"`
+	// BinarySchemaVersion is the newest migration this build carries; deploy tooling compares
+	// it with schema_version.
+	BinarySchemaVersion int64 `json:"binary_schema_version"`
 }
 
 // InternalOptions configures the internal handler.
@@ -35,6 +38,8 @@ type InternalOptions struct {
 	DBPing        func(ctx context.Context) error
 	SchemaVersion func(ctx context.Context) (int64, error)
 	ActivePages   func(ctx context.Context) (int64, error)
+	// BinarySchemaVersion is reported as-is.
+	BinarySchemaVersion int64
 }
 
 // NewInternal returns the handler for the internal listener: /metrics and /internal/status.
@@ -50,7 +55,7 @@ func NewInternal(opts InternalOptions) http.Handler {
 	r := chi.NewRouter()
 	r.Use(logRequests(logger), recoverPanics(logger), limitBody(DefaultMaxBodyBytes))
 	r.NotFound(notFound)
-	r.MethodNotAllowed(methodNotAllowed)
+	r.MethodNotAllowed(methodNotAllowed(r))
 
 	r.Method(http.MethodGet, "/metrics", promhttp.HandlerFor(opts.Registry, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
@@ -65,9 +70,10 @@ func status(opts InternalOptions, logger *slog.Logger) http.HandlerFunc {
 		defer cancel()
 
 		s := Status{
-			Version:       opts.Version,
-			UptimeSeconds: int64(opts.Now().Sub(opts.Started).Seconds()),
-			DBOK:          true,
+			Version:             opts.Version,
+			UptimeSeconds:       int64(opts.Now().Sub(opts.Started).Seconds()),
+			DBOK:                true,
+			BinarySchemaVersion: opts.BinarySchemaVersion,
 		}
 		if opts.ActiveSessions != nil {
 			s.ActiveSessions = opts.ActiveSessions()

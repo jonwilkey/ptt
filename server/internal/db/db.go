@@ -64,6 +64,22 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenExisting is Open for inspection commands: it fails instead of creating the database (or
+// its directory) when nothing exists at path.
+func OpenExisting(ctx context.Context, path string) (*sql.DB, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("database %s does not exist", path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stat database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("database %s is not a regular file", path)
+	}
+	return Open(ctx, path)
+}
+
 func verify(ctx context.Context, db *sql.DB) error {
 	var mode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {

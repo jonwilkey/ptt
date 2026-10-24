@@ -63,7 +63,7 @@ pattern, status, duration).
 | --- | --- |
 | `pttd serve` (or no command) | Open the DB, snapshot if migrations are pending on an existing DB, migrate, serve; SIGTERM/SIGINT drains for up to 15 s |
 | `pttd healthcheck` | Exit 0 if `GET /healthz` on the local public listener returns 200 (the image's `HEALTHCHECK`) |
-| `pttd migrate up\|down\|status` | Manage the schema of `PTTD_DB_PATH`; `up` and `down` (one step) snapshot first |
+| `pttd migrate up\|down\|status` | Manage the schema of `PTTD_DB_PATH`; `up` and `down` (one step) snapshot first; `status` and `down` refuse to create a missing database |
 | `pttd admin status [--json]` | Summary from the running server's `/internal/status` |
 | `pttd version` | Print the version (set with `-ldflags "-X main.version=..."`) |
 
@@ -71,14 +71,15 @@ Inside the container: `docker compose exec pttd /pttd admin status`.
 
 ## Endpoints
 
-- `GET /healthz` (public): `200 {"status":"ok","version":...}` when the database answers and the
+- `GET`/`HEAD /healthz` (public): `200 {"status":"ok"}` when the database answers and the
   schema is migrated; otherwise `503` with a short `reason` (`database_unavailable`,
-  `schema_outdated`). A schema newer than the binary counts as healthy, because migrations are
-  expand-then-contract and a rollback must keep serving. Every other public path is a JSON 404.
+  `schema_outdated`). It does not reveal the version. A schema newer than the binary counts as
+  healthy, because migrations are expand-then-contract and a rollback must keep serving. Every
+  other public path is a JSON 404 (or a JSON 405 with `Allow`).
 - `GET /metrics` (internal): Go and process collectors, `pttd_build_info{version}`,
   `pttd_active_sessions` (0 until milestone 4; deploys wait for it to be 0). No per-person labels.
 - `GET /internal/status` (internal): `{version, uptime_seconds, active_sessions, active_pages,
-  db_ok, schema_version}`.
+  db_ok, schema_version, binary_schema_version}`.
 
 ## Migrations and snapshots
 
@@ -88,8 +89,10 @@ all of them to an empty database, rolls back to zero, and applies them again, so
 section must work.
 
 Before migrating a database that already has a schema, `pttd` writes
-`$PTTD_SNAPSHOT_DIR/pre-migrate-<UTC timestamp>-v<version>.db` with `VACUUM INTO` and keeps the
-newest five. To restore one, stop `pttd`, copy the snapshot over `pttd.db`, and delete
+`$PTTD_SNAPSHOT_DIR/pre-migrate-<UTC timestamp>-v<version>.db` with `VACUUM INTO`. If a
+snapshot at the same version is less than 10 minutes old (a crash-looping restart), it is reused
+instead. Retention keeps the newest five plus the oldest snapshot of each of the five highest
+schema versions, so restarts never rotate out the true pre-deploy copy. To restore one, stop `pttd`, copy the snapshot over `pttd.db`, and delete
 `pttd.db-wal` and `pttd.db-shm` before starting the older image.
 
 SQLite runs with `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`,

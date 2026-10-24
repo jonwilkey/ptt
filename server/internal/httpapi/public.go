@@ -30,18 +30,17 @@ type UnhealthyError struct {
 func (e *UnhealthyError) Error() string { return e.Reason + ": " + e.Err.Error() }
 func (e *UnhealthyError) Unwrap() error { return e.Err }
 
-// HealthResponse is the /healthz body.
+// HealthResponse is the /healthz body. It deliberately omits the version: the endpoint is
+// unauthenticated, and the version is available on the internal listener.
 type HealthResponse struct {
-	Status  string `json:"status"`
-	Version string `json:"version"`
-	Reason  string `json:"reason,omitempty"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // PublicOptions configures the public handler.
 type PublicOptions struct {
-	Version string
-	Logger  *slog.Logger
-	Health  HealthFunc
+	Logger *slog.Logger
+	Health HealthFunc
 	// MaxBodyBytes defaults to DefaultMaxBodyBytes.
 	MaxBodyBytes int64
 	// HealthTimeout bounds each health check; defaults to 3 s.
@@ -58,21 +57,24 @@ func NewPublic(opts PublicOptions) http.Handler {
 	if maxBody <= 0 {
 		maxBody = DefaultMaxBodyBytes
 	}
-
-	r := chi.NewRouter()
-	r.Use(logRequests(logger), recoverPanics(logger), limitBody(maxBody))
-	r.NotFound(notFound)
-	r.MethodNotAllowed(methodNotAllowed)
-
 	timeout := opts.HealthTimeout
 	if timeout <= 0 {
 		timeout = healthTimeout
 	}
-	r.Get("/healthz", healthz(opts.Version, opts.Health, timeout, logger))
+
+	r := chi.NewRouter()
+	r.Use(logRequests(logger), recoverPanics(logger), limitBody(maxBody))
+	r.NotFound(notFound)
+	r.MethodNotAllowed(methodNotAllowed(r))
+
+	health := healthz(opts.Health, timeout, logger)
+	r.Get("/healthz", health)
+	// net/http drops the body for HEAD; uptime probes often use it.
+	r.Head("/healthz", health)
 	return r
 }
 
-func healthz(version string, check HealthFunc, timeout time.Duration, logger *slog.Logger) http.HandlerFunc {
+func healthz(check HealthFunc, timeout time.Duration, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
@@ -91,9 +93,9 @@ func healthz(version string, check HealthFunc, timeout time.Duration, logger *sl
 			}
 			logger.LogAttrs(r.Context(), slog.LevelWarn, "health check failed",
 				slog.String("reason", reason), slog.String("error", err.Error()))
-			writeJSON(w, http.StatusServiceUnavailable, HealthResponse{Status: "unavailable", Version: version, Reason: reason})
+			writeJSON(w, http.StatusServiceUnavailable, HealthResponse{Status: "unavailable", Reason: reason})
 			return
 		}
-		writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", Version: version})
+		writeJSON(w, http.StatusOK, HealthResponse{Status: "ok"})
 	}
 }

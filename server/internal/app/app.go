@@ -66,9 +66,8 @@ func (a *App) Health(ctx context.Context) error {
 // PublicHandler serves the public API.
 func (a *App) PublicHandler() http.Handler {
 	return httpapi.NewPublic(httpapi.PublicOptions{
-		Version: a.version,
-		Logger:  a.logger,
-		Health:  a.Health,
+		Logger: a.logger,
+		Health: a.Health,
 	})
 }
 
@@ -85,7 +84,8 @@ func (a *App) InternalHandler() http.Handler {
 			current, _, err := a.migrator.Versions(ctx)
 			return current, err
 		},
-		ActivePages: a.queries.CountActivePages,
+		ActivePages:         a.queries.CountActivePages,
+		BinarySchemaVersion: a.migrator.LatestVersion(),
 	})
 }
 
