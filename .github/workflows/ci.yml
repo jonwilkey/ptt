@@ -538,31 +538,41 @@ jobs:
           set -euo pipefail
           pttd="$(docker inspect "$(docker compose ps -q pttd)" | jq '.[0]')"
           caddy="$(docker inspect "$(docker compose ps -q caddy)" | jq '.[0]')"
-          check() { # check <description> <container JSON> <jq filter that must be true>
+          # check <description> <container JSON> <jq filter that must be true> [<jq filter for
+          # the actual value, printed on failure>]
+          check() {
             if jq -e "$3" <<< "$2" > /dev/null; then
               echo "ok    $1"
             else
-              echo "::error::$1"
+              echo "::error::$1${4:+ (actual: $(jq -c "$4" <<< "$2"))}"
               failed=1
             fi
           }
+          # Docker may report capabilities with or without the CAP_ prefix.
+          caps='map(ltrimstr("CAP_"))'
           failed=0
-          check "pttd runs as 65532:65532" "$pttd" '.Config.User == "65532:65532"'
-          check "Caddy runs as root in its container (for ports 80/443)" "$caddy" '.Config.User == ""'
+          check "pttd runs as 65532:65532" "$pttd" '.Config.User == "65532:65532"' '.Config.User'
+          check "Caddy runs as root in its container (for ports 80/443)" "$caddy" '.Config.User == ""' '.Config.User'
           for name in pttd caddy; do
             c="${!name}"
-            check "$name: read-only root filesystem" "$c" '.HostConfig.ReadonlyRootfs == true'
-            check "$name: all capabilities dropped" "$c" '.HostConfig.CapDrop == ["ALL"]'
-            check "$name: no-new-privileges" "$c" '.HostConfig.SecurityOpt // [] | any(. == "no-new-privileges:true")'
-            check "$name: restart unless-stopped" "$c" '.HostConfig.RestartPolicy.Name == "unless-stopped"'
+            check "$name: read-only root filesystem" "$c" '.HostConfig.ReadonlyRootfs == true' '.HostConfig.ReadonlyRootfs'
+            check "$name: all capabilities dropped" "$c" \
+              "(.HostConfig.CapDrop // [] | $caps) == [\"ALL\"]" '.HostConfig.CapDrop'
+            check "$name: no-new-privileges" "$c" \
+              '.HostConfig.SecurityOpt // [] | any(. == "no-new-privileges:true")' '.HostConfig.SecurityOpt'
+            check "$name: restart unless-stopped" "$c" \
+              '.HostConfig.RestartPolicy.Name == "unless-stopped"' '.HostConfig.RestartPolicy.Name'
           done
-          check "pttd: no added capabilities" "$pttd" '(.HostConfig.CapAdd // []) == []'
-          check "Caddy: only NET_BIND_SERVICE added" "$caddy" '.HostConfig.CapAdd == ["NET_BIND_SERVICE"]'
-          check "pttd: only 9090/tcp published" "$pttd" '[.HostConfig.PortBindings | keys[]] == ["9090/tcp"]'
+          check "pttd: no added capabilities" "$pttd" '(.HostConfig.CapAdd // []) == []' '.HostConfig.CapAdd'
+          check "Caddy: only NET_BIND_SERVICE added" "$caddy" \
+            "(.HostConfig.CapAdd // [] | $caps) == [\"NET_BIND_SERVICE\"]" '.HostConfig.CapAdd'
+          check "pttd: only 9090/tcp published" "$pttd" \
+            '[.HostConfig.PortBindings | keys[]] == ["9090/tcp"]' '.HostConfig.PortBindings'
           check "pttd: 9090 bound only to 127.0.0.1" "$pttd" \
-            '.HostConfig.PortBindings["9090/tcp"] | length > 0 and all(.HostIp == "127.0.0.1")'
+            '.HostConfig.PortBindings["9090/tcp"] | length > 0 and all(.HostIp == "127.0.0.1")' \
+            '.HostConfig.PortBindings'
           check "Caddy: only 80/tcp and 443/tcp published (no HTTP/3 UDP)" "$caddy" \
-            '[.HostConfig.PortBindings | keys[]] == ["443/tcp", "80/tcp"]'
+            '[.HostConfig.PortBindings | keys[]] == ["443/tcp", "80/tcp"]' '.HostConfig.PortBindings'
           # From the host: the internal listener answers on loopback only.
           curl -fsS http://127.0.0.1:9090/metrics | grep -q '^pttd_active_sessions 0$'
           echo "ok    /metrics answers on 127.0.0.1:9090"
