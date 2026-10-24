@@ -1,0 +1,7 @@
+# First-time bootstrap only. Copy to local_backend_override.tf (git-ignored) before the first
+# `tofu init`/`tofu apply`: an override file replaces the s3 backend in versions.tf with local
+# state, because the bucket does not exist yet. Delete it afterwards and run
+# `tofu init -migrate-state` to move the state into the bucket.
+terraform {
+  backend "local" {}
+}

@@ -1,0 +1,8 @@
+# Override files are local-only (bootstrap's first apply uses local_backend_override.tf).
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Deployment-specific backend settings (bucket name); commit only backend.hcl.example.
+backend.hcl
