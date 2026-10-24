@@ -18,11 +18,11 @@ ENV GOTOOLCHAIN=local \
 
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/root/go/pkg/mod go mod download && go mod verify
+RUN --mount=type=cache,target=/go/pkg/mod go mod download && go mod verify
 
 COPY . .
 ARG VERSION=dev
-RUN --mount=type=cache,target=/root/go/pkg/mod \
+RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/pttd ./cmd/pttd
 
