@@ -17,22 +17,29 @@ commit them):
 You need: OpenTofu 1.13.x, the AWS CLI v2, `dig`, `nc`, a Tailscale admin login, admin access to
 the GitHub repository, and admin access to the AWS account that hosts `<your-domain>`.
 
-## 1. Vultr account and API key
+## 1. Vultr account and API keys
+
+Two API users, so the key exposed to PR jobs can do as little as possible.
 
 1. Create the Vultr account (or sign in), enable two-factor authentication, and add a payment
    method.
-2. Create a dedicated API user so the key can do as little as possible: **Account > Users > Add
-   User**, name `ptt-opentofu`, API enabled, and grant only the permissions needed to manage
-   instances, reserved IPs and firewalls (in the classic ACL list: `subscriptions_view`,
-   `subscriptions`, `provisioning`, `firewall`). Do not grant billing, user management, DNS,
-   object storage or support. If your account uses Vultr's newer organization roles/policies
-   instead, create the equivalent minimal policy. If the first `tofu apply` (step 9) fails with
-   a permission error, add only the permission it names.
-3. Copy that user's API key into the password-manager vault as "Vultr API key (OpenTofu)".
+2. **Apply key.** **Account > Users > Add User**, name `ptt-opentofu-apply`, API enabled, and
+   grant only what is needed to manage instances, reserved IPs and firewalls (in the classic ACL
+   list: `subscriptions_view`, `subscriptions`, `provisioning`, `firewall`). Do not grant
+   billing, user management, DNS, object storage or support. If your account uses Vultr's newer
+   organization roles/policies instead, create the equivalent minimal policy. If the first
+   `tofu apply` (step 9) fails with a permission error, add only the permission it names. Save
+   its API key in the vault as "Vultr API key (OpenTofu apply)".
+3. **Plan key.** Add a second user, `ptt-opentofu-plan`, API enabled, with the minimum needed to
+   refresh state: `subscriptions_view` (instances, reserved IPs, OS list) and `firewall`. Vultr
+   has no read-only firewall permission, so this key can also change firewall groups; that is
+   the residual risk of the plan key. Grant nothing else. If the first CI plan (step 11) fails
+   with a permission error, add only what it names. Save its key as "Vultr API key (OpenTofu
+   plan)".
 4. **Access control (allowed IPs):** GitHub-hosted runners use a large, changing set of
-   addresses, so the CI key cannot be IP-restricted in practice; allow all IPv4 and IPv6 for it.
-   If you want a key for laptop use, create a second key on the same user restricted to your home
-   IP and keep it out of GitHub.
+   addresses, so neither CI key can be IP-restricted in practice; allow all IPv4 and IPv6 for
+   them. For laptop use, create a separate key restricted to your home IP and keep it out of
+   GitHub.
 
 ## 2. Check the AWS account
 
@@ -141,17 +148,25 @@ encrypted prod state. Tagged nodes have key expiry disabled, so the server stays
 
 **Settings > Secrets and variables > Actions**:
 
+The repository and its Actions logs are public, so every identifying value is a **secret**
+(GitHub masks secrets in logs), even the ones that are not confidential. Do not create them as
+variables.
+
 | Kind | Name | Value |
 | --- | --- | --- |
-| Repository secret | `VULTR_API_KEY` | The key from step 1 |
-| Repository variable | `AWS_TOFU_PLAN_ROLE_ARN` | `plan_role_arn` from `tofu output` |
-| Repository variable | `AWS_TOFU_APPLY_ROLE_ARN` | `apply_role_arn` from `tofu output` |
-| Repository variable | `TOFU_STATE_BUCKET` | `<state-bucket>` |
-| Repository variable | `TOFU_ZONE_NAME` | `<your-domain>` |
-| Repository variable | `TOFU_RECORD_NAME` | `<server-name>` |
-| Repository variable | `TOFU_ADMIN_USERS` | JSON list, see below |
+| Repository secret | `VULTR_API_KEY_PLAN` | Plan key from step 1.3 |
+| Repository secret | `AWS_TOFU_PLAN_ROLE_ARN` | `plan_role_arn` from `tofu output` |
+| Repository secret | `TOFU_STATE_BUCKET` | `<state-bucket>` |
+| Repository secret | `TOFU_ZONE_NAME` | `<your-domain>` |
+| Repository secret | `TOFU_RECORD_NAME` | `<server-name>` |
+| Repository secret | `TOFU_ADMIN_USERS` | JSON list, see below |
+| `production` environment secret | `VULTR_API_KEY` | Apply key from step 1.2 (used only by the `infra` apply job) |
+| `production` environment secret | `AWS_TOFU_APPLY_ROLE_ARN` | `apply_role_arn` from `tofu output` |
 
-`TOFU_ADMIN_USERS` (public keys only; one entry per admin):
+The Tailscale credentials CI uses for deploys (`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`) are
+added with the `infra` workflow, not here.
+
+`TOFU_ADMIN_USERS` (public keys only; one entry per admin; one line):
 
 ```json
 [{"name":"admin1","ssh_public_keys":["ssh-ed25519 AAAA... admin1@laptop"]},{"name":"admin2","ssh_public_keys":["ssh-ed25519 AAAA... admin2@laptop"]}]
@@ -161,8 +176,10 @@ Do not set `TOFU_ENABLED` yet.
 
 ## 8. Prepare the prod module locally
 
+From `infra/tofu/bootstrap`, where step 4 left you:
+
 ```sh
-cd infra/tofu/prod
+cd ../prod
 cp terraform.tfvars.example terraform.tfvars
 #   edit: zone_name = "<your-domain>", record_name = "<server-name>", admin_users = (same as TOFU_ADMIN_USERS)
 tofu init -backend-config=../backend.hcl
@@ -172,18 +189,18 @@ tofu init -backend-config=../backend.hcl
 
 ```sh
 export AWS_PROFILE=<aws-profile>
-read -rs VULTR_API_KEY && export VULTR_API_KEY              # paste the Vultr key, then Enter
+read -rs VULTR_API_KEY && export VULTR_API_KEY              # paste the Vultr apply key, then Enter
 read -rs TF_VAR_tailscale_auth_key && export TF_VAR_tailscale_auth_key   # paste the tskey-auth-... key
-tofu plan -out=tfplan
+tofu plan -out=prod.tfplan
 ```
 
 The plan must create exactly: 1 firewall group, 4 firewall rules (TCP 80 and 443, v4 and v6),
 1 reserved IPv4, 1 instance, 2 Route 53 records (`<server-name>` A and AAAA). Then:
 
 ```sh
-tofu apply tfplan
+tofu apply prod.tfplan
 tofu output
-rm -f tfplan
+rm -f prod.tfplan
 unset TF_VAR_tailscale_auth_key VULTR_API_KEY
 ```
 
@@ -208,9 +225,10 @@ in the Vultr console) to read `/var/log/cloud-init-output.log`.
 
 ## 11. Turn on CI plans
 
-Add the repository variable `TOFU_ENABLED` = `true`. Open a trivial PR touching
-`infra/tofu/` (for example a comment) and check that the `OpenTofu plan (prod)` job posts a
-"No changes" plan comment. Close the PR.
+Add the repository **variable** (the only one) `TOFU_ENABLED` = `true`. Open a trivial PR
+touching `infra/tofu/` (for example a comment) and check that the `OpenTofu plan (prod)` job
+posts a "No changes" summary comment (counts and resource addresses only; the full plan is never
+printed because the logs are public). Close the PR.
 
 From now on, infrastructure changes go through PRs; leave `TF_VAR_tailscale_auth_key` unset
 unless a plan creates or replaces the instance. Next: run the Ansible playbook (see

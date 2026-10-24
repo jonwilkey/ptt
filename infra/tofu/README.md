@@ -16,14 +16,21 @@ ID, repository slug, or user names. Those values have no defaults and come from:
 
 | Value | Local runs | CI |
 | --- | --- | --- |
-| State bucket | `infra/tofu/backend.hcl` (from `backend.hcl.example`), passed with `-backend-config=../backend.hcl` | `-backend-config="bucket=${{ vars.TOFU_STATE_BUCKET }}"` |
-| Module variables | `terraform.tfvars` in the module (from `terraform.tfvars.example`) | GitHub Actions variables exported as `TF_VAR_*` |
-| Vultr API key | `VULTR_API_KEY` environment variable | `secrets.VULTR_API_KEY` |
+| State bucket | `infra/tofu/backend.hcl` (from `backend.hcl.example`), passed with `-backend-config=../backend.hcl` | Repository secret `TOFU_STATE_BUCKET`, passed with `-backend-config="bucket=..."` |
+| Module variables | `terraform.tfvars` in the module (from `terraform.tfvars.example`) | Repository secrets `TOFU_ZONE_NAME`, `TOFU_RECORD_NAME`, `TOFU_ADMIN_USERS`, exported as `TF_VAR_*` |
+| IAM role ARNs | Not needed (admin's own credentials) | Repository secret `AWS_TOFU_PLAN_ROLE_ARN`; `production` environment secret `AWS_TOFU_APPLY_ROLE_ARN` |
+| Vultr API key | `VULTR_API_KEY` environment variable | Plan: repository secret `VULTR_API_KEY_PLAN` (minimal sub-user). Apply: `production` environment secret `VULTR_API_KEY` |
 | AWS credentials | The admin's own profile (`AWS_PROFILE`, SSO) | OIDC: `ptt-tofu-plan` / `ptt-tofu-apply` roles; no stored keys |
-| Tailscale auth key | `TF_VAR_tailscale_auth_key`, only when creating or replacing the server | A `production` environment secret, only when creating or replacing the server |
+| Tailscale auth key | `TF_VAR_tailscale_auth_key`, only when creating or replacing the server | A `production` environment secret, only when creating or replacing the server (added with the `infra` workflow) |
 
-`*.tfvars`, `backend.hcl`, `*_override.tf` and all state files are git-ignored. Commit only the
-`.example` files and the `.terraform.lock.hcl` lock files.
+These are **secrets, not variables**, even where the value is not secret (bucket name, domain,
+user names, account ID inside the role ARNs): the repository and its Actions logs are public, and
+GitHub masks secret values in logs. `TOFU_ENABLED` is the only Actions variable. The CI Tailscale
+credentials for deploys (`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`) are added with the `infra`
+workflow.
+
+`*.tfvars`, `backend.hcl`, `*.tfplan`, `*_override.tf` and all state files are git-ignored.
+Commit only the `.example` files and the `.terraform.lock.hcl` lock files.
 
 ## Design notes
 
@@ -33,8 +40,10 @@ ID, repository slug, or user names. Those values have no defaults and come from:
 - **State encryption.** `prod` encrypts state and saved plans with `aes_gcm`, keyed by the KMS
   alias `alias/ptt-tofu-state`, `enforced = true`, no fallback. Losing access to that key means
   losing access to prod state; the key has `prevent_destroy` and a 30-day deletion window.
-- **Least privilege.** `ptt-tofu-plan` (any ref or PR of the repository) can read prod state,
-  write only the lock object, use the KMS key, and read the hosted zone. `ptt-tofu-apply` (only
+- **Least privilege.** `ptt-tofu-plan` (only OIDC subjects `repo:<owner>/<repo>:pull_request`
+  and `repo:<owner>/<repo>:ref:refs/heads/main`; fork PRs never receive a token) can read prod
+  state, write only the lock object, use the KMS key (`GenerateDataKey`/`Decrypt`, encryption
+  context `stack = prod` only), and read the hosted zone. `ptt-tofu-apply` (only
   jobs in the `production` environment) can additionally write prod state and change only the A
   and AAAA records of the one server name (`route53:ChangeResourceRecordSetsNormalizedRecordNames`
   and `...RecordTypes` conditions). Neither role can read the bootstrap state or touch anything
@@ -45,13 +54,14 @@ ID, repository slug, or user names. Those values have no defaults and come from:
 - **Addresses.** The reserved IPv4 is the instance's main IP and survives rebuilds, so the A
   record never changes. IPv6 is not reserved (a reserved /64 would need manual OS network
   configuration): the AAAA record follows the instance's own IPv6 and OpenTofu updates it on a
-  rebuild.
+  rebuild ([ADR 0004](../../docs/adr/0004-ipv6-not-reserved.md)).
 - **First boot only.** `user_data` (cloud-init) creates the admin users, disables root and
   password SSH, installs Tailscale from its apt repository and joins the tailnet as
   `tag:ptt-server`. The instance ignores later `user_data` changes, so rotating the auth key or
   editing `admin_users` never rebuilds the server; Ansible owns host configuration afterwards.
-- **Backups.** Vultr automatic backups, daily at 10:00 UTC (`backup_hour_utc`), after the
-  02:00 Pacific SQLite snapshot.
+- **Backups.** Vultr automatic backups, daily at 10:00 UTC (`backup_hour_utc`): 03:00 PDT, after
+  the 02:00 Pacific SQLite snapshot; in winter (PST) it is the same hour as the snapshot, so a
+  backup may contain the previous night's snapshot.
 
 ## How CI runs it
 
@@ -61,7 +71,10 @@ The `ci` workflow, on every PR and push:
 2. `tofu init -backend=false` and `tofu validate` for both modules (no credentials needed).
 3. When the repository variable `TOFU_ENABLED` is `true` and a PR from this repository touches
    `infra/tofu/**`: assume `ptt-tofu-plan` through OIDC, `tofu init` with the real backend,
-   `tofu plan -lock=false` for `prod`, and post the plan as a single sticky PR comment.
+   `tofu plan -lock=false -out=...` for `prod`, then `tofu show -json` and post only a summary
+   (counts of create/update/delete/replace and one `<actions> <address>` line per changed
+   resource, plus a link to the run) as a single sticky PR comment. The human-readable plan is
+   never printed, in the comment or the log, because both are public.
 
 The `infra` workflow (added in a later PR) runs `tofu plan` and then, after an admin approves the
 `production` environment, `tofu apply` with `ptt-tofu-apply`.
@@ -85,8 +98,8 @@ tofu plan
 ```
 
 Prefer letting CI apply. If you must apply locally, coordinate with the other admin, run
-`tofu plan -out=tfplan`, review it, then `tofu apply tfplan` (the saved plan is encrypted with
-the same KMS key). Set `TF_VAR_tailscale_auth_key` only when the plan creates or replaces the
+`tofu plan -out=prod.tfplan`, review it, then `tofu apply prod.tfplan` (the saved plan is
+encrypted with the same KMS key; `*.tfplan` is git-ignored). Set `TF_VAR_tailscale_auth_key` only when the plan creates or replaces the
 instance.
 
 `bootstrap` works the same way (`tofu -chdir=bootstrap init -backend-config=../backend.hcl`)
