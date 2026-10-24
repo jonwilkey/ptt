@@ -1,17 +1,60 @@
 ---
+# Image resolution: an explicit -e pttd_image wins; otherwise the image already
+# deployed (PTTD_IMAGE in .env) is kept. With neither (first run before any
+# release) the files are written but nothing is started. deploy.yml sets
+# app_image_required so a deploy never runs without an explicit image.
 - name: Check the required app settings
   ansible.builtin.assert:
     that:
-      - pttd_image is defined
-      - pttd_image is string
-      - pttd_image is match('^[^@\s]+@sha256:[0-9a-f]{64}$')
       - ptt_domain is defined
       - ptt_domain is string
       - ptt_domain is match('^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$')
     fail_msg: >-
-      pttd_image (pinned by digest: <image>@sha256:<64 hex>) and ptt_domain are
-      required. Pass them with -e or set them in inventory/group_vars/prod/site.yml.
+      ptt_domain is required: set it in inventory/group_vars/prod/site.yml or pass -e.
     quiet: true
+
+- name: Require an explicit image when asked to
+  ansible.builtin.assert:
+    that:
+      - pttd_image is defined
+    fail_msg: "This playbook requires -e pttd_image=<image>@sha256:<64 hex>."
+    quiet: true
+  when: app_image_required | bool
+
+- name: Look for an already deployed environment file
+  ansible.builtin.stat:
+    path: "{{ app_dir }}/.env"
+  check_mode: false
+  register: app_env_stat
+  when: pttd_image is not defined
+
+- name: Read the already deployed environment file
+  ansible.builtin.slurp:
+    src: "{{ app_dir }}/.env"
+  check_mode: false
+  register: app_env_current
+  when:
+    - pttd_image is not defined
+    - app_env_stat.stat.exists | default(false)
+
+- name: Choose the image to run
+  ansible.builtin.set_fact:
+    app_image: >-
+      {{ pttd_image if pttd_image is defined else
+         ((app_env_current.content | default('') | b64decode).splitlines()
+          | select('match', '^PTTD_IMAGE=') | map('regex_replace', '^PTTD_IMAGE=', '')
+          | map('trim') | first | default('')) }}
+
+- name: Check the image is pinned by digest
+  ansible.builtin.assert:
+    that:
+      - app_image is string
+      - app_image is match(app_image_pattern)
+    fail_msg: >-
+      {{ 'pttd_image' if pttd_image is defined else 'PTTD_IMAGE in ' ~ app_dir ~ '/.env' }}
+      must be <image>@sha256:<64 hex>, got '{{ app_image }}'.
+    quiet: true
+  when: pttd_image is defined or app_image | length > 0
 
 - name: Create the app directories
   ansible.builtin.file:
@@ -41,15 +84,14 @@
     group: root
     mode: "0600"
 
-# Not secret, and readable by Caddy whatever user its container runs as (the
-# parent directory is 0750 root, so host users still cannot read it).
+# Caddy runs as root inside its container, so root-only is enough.
 - name: Write the Caddyfile
   ansible.builtin.copy:
     src: "{{ app_deploy_src_dir }}/Caddyfile"
     dest: "{{ app_dir }}/Caddyfile"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0600"
   register: app_caddyfile
 
 - name: Write the compose environment file
@@ -74,15 +116,24 @@
   diff: false
   register: app_secret_files
 
+- name: Report that nothing is started yet
+  ansible.builtin.debug:
+    msg: >-
+      No pttd_image given and none deployed yet (first run before any release):
+      files are in place under {{ app_dir }}, but no image is pulled and no service
+      is started. Deploy a release with deploy.yml -e pttd_image=... to start it.
+  when: app_image | length == 0
+
 - name: Start the services
   vars:
-    app_ghcr_login: "{{ ghcr_token | default('') | length > 0 }}"
+    app_ghcr_login: "{{ app_ghcr_token | length > 0 }}"
+  when: app_image | length > 0
   block:
     - name: Log in to the container registry
       community.docker.docker_login:
         registry_url: "{{ app_ghcr_registry }}"
         username: "{{ app_ghcr_username }}"
-        password: "{{ ghcr_token }}"
+        password: "{{ app_ghcr_token }}"
         reauthorize: true
       no_log: true
       when: app_ghcr_login | bool

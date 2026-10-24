@@ -2,10 +2,12 @@
 # Debian's sshd_config starts with `Include /etc/ssh/sshd_config.d/*.conf`, and sshd
 # keeps the first value it reads for each keyword, so a low-numbered drop-in wins
 # over the rest of sshd_config and over cloud-init's 50-cloud-init.conf.
+# 01-ptt-hardening.conf is the same file cloud-init writes at first boot (infra/tofu);
+# from the first Ansible run on, Ansible owns it.
 - name: Install the SSH hardening drop-in
   ansible.builtin.template:
     src: sshd-hardening.conf.j2
-    dest: /etc/ssh/sshd_config.d/10-ptt-hardening.conf
+    dest: /etc/ssh/sshd_config.d/01-ptt-hardening.conf
     owner: root
     group: root
     mode: "0644"
@@ -26,11 +28,12 @@
       - "'kbdinteractiveauthentication no' in base_sshd_lines"
       - "'pubkeyauthentication yes' in base_sshd_lines"
       - "'x11forwarding no' in base_sshd_lines"
-      - "('allowgroups ' ~ base_admin_group) in base_sshd_lines"
+      - "('allowgroups ' ~ base_admin_group) | lower in base_sshd_lines"
+      - "('allowgroups ' ~ base_deploy_user) | lower in base_sshd_lines"
     fail_msg: >-
-      sshd's effective configuration does not match 10-ptt-hardening.conf; is the
+      sshd's effective configuration does not match 01-ptt-hardening.conf; is the
       sshd_config.d Include missing, or does another file set these first?
     quiet: true
   vars:
-    base_sshd_lines: "{{ base_sshd_effective.stdout_lines }}"
+    base_sshd_lines: "{{ base_sshd_effective.stdout_lines | map('lower') | list }}"
   when: not ansible_check_mode

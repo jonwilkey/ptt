@@ -63,6 +63,13 @@
   loop_control:
     label: "{{ item.file }}"
 
+# Only after 90-ptt-admins grants the same group passwordless sudo: sudo reads
+# sudoers afresh for every task, so the running play never loses it.
+- name: Remove cloud-init's per-user sudoers file
+  ansible.builtin.file:
+    path: /etc/sudoers.d/90-cloud-init-users
+    state: absent
+
 - name: Remove former admin users
   ansible.builtin.user:
     name: "{{ item }}"

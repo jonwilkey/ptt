@@ -7,7 +7,9 @@
 #   base_deploy_ssh_keys: list of public keys for the CI deploy user.
 # Logins to delete (for example a former admin). Home directories are kept.
 base_admin_users_removed: []
-base_admin_group: admins
+# Debian's sudo group: cloud-init already puts the admins in it, so the running
+# session keeps access while AllowGroups and sudoers switch to it.
+base_admin_group: sudo
 
 # CI account. Ansible's become runs a different `/bin/sh -c ...` command for every
 # task, so a sudo rule narrower than "ALL" cannot be written for it; see README.

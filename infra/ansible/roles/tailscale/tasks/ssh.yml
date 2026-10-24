@@ -38,8 +38,10 @@
   ansible.builtin.assert:
     that:
       - tailscale_ssh_socket.status.ActiveState | default('inactive') != 'active'
+      - tailscale_ssh_socket.status.UnitFileState | default('disabled') != 'enabled'
     fail_msg: >-
-      ssh.socket is active, so ListenAddress would be ignored. Switch to ssh.service
+      ssh.socket is active or enabled, so ListenAddress would be ignored (now or after
+      a reboot). Switch to ssh.service
       (systemctl disable --now ssh.socket; systemctl enable --now ssh.service) first.
     quiet: true
 

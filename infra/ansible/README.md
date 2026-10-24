@@ -43,11 +43,12 @@ variables as extra vars built from GitHub Actions variables and secrets.
 
 | Variable | Required by | Notes |
 | --- | --- | --- |
-| `base_admin_users` | `base` | List of `{name, ssh_keys}`. Names must match the admin users cloud-init creates. The listed keys become each user's **only** authorized keys. |
+| `base_admin_users` | `base` | List of `{name, ssh_keys}`. Names must match the admin users cloud-init creates. Each is added to the `sudo` group; the listed keys become each user's **only** authorized keys. |
 | `base_deploy_ssh_keys` | `base` | Public key(s) of the CI deploy key. |
+| `base_admin_users_removed` | `base`, optional | Logins to delete (a former admin); home directories are kept. Take the person out of `base_admin_users` in the same change. |
 | `ptt_domain` | `app` | Public hostname, written to `/opt/ptt/.env` as `PTT_DOMAIN`. |
-| `pttd_image` | `app` | `<registry>/<name>@sha256:<64 hex>`; anything not pinned by digest is rejected. Pass with `-e` on every run. |
-| `ghcr_token` | `app`, optional | Token with `read:packages`, used to log in to ghcr.io for the pull (CI: the job's `GITHUB_TOKEN`). Not needed when the image is already on the host. |
+| `pttd_image` | `deploy.yml`; optional for `site.yml` | `<registry>/<name>@sha256:<64 hex>`; anything not pinned by digest is rejected. `deploy.yml` requires it. `site.yml` without it keeps the `PTTD_IMAGE` already in `/opt/ptt/.env`; on a host with no release yet it writes the files and starts nothing. |
+| `GHCR_TOKEN` (environment variable) | `app`, optional | Token with `read:packages` used to log in to ghcr.io for the pull and log out afterwards (CI: the job's `GITHUB_TOKEN`). Read from the controller's environment, never `-e`, so it stays off command lines. Not needed when the image is already on the host. |
 | `tailscale_auth_key` | `tailscale`, optional | Pre-authorized key tagged `tag:ptt-server`; only used if the node is logged out. |
 | `app_secrets` | `app` | List of `{src, dest}`: sops files in `infra/secrets/` decrypted to `/opt/ptt/secrets/<dest>`. Empty until milestone 2. |
 
@@ -59,20 +60,23 @@ Each role asserts its required variables before changing anything.
 cd infra/ansible
 ansible-galaxy collection install -r requirements.yml
 
-# Full configuration (as yourself; your login must be in base_admin_users):
-ansible-playbook -i inventory/prod.yml site.yml \
-  -e pttd_image=ghcr.io/<owner>/ptt/pttd@sha256:<digest> \
-  -e ghcr_token="$GHCR_TOKEN"
+# Full configuration (as yourself; your login must be in base_admin_users).
+# Keeps the image that is already deployed:
+ansible-playbook -i inventory/prod.yml site.yml
 
 # One area only:
-ansible-playbook -i inventory/prod.yml site.yml --tags base -e pttd_image=...
+ansible-playbook -i inventory/prod.yml site.yml --tags base
 
 # Preview without changing anything:
-ansible-playbook -i inventory/prod.yml site.yml --check --diff -e pttd_image=...
+ansible-playbook -i inventory/prod.yml site.yml --check --diff
+
+# Deploy a specific release (what CI does):
+GHCR_TOKEN=<token> ansible-playbook -i inventory/prod.yml deploy.yml \
+  -e pttd_image=ghcr.io/<owner>/ptt/pttd@sha256:<digest>
 ```
 
-CI runs `deploy.yml` (or `site.yml`) with `-u deploy` and the variables above as
-`-e` arguments.
+CI runs `deploy.yml` (or `site.yml`) with `-u deploy`, the variables above as `-e`
+arguments, and `GHCR_TOKEN` in the environment.
 
 ### First run (after `tofu apply` creates the host)
 
@@ -80,15 +84,23 @@ CI runs `deploy.yml` (or `site.yml`) with `-u deploy` and the variables above as
    `tag:ptt-server`, and you can `ssh <you>@ptt-prod` with your key.
 2. Fill in `inventory/group_vars/prod/site.yml`: both admins with all of their keys,
    and the deploy key.
-3. Make sure `deploy/compose.yaml` and `deploy/Caddyfile` exist in your checkout and
-   the image digest has been published.
-4. Run `site.yml` as above. Keep your current SSH session open until the run
+3. Make sure `deploy/compose.yaml` and `deploy/Caddyfile` exist in your checkout.
+4. Run `site.yml` as above. Before the first release there is no image to run, so
+   the app role writes the files and reports that nothing was started; the first
+   `deploy.yml` run (or `site.yml -e pttd_image=...`) starts the services. Keep your current SSH session open until the run
    finishes and you have opened a **new** session successfully.
 5. Check: `ssh <you>@ptt-prod 'sudo docker compose -f /opt/ptt/compose.yaml ps'`,
    and `https://<ptt_domain>/healthz` from outside.
 
 ## Design notes and tradeoffs
 
+- **Admin group.** Admins are in Debian's `sudo` group, which cloud-init already puts
+  them in, so the session running the first play is never outside the groups that
+  `AllowGroups sudo deploy` and sudoers allow. `/etc/sudoers.d/90-ptt-admins` grants
+  `%sudo` passwordless sudo; cloud-init's per-user `90-cloud-init-users` is removed
+  only after that file is in place. The SSH hardening is in
+  `/etc/ssh/sshd_config.d/01-ptt-hardening.conf`, the same file cloud-init writes at
+  first boot; Ansible owns it from then on.
 - **Passwordless sudo for admins.** Accounts have no password, so sudo cannot ask for
   one. SSH is key-only and reachable only over the tailnet, so getting root needs
   an admin's private key *and* a device in the tailnet. Adding passwords would mean
@@ -107,6 +119,12 @@ CI runs `deploy.yml` (or `site.yml`) with `-u deploy` and the variables above as
   Docker publishes on public addresses bypass the input chain (they are DNATed to the
   container), so the cloud firewall is what limits them; compose publishes pttd's
   9090 only on 127.0.0.1.
+- **IPv6 and real client addresses.** `daemon.json` sets `userland-proxy: false`, so
+  published ports are DNATed and Caddy (and so pttd, through `X-Forwarded-For`) sees
+  each client's real address, which the per-IP enrollment rate limit needs. With the
+  userland proxy off, Docker forwards IPv6 to a container only if its network has
+  IPv6. **Contract for `deploy/compose.yaml`:** the project network Caddy publishes
+  80/443 on must set `enable_ipv6: true`, or the AAAA record's clients cannot connect.
 - **SSH on the tailnet only.** sshd listens on the Tailscale IPv4 and IPv6 addresses.
   `ip_nonlocal_bind` lets it bind them at boot before `tailscale0` is up, and
   `ssh.service` is ordered after `tailscaled`. The firewall also allows port 22 only
@@ -120,6 +138,8 @@ CI runs `deploy.yml` (or `site.yml`) with `-u deploy` and the variables above as
 - **Tailscale DNS.** The server runs with `--accept-dns=false`: it needs no MagicDNS
   names, and pointing the host at 100.100.100.100 can break DNS inside containers.
   Clients still reach it as `ptt-prod`.
+- **Runtime file modes.** `compose.yaml`, `Caddyfile`, and `.env` are root-owned 0600
+  (Caddy runs as root inside its container) in the 0750 root-only `/opt/ptt`.
 - **Secrets.** Decrypted on the controller, written to `/opt/ptt/secrets/` as uid/gid
   65532 (pttd's container user), mode 0600. Removing an entry from `app_secrets`
   does not delete the file from the host.
@@ -154,8 +174,16 @@ re-registered with new addresses):
    `tailscale up --auth-key=<new tagged key> --advertise-tags=tag:ptt-server --hostname=ptt-prod`.
 5. Rerun `site.yml` from a laptop once SSH works.
 
-After a rebuild the host key changes: remove the old `ptt-prod` entry from
-`~/.ssh/known_hosts` (`ssh-keygen -R ptt-prod`) before connecting.
+### Rebuilding the host
+
+- Remove the old `ptt-prod` node from the tailnet (Tailscale admin console) **before**
+  the new VPS joins; otherwise the new node is named `ptt-prod-1` and `ptt-prod` keeps
+  pointing at the dead machine.
+- The Tailscale hostname here (`tailscale_hostname`, default `ptt-prod`) and the
+  inventory's `ansible_host` must match the hostname the tofu/cloud-init config gives
+  the node.
+- The host key changes: remove the old entry from `~/.ssh/known_hosts`
+  (`ssh-keygen -R ptt-prod`) before connecting.
 
 ## Checks
 
