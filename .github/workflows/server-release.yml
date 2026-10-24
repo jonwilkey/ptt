@@ -7,8 +7,11 @@ name: server-release
 #   - release-please.yml calls this workflow (workflow_call) right after it creates a release;
 #     tags created with GITHUB_TOKEN do not trigger workflows by themselves.
 #   - An admin pushes a server-v* tag.
-#   - workflow_dispatch with an existing tag: rebuilds that release on current base images and
-#     redeploys it (the version tag in GHCR then points at the new digest).
+#   - workflow_dispatch with an existing tag: rebuilds and redeploys the tag as-is (same pinned
+#     base images, from the tag's Dockerfile). Base-image updates ship as a new release (Renovate
+#     PRs; weekly-maintenance in milestone 6). The rebuilt image gets a new digest, and the
+#     version tag in GHCR moves to it. Redeploying an older tag also puts that tag's
+#     deploy/compose.yaml and deploy/Caddyfile back on the server.
 #
 # The repository and its Actions logs are public: the domain comes only from a secret (masked),
 # and the server's tailnet address is masked before use.
@@ -32,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to rebuild and redeploy, e.g. server-v1.2.3"
+        description: "Existing release tag to rebuild and redeploy as-is, e.g. server-v1.2.3"
         required: true
         type: string
 
@@ -102,6 +105,11 @@ jobs:
           ref: refs/tags/${{ steps.meta.outputs.tag }}
           persist-credentials: false
 
+      # The tag's commit (github.sha is main's head for release-please and manual runs).
+      - name: Tagged commit
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
@@ -110,10 +118,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      # A clean build (no layer cache, fresh base-image pull): release images never reuse layers
-      # built by other jobs. A single-platform manifest without BuildKit attestations, so the
-      # digest is the image itself; the SBOM and signature are attached with cosign below.
-      - name: Build and push
+      # A clean build (no layer cache; base images pulled at their pinned digests): release
+      # images never reuse layers built by other jobs. A single-platform manifest without
+      # BuildKit attestations, so the digest is the image itself; the SBOM and signature are
+      # attached with cosign below. Pushed by digest only: the version tag is added by the sign
+      # job once the image has passed every gate.
+      - name: Build and push (by digest)
         id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -121,13 +131,12 @@ jobs:
           file: server/Dockerfile
           platforms: linux/amd64
           build-args: VERSION=${{ steps.meta.outputs.version }}
-          tags: ${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.version }}
+          outputs: type=image,name=${{ steps.meta.outputs.repo }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
             org.opencontainers.image.licenses=MIT
-          push: true
           pull: true
           no-cache: true
           provenance: false
@@ -277,7 +286,9 @@ jobs:
         run: |
           set -euo pipefail
           # Matches ADR 0005: main (release-please, manual runs) or a pushed server-v* tag.
-          identity="^${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/\.github/workflows/server-release\.yml@refs/(heads/main|tags/server-v.+)$"
+          server_re="${GITHUB_SERVER_URL//./\\.}"
+          repo_re="${GITHUB_REPOSITORY//./\\.}"
+          identity="^${server_re}/${repo_re}/\.github/workflows/server-release\.yml@refs/(heads/main|tags/server-v[0-9][0-9A-Za-z.+-]*)$"
           issuer="https://token.actions.githubusercontent.com"
           cosign verify "$IMAGE" \
             --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" > /dev/null
@@ -294,6 +305,41 @@ jobs:
             echo "  --certificate-identity-regexp '${identity}'"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The version tag points at exactly the digest that passed scan, smoke test, and signing.
+      # The manifest is copied byte for byte through the registry API, so the digest is unchanged.
+      - name: Tag the image with its version
+        env:
+          REPO: ${{ needs.build.outputs.repo }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          VERSION: ${{ needs.build.outputs.version }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          name="${REPO#ghcr.io/}"
+          token="$(curl -fsS -u "${GITHUB_ACTOR}:${GHCR_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${name}:pull,push" | jq -r .token)"
+          echo "::add-mask::$token"
+          manifest="$RUNNER_TEMP/manifest.json"
+          accept="application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
+          curl -fsS -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+            -o "$manifest" "https://ghcr.io/v2/${name}/manifests/${DIGEST}"
+          if [ "sha256:$(sha256sum < "$manifest" | cut -d' ' -f1)" != "$DIGEST" ]; then
+            echo "::error::The registry returned a manifest that does not match ${DIGEST}."
+            exit 1
+          fi
+          media_type="$(jq -r '.mediaType' "$manifest")"
+          curl -fsS -X PUT -H "Authorization: Bearer ${token}" -H "Content-Type: ${media_type}" \
+            --data-binary "@${manifest}" "https://ghcr.io/v2/${name}/manifests/${VERSION}" -o /dev/null
+          tagged="$(curl -fsS -I -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+            "https://ghcr.io/v2/${name}/manifests/${VERSION}" | tr -d '\r' |
+            awk -F': ' 'tolower($1) == "docker-content-digest" { print $2 }')"
+          if [ "$tagged" != "$DIGEST" ]; then
+            echo "::error::${REPO}:${VERSION} resolves to '${tagged}', not ${DIGEST}."
+            exit 1
+          fi
+          echo "${REPO}:${VERSION} -> ${DIGEST}"
+          echo "Tag: \`${REPO}:${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     name: deploy (production)
@@ -339,8 +385,7 @@ jobs:
         id: previous
         run: |
           set -euo pipefail
-          env_file="$(ssh ptt-prod 'if sudo -n test -e /opt/ptt/.env; then sudo -n cat /opt/ptt/.env; fi')"
-          image="$(sed -n 's/^PTTD_IMAGE=//p' <<< "$env_file" | tail -n 1)"
+          image="$(.github/scripts/deployed-image.sh)"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
           echo "Deployed now: ${image:-(nothing; first deploy)}"
           echo "Deploying:    ${IMAGE}"
@@ -348,38 +393,7 @@ jobs:
       # Spec, "Server deploys" step 2: never cut off a conversation.
       - name: Wait until no session is active
         if: steps.previous.outputs.image != ''
-        run: |
-          set -euo pipefail
-          deadline=$((SECONDS + 600))
-          waited=0
-          while :; do
-            rc=0
-            status="$(ssh ptt-prod 'curl -fsS --max-time 5 http://127.0.0.1:9090/internal/status')" || rc=$?
-            if [ "$rc" -eq 255 ]; then
-              echo "::error::SSH to ptt-prod failed; not deploying."
-              exit 1
-            elif [ "$rc" -ne 0 ]; then
-              # pttd is not answering, so it has no sessions to protect; the deploy may fix it.
-              echo "::warning::pttd's /internal/status did not answer (curl exit $rc); deploying anyway."
-              break
-            fi
-            active="$(jq -r '.active_sessions' <<< "$status")"
-            if [ "$active" = 0 ]; then
-              [ "$waited" -eq 0 ] || echo "No active sessions after waiting ${waited} s."
-              [ "$waited" -ne 0 ] || echo "No active sessions."
-              break
-            fi
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::Still ${active} active session(s) after 10 minutes; not deploying. Re-run the job later."
-              exit 1
-            fi
-            echo "${active} active session(s); waiting (${waited} s so far)."
-            sleep 15
-            waited=$((waited + 15))
-          done
-          if [ "$waited" -gt 0 ]; then
-            echo "::notice::Waited ${waited} s for active sessions to end before deploying."
-          fi
+        run: .github/scripts/wait-no-sessions.sh
 
       - name: Install Ansible
         working-directory: infra/ansible
@@ -403,35 +417,12 @@ jobs:
           ansible-playbook -i inventory/prod.yml deploy.yml -u deploy \
             -e "@${vars}" -e "pttd_image=${IMAGE}"
 
-      # Spec, "Server deploys" step 5. TODO(milestone 2): page, answer, and relay one audio frame
-      # with the two pre-provisioned test devices.
-      - name: Wait for /healthz
+      # Spec, "Server deploys" step 5: /healthz within 2 minutes, then the smoke test.
+      - name: Health check and smoke test
         id: health
         env:
           PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
-        run: |
-          set -euo pipefail
-          deadline=$((SECONDS + 120))
-          until code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://${PTT_DOMAIN}/healthz")" &&
-            [ "$code" = 200 ]; do
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::/healthz did not return 200 within 2 minutes (last: ${code:-none})."
-              exit 1
-            fi
-            sleep 5
-          done
-          echo "/healthz is 200."
-
-      # Trust only ISRG Root X1 and X2, as the app does (from the runner's CA store).
-      - name: Smoke test production
-        env:
-          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
-        run: |
-          set -euo pipefail
-          roots="$RUNNER_TEMP/isrg-roots.pem"
-          cat /usr/share/ca-certificates/mozilla/ISRG_Root_X1.crt \
-            /usr/share/ca-certificates/mozilla/ISRG_Root_X2.crt > "$roots"
-          deploy/smoke.sh "https://${PTT_DOMAIN}" --cacert "$roots"
+        run: .github/scripts/check-prod.sh
 
       - name: Summary
         env:
@@ -468,3 +459,7 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::error::Deploy failed. Previous image: ${PREVIOUS:-none}. See the job summary for the rollback command."
+
+      - name: Remove the deploy vars and SSH key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/deploy-vars.json" ~/.ssh/ptt-deploy
