@@ -19,7 +19,7 @@
     {
       "description": "Our own pttd image in compose.yaml: its digest is updated only by the deploy pipeline.",
       "matchManagers": ["docker-compose"],
-      "matchPackageNames": ["ghcr.io/jonwilkey/ptt/**"],
+      "matchPackageNames": ["ghcr.io/jonwilkey/ptt", "ghcr.io/jonwilkey/ptt/**"],
       "enabled": false
     },
     {
@@ -49,7 +49,7 @@
     },
     {
       "description": "Go toolchain minor bumps (go directive, toolchain, golang base image) are reviewed by a person.",
-      "matchDepNames": ["go", "golang"],
+      "matchDepNames": ["go", "golang", "**/golang"],
       "matchUpdateTypes": ["minor"],
       "automerge": false
     },
