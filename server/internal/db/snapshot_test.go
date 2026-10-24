@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -115,21 +116,31 @@ func TestMigrateUpSnapshotsExistingDatabaseWithPendingMigrations(t *testing.T) {
 	}
 }
 
-func TestPrunePreMigrateSnapshotsKeepsNewest(t *testing.T) {
-	dir := t.TempDir()
-	var all []string
-	for i := range 8 {
-		ts := testNow.Add(time.Duration(i) * time.Hour).Format(snapshotTimeFormat)
-		all = append(all, "pre-migrate-"+ts+"-v"+string(rune('1'+i))+".db")
-	}
-	others := []string{"nightly-20261024T020000Z.db", "pre-migrate-notes.txt", "README"}
-	for _, n := range append(slices.Clone(all), others...) {
+func snapName(at time.Time, version int) string {
+	return fmt.Sprintf("pre-migrate-%s-v%d.db", at.UTC().Format(snapshotTimeFormat), version)
+}
+
+func touch(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	for _, n := range names {
 		if err := os.WriteFile(filepath.Join(dir, n), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
 
-	if err := PrunePreMigrateSnapshots(dir, 5); err != nil {
+func TestPrunePreMigrateSnapshotsKeepsNewest(t *testing.T) {
+	dir := t.TempDir()
+	var all []string
+	for i := range 8 {
+		all = append(all, snapName(testNow.Add(time.Duration(i)*time.Hour), i+1))
+	}
+	// Unparseable or foreign names are never pruned.
+	others := []string{"nightly-20261024T020000Z.db", "pre-migrate-notes.txt", "pre-migrate-garbage.db", "README"}
+	touch(t, dir, all...)
+	touch(t, dir, others...)
+
+	if err := PrunePreMigrateSnapshots(dir, 5, 5); err != nil {
 		t.Fatal(err)
 	}
 	want := append(slices.Clone(all[3:]), others...)
@@ -139,29 +150,94 @@ func TestPrunePreMigrateSnapshotsKeepsNewest(t *testing.T) {
 	}
 }
 
+func TestPrunePreMigrateSnapshotsKeepsFirstOfEachVersion(t *testing.T) {
+	dir := t.TempDir()
+	// Versions 1..3, each snapshotted four times (a deploy followed by restarts).
+	var all []string
+	for v := 1; v <= 3; v++ {
+		for i := range 4 {
+			all = append(all, snapName(testNow.Add(time.Duration(v*10+i)*time.Hour), v))
+		}
+	}
+	touch(t, dir, all...)
+
+	if err := PrunePreMigrateSnapshots(dir, 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	// Newest two overall, plus the first snapshot of the two highest versions (2 and 3).
+	want := []string{all[4], all[8], all[10], all[11]}
+	slices.Sort(want)
+	if got := listDir(t, dir); !slices.Equal(got, want) {
+		t.Fatalf("after prune:\n got %v\nwant %v", got, want)
+	}
+}
+
 func TestPrunePreMigrateSnapshotsMissingDir(t *testing.T) {
-	if err := PrunePreMigrateSnapshots(filepath.Join(t.TempDir(), "nope"), 5); err != nil {
+	if err := PrunePreMigrateSnapshots(filepath.Join(t.TempDir(), "nope"), 5, 5); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSnapshotNowRetainsFive(t *testing.T) {
+func migratedTemp(t *testing.T) *Migrator {
+	t.Helper()
 	db, _ := openTemp(t)
 	m := mustMigrator(t, db)
-	ctx := t.Context()
-	if err := m.Up(ctx); err != nil {
+	if err := m.Up(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	return m
+}
+
+func TestSnapshotNowSameSecondReuses(t *testing.T) {
+	m := migratedTemp(t)
+	snapDir := filepath.Join(t.TempDir(), "snapshots")
+	first, err := m.SnapshotNow(t.Context(), snapDir, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.SnapshotNow(t.Context(), snapDir, testNow)
+	if err != nil {
+		t.Fatalf("same-second restart: %v", err)
+	}
+	if second != first || len(listDir(t, snapDir)) != 1 {
+		t.Fatalf("second = %q (first %q), dir %v", second, first, listDir(t, snapDir))
+	}
+}
+
+func TestSnapshotNowCrashLoopWithinWindowKeepsOne(t *testing.T) {
+	m := migratedTemp(t)
+	snapDir := filepath.Join(t.TempDir(), "snapshots")
+	var first string
+	for i := range 7 {
+		p, err := m.SnapshotNow(t.Context(), snapDir, testNow.Add(time.Duration(i)*time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = p
+		} else if p != first {
+			t.Fatalf("restart %d took a new snapshot %q", i, p)
+		}
+	}
+	if got := listDir(t, snapDir); len(got) != 1 {
+		t.Fatalf("dir = %v, want one snapshot", got)
+	}
+}
+
+func TestSnapshotNowSameVersionKeepsFirst(t *testing.T) {
+	m := migratedTemp(t)
 	snapDir := filepath.Join(t.TempDir(), "snapshots")
 	var made []string
+	// Spaced beyond the reuse window, so every call writes a new file.
 	for i := range 7 {
-		p, err := m.SnapshotNow(ctx, snapDir, testNow.Add(time.Duration(i)*time.Minute))
+		p, err := m.SnapshotNow(t.Context(), snapDir, testNow.Add(time.Duration(i)*(SnapshotReuseWindow+time.Minute)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		made = append(made, filepath.Base(p))
 	}
-	if got := listDir(t, snapDir); !slices.Equal(got, made[2:]) {
-		t.Fatalf("kept %v, want %v", got, made[2:])
+	want := append([]string{made[0]}, made[2:]...)
+	if got := listDir(t, snapDir); !slices.Equal(got, want) {
+		t.Fatalf("kept %v, want first plus newest five %v", got, want)
 	}
 }
