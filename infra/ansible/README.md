@@ -87,8 +87,9 @@ arguments, and `GHCR_TOKEN` in the environment.
 3. Make sure `deploy/compose.yaml` and `deploy/Caddyfile` exist in your checkout.
 4. Run `site.yml` as above. Before the first release there is no image to run, so
    the app role writes the files and reports that nothing was started; the first
-   `deploy.yml` run (or `site.yml -e pttd_image=...`) starts the services. Keep your current SSH session open until the run
-   finishes and you have opened a **new** session successfully.
+   `deploy.yml` run (or `site.yml -e pttd_image=...`) starts the services. Keep
+   your current SSH session open until the run finishes and you have opened a
+   **new** session successfully.
 5. Check: `ssh <you>@ptt-prod 'sudo docker compose -f /opt/ptt/compose.yaml ps'`,
    and `https://<ptt_domain>/healthz` from outside.
 

@@ -102,8 +102,10 @@
     fail_msg: "sshd would listen on {{ tailscale_listen }}, expected {{ tailscale_expected }}."
     quiet: true
   vars:
-    tailscale_listen: "{{ tailscale_sshd_effective.stdout_lines | select('match', '^listenaddress ') | list }}"
+    tailscale_listen: >-
+      {{ tailscale_sshd_effective.stdout_lines | map('lower')
+         | select('match', '^listenaddress ') | list }}
     tailscale_expected:
-      - "listenaddress {{ tailscale_ip4.stdout }}:22"
-      - "listenaddress [{{ tailscale_ip6.stdout }}]:22"
+      - "listenaddress {{ tailscale_ip4.stdout | lower }}:22"
+      - "listenaddress [{{ tailscale_ip6.stdout | lower }}]:22"
   when: not ansible_check_mode
