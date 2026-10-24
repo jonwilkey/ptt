@@ -13,6 +13,8 @@ pinned by commit digest (Renovate keeps them current).
 
 Shared pieces: `.github/actions/docker-daemon-prod` and `.github/actions/compose-smoke`
 (the compose smoke test used by `ci` and `server-release`), and `.github/scripts/` (SSH to the
-server over Tailscale, public-safe `tofu plan` and its summary).
+server over Tailscale, the deployed image, the wait for no active sessions, the production
+health check and smoke test, masking the Ansible site vars, public-safe `tofu plan` and its
+summary).
 
 Repository settings, environments, secrets, and variables: [docs/runbooks/github-setup.md](../../docs/runbooks/github-setup.md).

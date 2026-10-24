@@ -30,7 +30,7 @@ become the changelog).
   `GITHUB_TOKEN`; each job asks for what it needs).
 - **Allow GitHub Actions to create and approve pull requests: on.** release-please opens its
   release PRs with `GITHUB_TOKEN`.
-- Fork pull request workflows: require approval for all outside collaborators.
+- Fork pull request workflows: **Require approval for all external contributors**.
 
 **Settings > Rules > Rulesets > New tag ruleset** (optional): target `server-v*` and
 `android-v*`, restrict updates and deletions, and add the repository admin role to the bypass
@@ -76,7 +76,7 @@ Environment secrets are readable only by jobs that passed the approval gate.
 | `TS_OAUTH_CLIENT_ID` | `production` secret | `server-release` deploy, `infra` ansible | Section 4 |
 | `TS_OAUTH_SECRET` | `production` secret | `server-release` deploy, `infra` ansible | Section 4 |
 | `DEPLOY_SSH_KEY` | `production` secret | `server-release` deploy, `infra` ansible | Section 5 (private half) |
-| `PTT_DOMAIN` | `production` secret | `server-release` deploy (Ansible `ptt_domain`, `/healthz`, smoke test) | The server's name, the same value as `TOFU_RECORD_NAME` |
+| `PTT_DOMAIN` | `production` secret | `server-release` deploy (Ansible `ptt_domain`, `/healthz`, smoke test), `infra` ansible (`/healthz`, smoke test) | The server's name, the same value as `TOFU_RECORD_NAME` |
 | `ANSIBLE_SITE_VARS` | `production` secret | `infra` ansible | The full YAML content of `infra/ansible/inventory/group_vars/prod/site.yml` (section 6) |
 
 Repository **variables** (**Settings > Secrets and variables > Actions > Variables**):
@@ -165,12 +165,23 @@ Because it uses `GITHUB_TOKEN`, GitHub does not run `ci` on it by itself (ADR 00
 merging a release PR, close it and reopen it** (or push an empty commit to its branch). That
 event comes from you, so `ci` runs and the required checks report. Then merge it.
 
+Every time release-please updates the PR (each push to `main` with a releasable change rewrites
+its branch), the new head has no checks again: close and reopen it once more right before you
+merge.
+
 Merging the server release PR makes release-please tag `server-vX.Y.Z`, create the GitHub
 release, and call `server-release` in the same run.
 
-To rebuild and redeploy an existing release (for example after a failed deploy or with newer base
-images): **Actions > server-release > Run workflow**, branch `main`, tag `server-vX.Y.Z`. The
-version tag in GHCR then points at the new digest.
+To rebuild and redeploy an existing release (for example after a failed deploy, or to go back to
+an older release): **Actions > server-release > Run workflow**, branch `main`, tag
+`server-vX.Y.Z`. It rebuilds and redeploys the tag as-is, with the same pinned base images from
+that tag's Dockerfile; base-image updates ship as a new release (Renovate PRs; the
+`weekly-maintenance` workflow in milestone 6). The rebuilt image has a new digest, and the
+version tag in GHCR moves to it.
+
+Redeploying an **older** tag also copies that tag's `deploy/compose.yaml` and `deploy/Caddyfile`
+to the server, undoing later runtime changes until the next release or `infra` run (which uses
+`main`'s files).
 
 ## 9. First deploy
 
@@ -208,5 +219,8 @@ production after approval.
 - A failed production health check or smoke test leaves the new release running and prints the
   manual rollback command (the previous digest) in the job summary. Automatic rollback is
   milestone 6.
-- The deploy job waits up to 10 minutes for active sessions to end and fails without deploying if
-  they do not; re-run the job later.
+- The deploy job, and the `infra` Ansible job when a release is deployed, wait up to 10 minutes
+  for active sessions to end and fail without changing the host if they do not; re-run the job
+  later. A refused connection to pttd's internal port (pttd not running) does not block them.
+- After `site.yml`, the `infra` Ansible job also checks `/healthz` and runs the production smoke
+  test, once a release has been deployed.
