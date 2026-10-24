@@ -27,6 +27,9 @@ if [ -z "$addr" ]; then
 	exit 1
 fi
 echo "::add-mask::$addr"
+# Not used, but ssh or Tailscale may print it.
+addr6="$(sudo -n tailscale ip -6 "$host" 2> /dev/null || true)"
+[ -z "$addr6" ] || echo "::add-mask::$addr6"
 
 install -d -m 0700 ~/.ssh
 key="$HOME/.ssh/ptt-deploy"

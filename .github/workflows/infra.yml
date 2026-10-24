@@ -39,8 +39,9 @@ env:
 jobs:
   plan:
     name: tofu plan (prod)
-    # Only after the bootstrap runbook (docs/runbooks/infra-bootstrap.md).
-    if: vars.TOFU_ENABLED == 'true'
+    # Only after the bootstrap runbook (docs/runbooks/infra-bootstrap.md), and only for main
+    # (a manual run from another branch would roll out unmerged changes).
+    if: vars.TOFU_ENABLED == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -111,7 +112,7 @@ jobs:
   apply:
     name: tofu apply (prod)
     needs: plan
-    if: needs.plan.outputs.exitcode == '2'
+    if: needs.plan.outputs.exitcode == '2' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: production
@@ -183,7 +184,7 @@ jobs:
             rm -f "$RUNNER_TEMP/apply.out" "$RUNNER_TEMP/prod.tfplan"
           else
             errors=$(grep -c 'Error: ' "$RUNNER_TEMP/apply.out" || true)
-            grep -E '^Apply complete!|Resources: ' "$RUNNER_TEMP/apply.out" || true
+            grep -E '^(Apply complete!|Resources: )' "$RUNNER_TEMP/apply.out" || true
             rm -f "$RUNNER_TEMP/apply.out" "$RUNNER_TEMP/prod.tfplan"
             echo "::error::tofu apply failed with ${errors} error(s); run tofu plan locally to see the state."
             exit 1
@@ -207,6 +208,7 @@ jobs:
     if: >-
       !cancelled() &&
       vars.ANSIBLE_ENABLED == 'true' &&
+      github.ref == 'refs/heads/main' &&
       (needs.plan.result == 'success' || needs.plan.result == 'skipped') &&
       (needs.apply.result == 'success' || needs.apply.result == 'skipped')
     runs-on: ubuntu-24.04
@@ -245,38 +247,11 @@ jobs:
           "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r requirements.yml
 
       # Admin user names, keys, and the domain would otherwise appear in task output (loop
-      # labels, assert messages). A multi-line secret is not reliably masked line by line, so
-      # every scalar in it is masked explicitly, before anything can print it.
+      # labels, assert messages), and a multi-line secret is not reliably masked line by line.
       - name: Mask the site vars
         run: |
-          "$RUNNER_TEMP/ansible-venv/bin/python3" -I - "$RUNNER_TEMP/site-vars.yml" << 'PY'
-          import re
-          import sys
-
-          import yaml
-
-          def scalars(node):
-              if isinstance(node, dict):
-                  for value in node.values():
-                      yield from scalars(value)
-              elif isinstance(node, list):
-                  for value in node:
-                      yield from scalars(value)
-              elif isinstance(node, str):
-                  yield node
-                  # SSH keys: also each part (the base64 key, the comment).
-                  yield from node.split()
-
-          with open(sys.argv[1], encoding="utf-8") as f:
-              data = yaml.safe_load(f)
-          if not isinstance(data, dict):
-              sys.exit("ANSIBLE_SITE_VARS must be a YAML mapping (the content of site.yml).")
-          # Skip key-type tokens and very short values; masking them would only garble the log.
-          key_type = re.compile(r"^(ssh|ecdsa|sk)-[a-z0-9@.-]+$")
-          for value in sorted({s.strip() for s in scalars(data)}):
-              if len(value) >= 3 and not key_type.match(value):
-                  print(f"::add-mask::{value}")
-          PY
+          "$RUNNER_TEMP/ansible-venv/bin/python3" -I .github/scripts/mask-yaml-values.py \
+            "$RUNNER_TEMP/site-vars.yml"
 
       - name: Connect to the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
@@ -291,6 +266,20 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: .github/scripts/ssh-setup.sh
 
+      - name: Record the deployed image
+        id: deployed
+        run: |
+          set -euo pipefail
+          image="$(.github/scripts/deployed-image.sh)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "Deployed: ${image:-(nothing yet)}"
+
+      # site.yml can recreate the containers (compose.yaml, Caddyfile, or Docker changes), so it
+      # waits for conversations to end like a deploy does.
+      - name: Wait until no session is active
+        if: steps.deployed.outputs.image != ''
+        run: .github/scripts/wait-no-sessions.sh
+
       # Without pttd_image, the app role keeps the image already deployed (PTTD_IMAGE in
       # /opt/ptt/.env); releases change it only through server-release.
       - name: Configure the host (site.yml)
@@ -299,6 +288,13 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
         run: ansible-playbook -i inventory/prod.yml site.yml -u deploy -e "@${RUNNER_TEMP}/site-vars.yml"
 
-      - name: Remove the site vars
+      # Nothing is served before the first release.
+      - name: Health check and smoke test
+        if: steps.deployed.outputs.image != ''
+        env:
+          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
+        run: .github/scripts/check-prod.sh
+
+      - name: Remove the site vars and SSH key
         if: always()
-        run: rm -f "$RUNNER_TEMP/site-vars.yml"
+        run: rm -f "$RUNNER_TEMP/site-vars.yml" ~/.ssh/ptt-deploy
