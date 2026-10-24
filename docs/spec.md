@@ -321,7 +321,7 @@ ptt/
 | Firewall group | Inbound TCP 80 and 443 only; everything else dropped |
 | Reserved IP | So the server can be rebuilt without changing DNS |
 | Automatic backups | Vultr whole-disk snapshot backups enabled (the only backup) |
-| DNS | `ptt.example.com` A/AAAA records in the existing `example.com` Route 53 hosted zone (the zone is read as a data source; OpenTofu manages only these records) |
+| DNS | `ptt.example.com` A/AAAA records in an existing Route 53 hosted zone (`example.com`), which is read as a data source; OpenTofu manages only these records |
 | State | S3 backend on a private, versioned AWS S3 bucket with S3-native locking and OpenTofu state encryption enabled |
 
 OpenTofu is used instead of Terraform for its open license and built-in state encryption; the providers are the same.
@@ -354,7 +354,7 @@ GitHub Actions builds, tests, and ships everything; a person only merges pull re
 
 **Repository rules**
 
-- Private GitHub repo; both admins have admin access. `main` is protected: changes land by pull request with CI green.
+- Public GitHub repo (ADR 0003); both admins have admin access. `main` is protected: changes land by pull request with CI green.
 - Conventional Commits; `release-please` opens release PRs that bump versions and write the changelog. Server and app are versioned separately (`server-vX.Y.Z`, `android-vX.Y.Z`).
 - Architecture decisions are recorded as short ADRs in `docs/adr/`.
 
@@ -382,7 +382,7 @@ Migrations follow expand-then-contract: add new columns or tables in one release
 
 **App updates**
 
-- The APK is served by our own server (`/v1/app/apk/<version>`, device-token authenticated) because a private GitHub repo's releases need a login.
+- The APK is served by our own server (`/v1/app/apk/<version>`, device-token authenticated) because the app's network security config trusts only ISRG Root X1 and X2, so it can only talk to our server (ADR 0003).
 - A daily WorkManager job checks `/v1/app/latest`. If a newer version exists, it downloads the APK, verifies the SHA-256 and that the signing certificate matches, then installs through `PackageInstaller`.
 - The first update needs the user to tap Install. After the app has installed itself once, Android 12+ can allow later updates without a prompt (`USER_ACTION_NOT_REQUIRED`); the app should request this and fall back to a prompt.
 - `/v1/app/latest` also returns `min_supported_version`. Older apps show a blocking "Update required" screen but still receive and answer pages.
@@ -442,9 +442,9 @@ The system watches itself and emails both admins only when something needs a per
 | --- | --- |
 | Vultr VPS, Seattle, smallest plan | \~$5–6 |
 | Vultr automatic backups | \~$1 |
-| Domain name and Route 53 zone | $0 extra (`example.com` is already owned and hosted) |
+| Domain name and Route 53 zone | $0 extra (a subdomain of a domain the family already owns and hosts in Route 53) |
 | S3 bucket for OpenTofu state | \~$0.01 |
-| FCM, GitHub private repo, Tailscale personal, Healthchecks.io | $0 |
+| FCM, GitHub public repo, Tailscale personal, Healthchecks.io | $0 |
 | Total | \~$6–7 |
 
 ## Testing
@@ -514,7 +514,7 @@ None open.
 - [x] Limits for children's phones, such as no urgent pages or quiet hours? **None.**
 - [x] Can a receiver stop the ringing without answering? **Yes, with an Acknowledged action**; it stops the ringing on all their phones and the sender sees Acknowledged.
 - [x] Timeout for an unanswered normal page? **15 min**, then Missed.
-- [x] Domain? **`ptt.example.com`**, in the existing Route 53 zone. OpenTofu state moves to S3, so the project no longer uses Cloudflare.
+- [x] Domain? **A subdomain of a domain the family already owns, in its existing Route 53 zone; configured per deployment** (`ptt.example.com` in this spec). OpenTofu state moves to S3, so the project no longer uses Cloudflare.
 - [x] Keep recordings of live talk in history? **No.** Nothing is recorded; audio exists only in memory during a session.
 - [x] End-to-end encrypted audio? **Yes, in v1** (see Security).
 - [x] A second family member as backup admin? **Both parents are admins**: each has an admin phone, SSH over Tailscale, an age key for the sops secrets, access to the shared password-manager vault, and approval rights on production deploys and releases.

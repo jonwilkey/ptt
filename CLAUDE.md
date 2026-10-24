@@ -15,3 +15,11 @@ subagents:
 
 The implementer iterates on feedback from the reviewer until the reviewer is satisfied with the
 quality of the implementation.
+
+## Public repo hygiene
+
+The repo is public. Never commit personal names, email addresses, the real domain, account IDs,
+IP addresses or keys. Use `example.com` placeholders in docs and examples, and GitHub Actions
+variables/secrets or gitignored local files for real values. Local git hooks (installed by
+`scripts/setup-hooks.sh`) enforce this: if a hook rejects a commit or push, fix the content;
+never use `--no-verify`.

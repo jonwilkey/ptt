@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# ptt-hooks: pre-commit
+#
+# Blocks a commit when the staged changes contain a secret (gitleaks), a term from the private
+# personal-term denylist (added lines and file paths), or when the commit would carry a
+# non-noreply author or committer email, or a denylisted author or committer name. Installed by scripts/setup-hooks.sh. Do not bypass it
+# with --no-verify: fix the content instead.
+
+PTT_HOOK_DIR=$(dirname -- "$0")
+# shellcheck source=.githooks/lib.sh
+. "$PTT_HOOK_DIR/lib.sh" || exit 1
+
+ptt_init
+ptt_check_drift
+ptt_load_denylist
+ptt_find_gitleaks
+
+top=$(git rev-parse --show-toplevel) || exit 1
+status=0
+
+# 1. Identity: emails must be noreply; names are scanned against the denylist below.
+for who in AUTHOR COMMITTER; do
+  ident=$(git var "GIT_${who}_IDENT") || exit 1
+  email=$(ptt_email_from_ident "$ident")
+  kind=$(ptt_lower "$who")
+  ptt_add_text "commit $kind name" "$(ptt_name_from_ident "$ident")"
+  if ! ptt_email_ok "$email" "$kind"; then
+    ptt_email_error "commit $kind" "$email"
+    status=1
+  fi
+done
+
+ptt_email_help
+
+# 2. Personal-term denylist: identity names, staged paths and added lines.
+ptt_collect_diff "" --cached
+ptt_print_notes
+if ! ptt_scan; then
+  ptt_err "ptt hooks: error: the commit identity or staged changes contain denylisted personal"
+  ptt_err "  terms (see above). This repo is public. Replace them with generic text or example.com"
+  ptt_err "  placeholders; for a name, set a generic one: git config user.name <login>"
+  status=1
+fi
+
+# 3. Secrets.
+if ! ptt_gitleaks "$top" --pre-commit --staged; then
+  ptt_err "ptt hooks: error: gitleaks found a possible secret in the staged changes (see above)."
+  ptt_err "  Remove it, rotate it if it was real, and keep secrets in sops or CI secrets."
+  status=1
+fi
+
+exit "$status"

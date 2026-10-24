@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# ptt-hooks: pre-push
+#
+# Re-checks every commit about to be pushed, which catches content that never went through
+# pre-commit (rebases, merges, amends, cherry-picks, --no-verify commits):
+#   1. author and committer emails must be GitHub noreply addresses (or allow-listed), and
+#      author and committer names must not contain denylisted terms;
+#   2. commit messages, annotated tag messages and the local and remote ref names must not
+#      contain denylisted terms (ref deletes are not checked, so bad names can be removed);
+#   3. lines and paths added by each commit must not contain denylisted terms;
+#   4. gitleaks must find no secrets in the pushed commits (merges against their first parent).
+# Commits already on remote-tracking refs of the remote being pushed to are skipped; pushing to
+# a URL or an unknown remote checks everything reachable from the pushed refs. A ref that points
+# at something other than a commit (a tag of a tree or blob) is rejected.
+# Installed by scripts/setup-hooks.sh. Do not bypass it with --no-verify.
+
+PTT_HOOK_DIR=$(dirname -- "$0")
+# shellcheck source=.githooks/lib.sh
+. "$PTT_HOOK_DIR/lib.sh" || exit 1
+
+remote_name=$1
+
+# Commits already on this remote's tracking refs need no re-check. For a URL or an unknown
+# remote, nothing is excluded.
+exclude=''
+if [ -n "$remote_name" ] && git remote | grep -q -x -F -e "$remote_name"; then
+  exclude="--remotes=$remote_name"
+fi
+
+ptt_init
+ptt_check_drift
+ptt_load_denylist
+ptt_find_gitleaks
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(git rev-parse --absolute-git-dir) ||
+  exit 1
+zero=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')
+empty_tree=$(git hash-object -t tree /dev/null)
+status=0
+updates=()
+
+# Read all of stdin first: "<local ref> <local sha> <remote ref> <remote sha>" per line.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "$local_ref" ] || continue
+  updates+=("$local_ref $local_sha $remote_ref $remote_sha")
+done
+
+checked_file="$PTT_TMP/checked"
+: >"$checked_file"
+
+for update in ${updates[@]+"${updates[@]}"}; do
+  read -r local_ref local_sha remote_ref remote_sha <<EOF
+$update
+EOF
+  # Deleting a remote ref pushes no content, and deleting a badly named ref is the cleanup we
+  # want, so its name is not checked.
+  [ "$local_sha" = "$zero" ] && continue
+
+  # Ref names become public too.
+  ptt_add_text "local ref name" "$local_ref"
+  ptt_add_text "remote ref name" "$remote_ref"
+
+  if ! git rev-parse -q --verify "$local_sha^{commit}" >/dev/null 2>&1; then
+    ptt_err "ptt hooks: error: $local_ref ($local_sha) does not point at a commit; pushing"
+    ptt_err "  trees or blobs is not supported because their content cannot be checked."
+    status=1
+    continue
+  fi
+
+  # Annotated tag message.
+  if [ "$(git cat-file -t "$local_sha")" = tag ]; then
+    git cat-file tag "$local_sha" | sed '1,/^$/d' >"$PTT_TMP/tagmsg"
+    ptt_collect_message "tag ${local_ref#refs/tags/} message" "$PTT_TMP/tagmsg" raw
+  fi
+
+  if [ "$remote_sha" != "$zero" ] &&
+    git rev-parse -q --verify "$remote_sha^{commit}" >/dev/null 2>&1; then
+    range="$remote_sha..$local_sha"
+    commits=$(git rev-list "$range") || exit 1
+  elif [ -n "$exclude" ]; then
+    # New remote ref, or the remote tip is unknown locally: check everything not yet on this
+    # remote's tracking refs.
+    range="$local_sha --not $exclude"
+    commits=$(git rev-list "$local_sha" --not "$exclude") || exit 1
+  else
+    range="$local_sha"
+    commits=$(git rev-list "$local_sha") || exit 1
+  fi
+  [ -n "$commits" ] || continue
+
+  for sha in $commits; do
+    # A commit reachable from several pushed refs is checked once.
+    if grep -q -x -F -e "$sha" "$checked_file"; then
+      continue
+    fi
+    printf '%s\n' "$sha" >>"$checked_file"
+    short=$(git rev-parse --short "$sha")
+
+    for kind in author committer; do
+      if [ "$kind" = author ]; then fmt=%ae; nfmt=%an; else fmt=%ce; nfmt=%cn; fi
+      ptt_add_text "commit $short $kind name" "$(git show -s --format="$nfmt" "$sha")"
+      email=$(git show -s --format="$fmt" "$sha")
+      if ! ptt_email_ok "$email" "$kind"; then
+        ptt_email_error "commit $short $kind" "$email"
+        status=1
+      fi
+    done
+
+    git show -s --format=%B "$sha" >"$PTT_TMP/msg"
+    ptt_collect_message "commit $short message" "$PTT_TMP/msg" raw
+
+    # Merge commits are compared with their first parent; root commits with the empty tree.
+    parent=$(git rev-parse -q --verify "$sha^1" 2>/dev/null) || parent=$empty_tree
+    ptt_collect_diff "commit $short " "$parent" "$sha"
+  done
+
+  if ! ptt_gitleaks "$repo" --log-opts="--diff-merges=first-parent $range"; then
+    ptt_err "ptt hooks: error: gitleaks found a possible secret in commits for $remote_ref"
+    ptt_err "  (see above)."
+    ptt_err "  Rewrite those commits to remove it, and rotate it if it was real."
+    status=1
+  fi
+done
+
+ptt_email_help
+ptt_print_notes
+if ! ptt_scan; then
+  ptt_err "ptt hooks: error: commits being pushed to ${remote_name:-the remote} contain denylisted"
+  ptt_err "  personal terms (see above). This repo is public. Rewrite those commits"
+  ptt_err "  (e.g. git rebase -i) to use generic text or example.com placeholders; for a"
+  ptt_err "  name, set a generic user.name and amend with --reset-author."
+  status=1
+fi
+
+exit "$status"

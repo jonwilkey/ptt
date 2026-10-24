@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# ptt-hooks: commit-msg
+#
+# Blocks a commit whose message contains a term from the private personal-term denylist.
+# Everything below a scissors line (the "git commit -v" diff) is ignored.
+#
+# Comment-character lines are scanned, but a match only on such lines is a warning, not an
+# error: in editor commits they are git's own template (for example "#<TAB>deleted: <path>"
+# when removing a badly named file, or "# On branch <name>"), which git strips. With -m/-F or
+# --cleanup=verbatim/scissors git may keep them; pre-push rescans every stored message in full,
+# so a kept line is still caught before it leaves the machine. Installed by
+# scripts/setup-hooks.sh. Do not bypass it with --no-verify: fix the message instead.
+
+PTT_HOOK_DIR=$(dirname -- "$0")
+# shellcheck source=.githooks/lib.sh
+. "$PTT_HOOK_DIR/lib.sh" || exit 1
+
+msg_file=$1
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+  ptt_err "ptt hooks: error: commit-msg hook called without a message file"
+  exit 1
+fi
+
+ptt_init
+ptt_check_drift
+ptt_load_denylist
+
+ptt_collect_message "commit message" "$msg_file"
+if ! ptt_scan 2>"$PTT_TMP/scan-out"; then
+  cc=$(git config --get core.commentChar 2>/dev/null)
+  case $cc in
+    ?) ;;
+    *) cc='#' ;;
+  esac
+  # Is every finding on a comment-character line? (findings: "<content line>\t<message>")
+  if cut -f1 "$PTT_TMP/findings" | PTT_CC=$cc awk -v cf="$PTT_TMP/content" '
+    BEGIN { cc = ENVIRON["PTT_CC"] }
+    { want[$1 + 0] = 1 }
+    END {
+      while ((getline line < cf) > 0) {
+        i++
+        if ((i in want) && substr(line, 1, 1) != cc) exit 1
+      }
+    }
+  '; then
+    sed 's/^/ptt hooks: warning: /' "$PTT_TMP/scan-out" >&2
+    ptt_err "ptt hooks: warning: denylisted terms appear only on '$cc' comment lines of the commit"
+    ptt_err "ptt hooks: warning: message (see above). git normally strips these; if it keeps them,"
+    ptt_err "ptt hooks: warning: pre-push will reject the commit."
+    exit 0
+  fi
+  cat "$PTT_TMP/scan-out" >&2
+  ptt_err "ptt hooks: error: the commit message contains denylisted personal terms (see above)."
+  ptt_err "  This repo is public. Reword the message with generic text."
+  ptt_err "  Your message is still in $msg_file if you need it."
+  exit 1
+fi
+exit 0

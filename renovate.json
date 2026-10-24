@@ -19,7 +19,7 @@
     {
       "description": "Our own pttd image in compose.yaml: its digest is updated only by the deploy pipeline.",
       "matchManagers": ["docker-compose"],
-      "matchPackageNames": ["ghcr.io/jonwilkey/ptt", "ghcr.io/jonwilkey/ptt/**"],
+      "matchPackageNames": ["ghcr.io/*/ptt", "ghcr.io/*/ptt/**"],
       "enabled": false
     },
     {

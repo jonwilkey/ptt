@@ -1,0 +1,6 @@
+# gitleaks configuration, used by the local git hooks (.githooks/) and by any CI scan.
+# Extends the built-in gitleaks rules; add allowlist entries only for verified false positives.
+title = "ptt"
+
+[extend]
+useDefault = true

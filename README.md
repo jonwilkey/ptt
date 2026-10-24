@@ -21,6 +21,7 @@ The full design is in [docs/spec.md](docs/spec.md).
 | `docs/` | Spec, runbooks (`docs/runbooks/`), ADRs (`docs/adr/`) |
 | `.github/workflows/` | CI/CD |
 | `renovate.json` | Renovate dependency-update policy |
+| `.githooks/`, `scripts/` | Local git hooks (secrets, personal data) and their setup/test scripts |
 
 ## Conventions
 
@@ -28,7 +29,16 @@ The full design is in [docs/spec.md](docs/spec.md).
 - The server and the app are versioned separately by
   [release-please](https://github.com/googleapis/release-please), with tags `server-vX.Y.Z` and
   `android-vX.Y.Z`.
-- Private GitHub repo; both admins have admin access. `main` is protected: every change lands
-  by pull request with CI green.
+- Public GitHub repo, [MIT licensed](LICENSE); both admins have admin access. `main` is
+  protected: every change lands by pull request with CI green.
+- Nothing deployment-specific or personal is committed: no names, email addresses, real domain,
+  account IDs, IPs or keys. Deployment values live in GitHub Actions variables and secrets and
+  in gitignored local files; docs use `example.com` placeholders.
 - Any deviation from the spec's "Decisions already made" table needs an ADR in
   [docs/adr/](docs/adr/) before the change is made.
+
+## Contributing / local setup
+
+Run `scripts/setup-hooks.sh` once per clone. It installs git hooks that block secrets
+(gitleaks), personal terms from your private denylist and non-noreply commit emails, and creates
+that denylist outside the repo. `scripts/test-hooks.sh` tests the hooks.
