@@ -1,0 +1,68 @@
+# ---- Go ----
+/server/bin/
+/server/pttd
+*.exe
+*.test
+*.out
+*.prof
+coverage.out
+coverage.html
+cover.out
+go.work
+go.work.sum
+
+# ---- Android / Gradle ----
+.gradle/
+.kotlin/
+/android/**/build/
+/android/**/captures/
+local.properties
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# ---- OpenTofu / Terraform ----
+# .terraform.lock.hcl is intentionally NOT ignored: commit it.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+*_override.tf
+override.tofu
+*_override.tofu
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# ---- Ansible ----
+*.retry
+
+# ---- Env files (templates are committed) ----
+.env
+.env.*
+*.env
+!.env.example
+!*.env.example
+
+# ---- Decrypted secrets (only sops-encrypted files are committed) ----
+*.dec.*
+*.plain.*
+*.agekey
+
+# ---- IDE / OS ----
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.claude/settings.local.json
+.claude/worktrees/

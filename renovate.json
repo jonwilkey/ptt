@@ -1,0 +1,62 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "America/Los_Angeles",
+  "semanticCommits": "enabled",
+  "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
+  "osvVulnerabilityAlerts": true,
+  "platformAutomerge": true,
+  "packageRules": [
+    {
+      "description": "GitHub Actions, Go modules, and Dockerfile base images: auto-merge patch and minor updates (and digest pins/refreshes) when CI passes.",
+      "matchManagers": ["github-actions", "gomod", "dockerfile"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "pinDigest", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Our own pttd image in compose.yaml: its digest is updated only by the deploy pipeline.",
+      "matchManagers": ["docker-compose"],
+      "matchPackageNames": ["ghcr.io/jonwilkey/ptt", "ghcr.io/jonwilkey/ptt/**"],
+      "enabled": false
+    },
+    {
+      "description": "Android and Gradle dependencies: one grouped PR per month, merged by a person after a quick check.",
+      "matchManagers": ["gradle", "gradle-wrapper"],
+      "groupName": "Android and Gradle dependencies",
+      "schedule": ["* 0-3 1 * *"],
+      "automerge": false
+    },
+    {
+      "description": "OpenTofu/Terraform: kept current, merged by a person.",
+      "matchManagers": ["terraform"],
+      "automerge": false
+    },
+    {
+      "description": "OpenTofu providers and modules: look them up in the OpenTofu registry.",
+      "matchDatasources": ["terraform-provider", "terraform-module"],
+      "registryUrls": ["https://registry.opentofu.org"]
+    },
+    {
+      "description": "required_version tracks OpenTofu releases, not Terraform.",
+      "matchManagers": ["terraform"],
+      "matchDepTypes": ["required_version"],
+      "overrideDatasource": "github-releases",
+      "overridePackageName": "opentofu/opentofu",
+      "extractVersion": "^v(?<version>.+)$"
+    },
+    {
+      "description": "Go toolchain minor bumps (go directive, toolchain, golang base image) are reviewed by a person.",
+      "matchDepNames": ["go", "golang", "**/golang"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
+      "description": "Major versions are never auto-merged. Keep this rule last so it wins.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ]
+}
