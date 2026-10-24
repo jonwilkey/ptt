@@ -1,0 +1,187 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One group per PR, so a new push cancels the superseded run. Pushes to main group by commit:
+  # a shared group would let GitHub drop queued main runs, and every main commit must be tested.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # CLI tool versions. Renovate does not track these yet (it would need a custom manager);
+  # bump them by hand. Actions themselves are pinned by SHA and kept current by Renovate.
+  GOLANGCI_LINT_VERSION: v2.15.0
+  SQLC_VERSION: 1.31.1
+  GOVULNCHECK_VERSION: v1.9.0
+  ACTIONLINT_VERSION: v1.7.12
+
+jobs:
+  server:
+    name: server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: go.mod is tidy
+        run: go mod tidy -diff
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          working-directory: server
+
+      - name: Test
+        run: go test -race ./...
+
+      # Also part of the test run above; repeated as its own step so the spec's
+      # "migration up/down test" gate is visible in the checks list.
+      - name: Migration up/down test
+        run: go test -race -count=1 -run '^TestMigrationsUpDownUp$' -v ./internal/db/
+
+      - uses: sqlc-dev/setup-sqlc@bac53b7fb28c039a6c7f5736fd1e89744021bdd6 # v5.0.0
+        with:
+          sqlc-version: ${{ env.SQLC_VERSION }}
+
+      - name: sqlc drift check
+        run: make sqlc-check
+
+      - name: govulncheck
+        run: make vuln GOVULNCHECK="go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+
+      - name: Build
+        run: make build VERSION="ci-${GITHUB_SHA::12}"
+
+  server-image:
+    name: server-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server
+          file: server/Dockerfile
+          platforms: linux/amd64
+          build-args: VERSION=ci-${{ github.sha }}
+          tags: pttd:ci
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Not the release smoke test (that runs with test devices in server-release); this only
+      # proves the image starts under the production runtime restrictions.
+      - name: Image runs read-only as nonroot and turns healthy
+        run: |
+          docker volume create pttd-ci-data
+          docker run -d --name pttd \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            -v pttd-ci-data:/data \
+            -p 127.0.0.1:8080:8080 -p 127.0.0.1:9090:9090 \
+            pttd:ci
+          for _ in $(seq 30); do
+            if docker exec pttd /pttd healthcheck; then break; fi
+            sleep 1
+          done
+          docker exec pttd /pttd healthcheck
+          test "$(docker inspect --format '{{.Config.User}}' pttd)" = "65532:65532"
+          curl -fsS http://127.0.0.1:8080/healthz
+          echo
+          curl -fsS http://127.0.0.1:9090/metrics | grep '^pttd_active_sessions 0$'
+          docker exec pttd /pttd admin status
+          docker stop pttd
+          test "$(docker inspect --format '{{.State.ExitCode}}' pttd)" = "0"
+
+      - name: Container logs
+        if: always()
+        run: docker logs pttd || true
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: server/go.mod
+          cache: false
+
+      # The runner image ships shellcheck, so run: blocks are checked too.
+      - name: actionlint
+        run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" -color
+
+  osv-scanner:
+    name: osv-scanner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OSV-Scanner exits non-zero on any finding; the next step applies the severity gate.
+      - name: Scan lockfiles
+        id: scan
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=json
+            --output=osv-results.json
+            --recursive
+            ./
+
+      # Fails on CVSS >= 7.0 (high or critical). Unscored findings, which include most Go
+      # advisories, are reported as warnings; govulncheck in the server job gates those by
+      # reachability.
+      - name: Fail on high or critical findings
+        run: |
+          if [ ! -s osv-results.json ]; then
+            echo "::error::OSV-Scanner wrote no results; see the 'Scan lockfiles' step."
+            exit 1
+          fi
+          jq -r '
+            .results[]? | .source.path as $src | .packages[]? | .package as $p | .groups[]? |
+            [(.max_severity // "" | if . == "" then "unscored" else . end),
+             "\($p.ecosystem)/\($p.name)@\($p.version)", (.ids | join(",")), $src] | @tsv
+          ' osv-results.json > findings.tsv
+          if [ ! -s findings.tsv ]; then
+            echo "No known vulnerabilities."
+            exit 0
+          fi
+          column -t -s "$(printf '\t')" -N SEVERITY,PACKAGE,IDS,SOURCE findings.tsv
+          awk -F '\t' '$1 == "unscored" { printf "::warning::Unscored advisory %s in %s\n", $3, $2 }' findings.tsv
+          high=$(awk -F '\t' '$1 != "unscored" && $1 + 0 >= 7.0' findings.tsv | wc -l)
+          if [ "$high" -gt 0 ]; then
+            echo "::error::${high} high or critical (CVSS >= 7.0) finding(s)."
+            exit 1
+          fi
