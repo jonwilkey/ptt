@@ -1,0 +1,465 @@
+name: server-release
+
+# Builds, scans, signs, and smoke-tests the pttd image for a server-vX.Y.Z tag, then deploys it
+# to production after either admin approves the `production` environment.
+#
+# Entry points (ADR 0005), all running the same jobs against the tag's tree:
+#   - release-please.yml calls this workflow (workflow_call) right after it creates a release;
+#     tags created with GITHUB_TOKEN do not trigger workflows by themselves.
+#   - An admin pushes a server-v* tag.
+#   - workflow_dispatch with an existing tag: rebuilds and redeploys the tag as-is (same pinned
+#     base images, from the tag's Dockerfile). Base-image updates ship as a new release (Renovate
+#     PRs; weekly-maintenance in milestone 6). The rebuilt image gets a new digest, and the
+#     version tag in GHCR moves to it. Redeploying an older tag also puts that tag's
+#     deploy/compose.yaml and deploy/Caddyfile back on the server.
+#
+# The repository and its Actions logs are public: the domain comes only from a secret (masked),
+# and the server's tailnet address is masked before use.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, e.g. server-v1.2.3"
+        required: true
+        type: string
+    outputs:
+      image:
+        description: "Image reference pinned by digest"
+        value: ${{ jobs.build.outputs.image }}
+      previous_image:
+        description: "Image that was deployed before this run (empty on the first deploy)"
+        value: ${{ jobs.deploy.outputs.previous_image }}
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to rebuild and redeploy as-is, e.g. server-v1.2.3"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  # One run per release; a second run for the same tag waits instead of racing the first.
+  group: server-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # renovate: datasource=github-releases depName=aquasecurity/trivy
+  TRIVY_VERSION: v0.75.0
+  # renovate: datasource=github-releases depName=sigstore/cosign
+  COSIGN_VERSION: v3.1.3
+  # renovate: datasource=github-releases depName=anchore/syft
+  SYFT_VERSION: v1.54.1
+  # renovate: datasource=github-releases depName=tailscale/tailscale extractVersion=^v(?<version>.+)$
+  TAILSCALE_VERSION: 1.104.1
+  # Same pins as the ci workflow's ansible job.
+  ANSIBLE_CORE_VERSION: 2.21.5
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      image: ${{ steps.meta.outputs.repo }}@${{ steps.push.outputs.digest }}
+      repo: ${{ steps.meta.outputs.repo }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Resolve the tag and image name
+        id: meta
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^server-v([0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::'$TAG' is not a server release tag (server-vX.Y.Z)."
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          # Images are signed and deployed only from main (release-please, manual runs) or from
+          # the tag itself; the signature identity check and the environment rules rely on it.
+          case "$GITHUB_REF" in
+            refs/heads/main | "refs/tags/$TAG") ;;
+            *)
+              echo "::error::$EVENT runs must start from main or the tag, not $GITHUB_REF."
+              exit 1
+              ;;
+          esac
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}/pttd"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.meta.outputs.tag }}
+          persist-credentials: false
+
+      # The tag's commit (github.sha is main's head for release-please and manual runs).
+      - name: Tagged commit
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # A clean build (no layer cache; base images pulled at their pinned digests): release
+      # images never reuse layers built by other jobs. A single-platform manifest without
+      # BuildKit attestations, so the digest is the image itself; the SBOM and signature are
+      # attached with cosign below. Pushed by digest only: the version tag is added by the sign
+      # job once the image has passed every gate.
+      - name: Build and push (by digest)
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server
+          file: server/Dockerfile
+          platforms: linux/amd64
+          build-args: VERSION=${{ steps.meta.outputs.version }}
+          outputs: type=image,name=${{ steps.meta.outputs.repo }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+            org.opencontainers.image.licenses=MIT
+          pull: true
+          no-cache: true
+          provenance: false
+          sbom: false
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE: ${{ steps.meta.outputs.repo }}@${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### pttd ${VERSION}"
+            echo
+            echo "Image: \`${IMAGE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  scan:
+    name: scan (Trivy)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: read # pull the image if the package is private
+    steps:
+      # High or critical findings fail the release (spec, "Supply chain"), fixed or not: an
+      # unfixed high finding in the image still needs a person to look at it.
+      - name: Scan the pushed image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ needs.build.outputs.image }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          format: table
+
+  smoke:
+    name: smoke (image on the runner)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    env:
+      COMPOSE_FILE: deploy/compose.yaml:deploy/compose.ci.yaml
+      PTTD_IMAGE: ptt/pttd:ci
+      PTT_DOMAIN: ptt.example.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.build.outputs.tag }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/docker-daemon-prod
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # compose.ci.yaml runs ptt/pttd:ci; point that name at exactly the pushed digest.
+      - name: Pull the pushed image by digest
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          docker tag "$IMAGE" ptt/pttd:ci
+          docker logout ghcr.io
+
+      # TODO(milestone 2): run pttd with the fake FCM sender and the two pre-provisioned test
+      # devices, and extend the smoke test to page, answer, and relay one audio frame.
+      - uses: ./.github/actions/compose-smoke
+
+      - name: The stack ran the pushed image
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          want="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+          got="$(docker inspect "$(docker compose ps -q pttd)" --format '{{.Image}}')"
+          if [ "$want" != "$got" ]; then
+            echo "::error::pttd ran $got, not the pushed image $want."
+            exit 1
+          fi
+          echo "ok    pttd ran $IMAGE"
+
+      - name: Container logs
+        if: failure()
+        run: docker compose logs --no-color --timestamps || true
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v --timeout 30 || true
+
+  sign:
+    name: SBOM and signature
+    # Only images that passed the scan and the smoke test are signed.
+    needs: [build, scan, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: write # push the signature and the SBOM attestation
+      id-token: write # keyless signing (Fulcio certificate for this workflow's identity)
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ needs.build.outputs.image }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ github.token }}
+          syft-version: ${{ env.SYFT_VERSION }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/pttd.spdx.json
+          artifact-name: pttd-${{ needs.build.outputs.version }}.spdx.json
+          upload-artifact: true
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Sign the image and attach the SBOM
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMAGE"
+          cosign attest --yes --type spdxjson --predicate "$RUNNER_TEMP/pttd.spdx.json" "$IMAGE"
+
+      - name: Verify the signature and the SBOM attestation
+        id: verify
+        run: |
+          set -euo pipefail
+          # Matches ADR 0005: main (release-please, manual runs) or a pushed server-v* tag.
+          server_re="${GITHUB_SERVER_URL//./\\.}"
+          repo_re="${GITHUB_REPOSITORY//./\\.}"
+          identity="^${server_re}/${repo_re}/\.github/workflows/server-release\.yml@refs/(heads/main|tags/server-v[0-9][0-9A-Za-z.+-]*)$"
+          issuer="https://token.actions.githubusercontent.com"
+          cosign verify "$IMAGE" \
+            --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" > /dev/null
+          cosign verify-attestation "$IMAGE" --type spdxjson \
+            --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" > /dev/null
+          echo "ok    signature and SBOM attestation verify"
+          {
+            echo
+            echo "Verify the signature (and the SBOM attestation with \`verify-attestation --type spdxjson\`):"
+            echo
+            echo '```sh'
+            echo "cosign verify ${IMAGE} \\"
+            echo "  --certificate-oidc-issuer ${issuer} \\"
+            echo "  --certificate-identity-regexp '${identity}'"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The version tag points at exactly the digest that passed scan, smoke test, and signing.
+      # The manifest is copied byte for byte through the registry API, so the digest is unchanged.
+      - name: Tag the image with its version
+        env:
+          REPO: ${{ needs.build.outputs.repo }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          VERSION: ${{ needs.build.outputs.version }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          name="${REPO#ghcr.io/}"
+          token="$(curl -fsS -u "${GITHUB_ACTOR}:${GHCR_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${name}:pull,push" | jq -r .token)"
+          echo "::add-mask::$token"
+          manifest="$RUNNER_TEMP/manifest.json"
+          accept="application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
+          curl -fsS -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+            -o "$manifest" "https://ghcr.io/v2/${name}/manifests/${DIGEST}"
+          if [ "sha256:$(sha256sum < "$manifest" | cut -d' ' -f1)" != "$DIGEST" ]; then
+            echo "::error::The registry returned a manifest that does not match ${DIGEST}."
+            exit 1
+          fi
+          media_type="$(jq -r '.mediaType' "$manifest")"
+          curl -fsS -X PUT -H "Authorization: Bearer ${token}" -H "Content-Type: ${media_type}" \
+            --data-binary "@${manifest}" "https://ghcr.io/v2/${name}/manifests/${VERSION}" -o /dev/null
+          tagged="$(curl -fsS -I -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+            "https://ghcr.io/v2/${name}/manifests/${VERSION}" | tr -d '\r' |
+            awk -F': ' 'tolower($1) == "docker-content-digest" { print $2 }')"
+          if [ "$tagged" != "$DIGEST" ]; then
+            echo "::error::${REPO}:${VERSION} resolves to '${tagged}', not ${DIGEST}."
+            exit 1
+          fi
+          echo "${REPO}:${VERSION} -> ${DIGEST}"
+          echo "Tag: \`${REPO}:${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: deploy (production)
+    needs: [build, scan, smoke, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Required reviewers on this environment are the approval gate (docs/runbooks/github-setup.md).
+    # No environment URL: it would show the domain on the public run page.
+    environment: production
+    concurrency:
+      # Shared with the infra workflow's Ansible job: one change to the host at a time.
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read # GHCR_TOKEN: the host pulls the image with this job's token
+    outputs:
+      # For rollback automation (milestone 6): what was running before this deploy.
+      previous_image: ${{ steps.previous.outputs.image }}
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.build.outputs.tag }}
+          persist-credentials: false
+
+      - name: Connect to the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: ${{ env.TAILSCALE_VERSION }}
+
+      # The action registers the node as ephemeral; it disappears from the tailnet after the job.
+      - name: SSH access to ptt-prod
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: .github/scripts/ssh-setup.sh
+
+      - name: Record the deployed image
+        id: previous
+        run: |
+          set -euo pipefail
+          image="$(.github/scripts/deployed-image.sh)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "Deployed now: ${image:-(nothing; first deploy)}"
+          echo "Deploying:    ${IMAGE}"
+
+      # Spec, "Server deploys" step 2: never cut off a conversation.
+      - name: Wait until no session is active
+        if: steps.previous.outputs.image != ''
+        run: .github/scripts/wait-no-sessions.sh
+
+      - name: Install Ansible
+        working-directory: infra/ansible
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install --quiet "ansible-core==${ANSIBLE_CORE_VERSION}"
+          echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r requirements.yml
+
+      - name: Deploy with Ansible (deploy.yml)
+        id: ansible
+        working-directory: infra/ansible
+        env:
+          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          vars="$RUNNER_TEMP/deploy-vars.json"
+          # Extra vars from a file, so the domain is never on a command line.
+          (umask 077 && jq -n --arg d "$PTT_DOMAIN" '{ptt_domain: $d}' > "$vars")
+          ansible-playbook -i inventory/prod.yml deploy.yml -u deploy \
+            -e "@${vars}" -e "pttd_image=${IMAGE}"
+
+      # Spec, "Server deploys" step 5: /healthz within 2 minutes, then the smoke test.
+      - name: Health check and smoke test
+        id: health
+        env:
+          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
+        run: .github/scripts/check-prod.sh
+
+      - name: Summary
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          {
+            echo
+            echo "Deployed pttd ${VERSION} (\`${IMAGE}\`) to production."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Automatic rollback is milestone 6; until then a person rolls back from a laptop.
+      - name: Manual rollback instructions
+        if: failure() && (steps.ansible.outcome == 'success' || steps.ansible.outcome == 'failure')
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.image }}
+        run: |
+          {
+            echo
+            echo "## Deploy of \`${IMAGE}\` failed after Ansible started"
+            echo
+            if [ -n "$PREVIOUS" ]; then
+              echo "Previously deployed: \`${PREVIOUS}\`. To roll back, from \`infra/ansible/\` on a"
+              echo "machine in the tailnet:"
+              echo
+              echo '```sh'
+              echo "GHCR_TOKEN=<token with read:packages> ansible-playbook -i inventory/prod.yml deploy.yml \\"
+              echo "  -e pttd_image=${PREVIOUS}"
+              echo '```'
+              echo
+              echo "If the new release ran a migration, restore its pre-migration snapshot first"
+              echo "(deploy/README.md, \"Restoring a SQLite snapshot\")."
+            else
+              echo "This was the first deploy; there is no previous image to roll back to."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Deploy failed. Previous image: ${PREVIOUS:-none}. See the job summary for the rollback command."
+
+      - name: Remove the deploy vars and SSH key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/deploy-vars.json" ~/.ssh/ptt-deploy

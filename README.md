@@ -6,7 +6,9 @@ is a signed, sideloaded APK; a single Go server (`pttd`) on a Seattle VPS wakes 
 and relays end-to-end encrypted audio it cannot read. Nothing is recorded and no history is
 kept.
 
-The full design is in [docs/spec.md](docs/spec.md).
+The full design is in [docs/spec.md](docs/spec.md). Setting up the infrastructure and the CI/CD
+pipeline: [docs/runbooks/infra-bootstrap.md](docs/runbooks/infra-bootstrap.md), then
+[docs/runbooks/github-setup.md](docs/runbooks/github-setup.md).
 
 ## Layout
 

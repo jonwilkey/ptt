@@ -1,0 +1,300 @@
+name: infra
+
+# Rolls out merged infrastructure changes: `tofu plan` for infra/tofu/prod, then `tofu apply`
+# after approval of the `production` environment (only when the plan has changes), then the full
+# Ansible playbook (site.yml) against prod after a second approval.
+#
+# The repository and its Actions logs are public: identifying values come only from secrets
+# (masked), the human-readable plan and apply output are never printed (only "<actions>
+# <address>" lines and counts), and every value in the Ansible site vars is masked before
+# Ansible runs.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      # site.yml copies these to the host; a change to them takes effect on the next run.
+      - "deploy/compose.yaml"
+      - "deploy/Caddyfile"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # Runs queue instead of overlapping; a newer queued run replaces an older queued one, which is
+  # fine because each run rolls out all of main.
+  group: infra
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  # Same pins as the ci workflow (tofu and ansible jobs).
+  TOFU_VERSION: 1.13.2
+  ANSIBLE_CORE_VERSION: 2.21.5
+  # renovate: datasource=github-releases depName=tailscale/tailscale extractVersion=^v(?<version>.+)$
+  TAILSCALE_VERSION: 1.104.1
+
+jobs:
+  plan:
+    name: tofu plan (prod)
+    # Only after the bootstrap runbook (docs/runbooks/infra-bootstrap.md), and only for main
+    # (a manual run from another branch would roll out unmerged changes).
+    if: vars.TOFU_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # OIDC token for ptt-tofu-plan (sub ...:ref:refs/heads/main)
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+      changes: ${{ steps.summary.outputs.changes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TOFU_PLAN_ROLE_ARN }}
+          role-session-name: infra-plan-${{ github.run_id }}
+          aws-region: us-west-2
+          mask-aws-account-id: true
+
+      - name: tofu init
+        working-directory: infra/tofu/prod
+        env:
+          TOFU_STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+        run: tofu init -input=false -no-color -lockfile=readonly -backend-config="bucket=${TOFU_STATE_BUCKET}" > /dev/null
+
+      - name: tofu plan
+        id: plan
+        working-directory: infra/tofu/prod
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY_PLAN }}
+          TF_VAR_zone_name: ${{ secrets.TOFU_ZONE_NAME }}
+          TF_VAR_record_name: ${{ secrets.TOFU_RECORD_NAME }}
+          TF_VAR_admin_users: ${{ secrets.TOFU_ADMIN_USERS }}
+        run: |
+          "$GITHUB_WORKSPACE/.github/scripts/tofu-plan.sh" "$RUNNER_TEMP/prod.tfplan"
+
+      - name: Summarize plan
+        id: summary
+        if: steps.plan.outputs.exitcode == '0' || steps.plan.outputs.exitcode == '2'
+        working-directory: infra/tofu/prod
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.github/scripts/tofu-plan-summary.sh" "$RUNNER_TEMP/prod.tfplan" > "$RUNNER_TEMP/summary.txt"
+          rm -f "$RUNNER_TEMP/prod.tfplan"
+          cat "$RUNNER_TEMP/summary.txt"
+          # The apply job re-plans and refuses to apply if its changes differ from these.
+          echo "changes=$(sha256sum < "$RUNNER_TEMP/summary.txt" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### OpenTofu plan: \`infra/tofu/prod\`"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if plan errored
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::tofu plan failed; see the plan step log."
+          exit 1
+
+  apply:
+    name: tofu apply (prod)
+    needs: plan
+    if: needs.plan.outputs.exitcode == '2' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # OIDC token for ptt-tofu-apply (sub ...:environment:production)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TOFU_APPLY_ROLE_ARN }}
+          role-session-name: infra-apply-${{ github.run_id }}
+          aws-region: us-west-2
+          mask-aws-account-id: true
+
+      - name: tofu init
+        working-directory: infra/tofu/prod
+        env:
+          TOFU_STATE_BUCKET: ${{ secrets.TOFU_STATE_BUCKET }}
+        run: tofu init -input=false -no-color -lockfile=readonly -backend-config="bucket=${TOFU_STATE_BUCKET}" > /dev/null
+
+      # Re-planned here rather than passed from the plan job: the Tailscale auth key is a
+      # production environment secret, so only this job can put it in the plan; and the plan
+      # never leaves the runner. The check below makes sure what is applied is what was approved.
+      - name: tofu plan
+        id: plan
+        working-directory: infra/tofu/prod
+        env:
+          VULTR_API_KEY: ${{ secrets.VULTR_API_KEY }}
+          TF_VAR_zone_name: ${{ secrets.TOFU_ZONE_NAME }}
+          TF_VAR_record_name: ${{ secrets.TOFU_RECORD_NAME }}
+          TF_VAR_admin_users: ${{ secrets.TOFU_ADMIN_USERS }}
+          # Only set when the instance is created or replaced (infra-bootstrap.md, step 6).
+          TF_VAR_tailscale_auth_key: ${{ secrets.TS_SERVER_AUTH_KEY }}
+        run: |
+          "$GITHUB_WORKSPACE/.github/scripts/tofu-plan.sh" "$RUNNER_TEMP/prod.tfplan" -lock=true
+
+      - name: Same changes as the approved plan
+        if: steps.plan.outputs.exitcode == '2'
+        working-directory: infra/tofu/prod
+        env:
+          APPROVED: ${{ needs.plan.outputs.changes }}
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.github/scripts/tofu-plan-summary.sh" "$RUNNER_TEMP/prod.tfplan" > "$RUNNER_TEMP/summary.txt"
+          cat "$RUNNER_TEMP/summary.txt"
+          now="$(sha256sum < "$RUNNER_TEMP/summary.txt" | cut -d' ' -f1)"
+          if [ "$now" != "$APPROVED" ]; then
+            echo "::error::The changes differ from the plan that was approved (infrastructure changed in between). Nothing applied; re-run the workflow."
+            exit 1
+          fi
+
+      - name: tofu apply
+        if: steps.plan.outputs.exitcode == '2'
+        working-directory: infra/tofu/prod
+        run: |
+          set -euo pipefail
+          # Output discarded: resource IDs and attributes would land in a public log.
+          if tofu apply -input=false -no-color "$RUNNER_TEMP/prod.tfplan" > "$RUNNER_TEMP/apply.out" 2>&1; then
+            grep -E '^Apply complete!' "$RUNNER_TEMP/apply.out" || true
+            rm -f "$RUNNER_TEMP/apply.out" "$RUNNER_TEMP/prod.tfplan"
+          else
+            errors=$(grep -c 'Error: ' "$RUNNER_TEMP/apply.out" || true)
+            grep -E '^(Apply complete!|Resources: )' "$RUNNER_TEMP/apply.out" || true
+            rm -f "$RUNNER_TEMP/apply.out" "$RUNNER_TEMP/prod.tfplan"
+            echo "::error::tofu apply failed with ${errors} error(s); run tofu plan locally to see the state."
+            exit 1
+          fi
+
+      - name: Nothing to apply
+        if: steps.plan.outputs.exitcode == '0'
+        run: echo "::notice::No changes at apply time (someone applied them already); nothing to do."
+
+      - name: Fail if plan errored
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::tofu plan failed; see the plan step log."
+          exit 1
+
+  ansible:
+    name: ansible (site.yml)
+    needs: [plan, apply]
+    # After apply, or without it when there was nothing to apply. ANSIBLE_ENABLED is set once the
+    # host exists and the secrets below are in place (docs/runbooks/github-setup.md).
+    if: >-
+      !cancelled() &&
+      vars.ANSIBLE_ENABLED == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (needs.plan.result == 'success' || needs.plan.result == 'skipped') &&
+      (needs.apply.result == 'success' || needs.apply.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    concurrency:
+      # Shared with server-release's deploy job: one change to the host at a time.
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read # GHCR_TOKEN, in case the deployed image has to be pulled again
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Write the site vars
+        env:
+          ANSIBLE_SITE_VARS: ${{ secrets.ANSIBLE_SITE_VARS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANSIBLE_SITE_VARS" ]; then
+            echo "::error::The production environment secret ANSIBLE_SITE_VARS is empty."
+            exit 1
+          fi
+          vars="$RUNNER_TEMP/site-vars.yml"
+          (umask 077 && printf '%s\n' "$ANSIBLE_SITE_VARS" > "$vars")
+
+      - name: Install Ansible
+        working-directory: infra/ansible
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install --quiet "ansible-core==${ANSIBLE_CORE_VERSION}"
+          echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r requirements.yml
+
+      # Admin user names, keys, and the domain would otherwise appear in task output (loop
+      # labels, assert messages), and a multi-line secret is not reliably masked line by line.
+      - name: Mask the site vars
+        run: |
+          "$RUNNER_TEMP/ansible-venv/bin/python3" -I .github/scripts/mask-yaml-values.py \
+            "$RUNNER_TEMP/site-vars.yml"
+
+      - name: Connect to the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: ${{ env.TAILSCALE_VERSION }}
+
+      - name: SSH access to ptt-prod
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: .github/scripts/ssh-setup.sh
+
+      - name: Record the deployed image
+        id: deployed
+        run: |
+          set -euo pipefail
+          image="$(.github/scripts/deployed-image.sh)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "Deployed: ${image:-(nothing yet)}"
+
+      # site.yml can recreate the containers (compose.yaml, Caddyfile, or Docker changes), so it
+      # waits for conversations to end like a deploy does.
+      - name: Wait until no session is active
+        if: steps.deployed.outputs.image != ''
+        run: .github/scripts/wait-no-sessions.sh
+
+      # Without pttd_image, the app role keeps the image already deployed (PTTD_IMAGE in
+      # /opt/ptt/.env); releases change it only through server-release.
+      - name: Configure the host (site.yml)
+        working-directory: infra/ansible
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: ansible-playbook -i inventory/prod.yml site.yml -u deploy -e "@${RUNNER_TEMP}/site-vars.yml"
+
+      # Nothing is served before the first release.
+      - name: Health check and smoke test
+        if: steps.deployed.outputs.image != ''
+        env:
+          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
+        run: .github/scripts/check-prod.sh
+
+      - name: Remove the site vars and SSH key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/site-vars.yml" ~/.ssh/ptt-deploy

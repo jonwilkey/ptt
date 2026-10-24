@@ -143,8 +143,10 @@ encrypted prod state. Tagged nodes have key expiry disabled, so the server stays
 
 **Settings > Environments > New environment** `production`:
 
-- Required reviewers: both admins. Prevent self-review: on.
-- Deployment branches and tags: **Selected branches**, `main` only.
+- Required reviewers: both admins. Prevent self-review: off (see
+  [github-setup.md](github-setup.md#2-the-production-environment)).
+- Deployment branches and tags: **Selected branches and tags**: branch `main` and tag
+  `server-v*`.
 
 **Settings > Secrets and variables > Actions**:
 
@@ -163,8 +165,9 @@ variables.
 | `production` environment secret | `VULTR_API_KEY` | Apply key from step 1.2 (used only by the `infra` apply job) |
 | `production` environment secret | `AWS_TOFU_APPLY_ROLE_ARN` | `apply_role_arn` from `tofu output` |
 
-The Tailscale credentials CI uses for deploys (`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`) are
-added with the `infra` workflow, not here.
+The deploy-related secrets (`TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `DEPLOY_SSH_KEY`,
+`PTT_DOMAIN`, `ANSIBLE_SITE_VARS`) and the other repository settings are in
+[github-setup.md](github-setup.md), which also has the full list.
 
 `TOFU_ADMIN_USERS` (public keys only; one entry per admin; one line):
 
@@ -232,4 +235,5 @@ printed because the logs are public). Close the PR.
 
 From now on, infrastructure changes go through PRs; leave `TF_VAR_tailscale_auth_key` unset
 unless a plan creates or replaces the instance. Next: run the Ansible playbook (see
-`infra/ansible/`).
+`infra/ansible/`), then continue with the first deploy in
+[github-setup.md](github-setup.md#9-first-deploy).

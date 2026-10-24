@@ -39,7 +39,9 @@ Run every command from `infra/ansible/` so `ansible.cfg` is picked up.
 This repository is public, so no deployment-specific value is committed. Real
 values go in `inventory/group_vars/prod/site.yml`, which is git-ignored: copy
 `inventory/group_vars/prod/site.yml.example` and fill it in. CI passes the same
-variables as extra vars built from GitHub Actions variables and secrets.
+variables as an extra-vars file: the `infra` workflow from the `production` secret
+`ANSIBLE_SITE_VARS` (this file's content), `server-release` only `ptt_domain` from
+`PTT_DOMAIN` (see `docs/runbooks/github-setup.md`).
 
 | Variable | Required by | Notes |
 | --- | --- | --- |

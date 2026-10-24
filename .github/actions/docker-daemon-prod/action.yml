@@ -1,0 +1,24 @@
+name: Production Docker daemon settings
+description: >-
+  Applies the daemon.json settings from infra/ansible/roles/docker that change how containers
+  are reached (userland-proxy off, so published ports are DNATed as in production), then
+  restarts Docker. Run it before building or pulling images.
+runs:
+  using: composite
+  steps:
+    - name: Production Docker daemon settings
+      shell: bash
+      run: |
+        set -euo pipefail
+        current=/etc/docker/daemon.json
+        [ -s "$current" ] || echo '{}' | sudo tee "$current" > /dev/null
+        jq '. * {"userland-proxy": false, "no-new-privileges": true, "live-restore": true}' \
+          "$current" > "$RUNNER_TEMP/daemon.json"
+        sudo install -m 0644 "$RUNNER_TEMP/daemon.json" "$current"
+        cat "$current"
+        sudo systemctl restart docker
+        for _ in $(seq 30); do
+          if docker info > /dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        docker info --format 'Docker {{.ServerVersion}}'

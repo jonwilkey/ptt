@@ -1,0 +1,131 @@
+name: Compose smoke test
+description: >-
+  Starts deploy/compose.yaml with deploy/compose.ci.yaml (Caddy's internal CA) on the runner and
+  checks it from outside: deploy/smoke.sh over IPv4 and, when the runner has it, IPv6, plus the
+  containers' hardening. The image must already be present locally as ptt/pttd:ci. The calling
+  job sets COMPOSE_FILE, PTTD_IMAGE, and PTT_DOMAIN (see the compose-smoke job in ci.yml), and
+  shows the logs and stops the stack itself (`docker compose logs`, `docker compose down -v`)
+  so that those run even when a check fails.
+runs:
+  using: composite
+  steps:
+    - name: Check the compose environment
+      shell: bash
+      run: |
+        set -euo pipefail
+        want="COMPOSE_FILE=deploy/compose.yaml:deploy/compose.ci.yaml PTTD_IMAGE=ptt/pttd:ci PTT_DOMAIN=ptt.example.com"
+        got="COMPOSE_FILE=${COMPOSE_FILE:-} PTTD_IMAGE=${PTTD_IMAGE:-} PTT_DOMAIN=${PTT_DOMAIN:-}"
+        if [ "$got" != "$want" ]; then
+          echo "::error::The calling job must set ${want}; got ${got}."
+          exit 1
+        fi
+        docker image inspect ptt/pttd:ci --format 'ptt/pttd:ci is {{.Id}}'
+
+    - name: Start the stack
+      shell: bash
+      run: docker compose up -d --wait --wait-timeout 120
+
+    - name: Wait for Caddy's certificate
+      shell: bash
+      run: |
+        # The local CA and the leaf certificate are created just after Caddy starts.
+        ca="$RUNNER_TEMP/caddy-root.crt"
+        for _ in $(seq 30); do
+          if docker compose exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$ca" &&
+            curl -fs -o /dev/null --cacert "$ca" \
+              --resolve ptt.example.com:443:127.0.0.1 https://ptt.example.com/healthz; then
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "::error::Caddy did not serve https://ptt.example.com/healthz within 30 s."
+        exit 1
+
+    - name: Smoke test over IPv4
+      shell: bash
+      run: |
+        deploy/smoke.sh https://ptt.example.com \
+          --resolve ptt.example.com:443:127.0.0.1 --cacert "$RUNNER_TEMP/caddy-root.crt"
+
+    - name: IPv6 network, and smoke test over IPv6 when the runner has it
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$(docker network inspect ptt_default --format '{{.EnableIPv6}}')" = true
+        caddy="$(docker compose ps -q caddy)"
+        v6="$(docker inspect "$caddy" --format '{{range .NetworkSettings.Networks}}{{.GlobalIPv6Address}}{{end}}')"
+        if [ -z "$v6" ]; then
+          echo "::error::Caddy has no IPv6 address on the compose network."
+          exit 1
+        fi
+        echo "Caddy's IPv6 address: $v6"
+        # Docker publishes on [::] only if the host has IPv6. With the userland proxy off,
+        # Docker does not forward the IPv6 loopback, so the test needs a global address.
+        host_v6="$(ip -6 -o addr show scope global | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
+        if ! docker inspect "$caddy" | jq -e '.[0].NetworkSettings.Ports["443/tcp"] | any(.HostIp == "::")' > /dev/null; then
+          echo "::notice::Docker did not publish 443 on IPv6; skipped the IPv6 smoke test."
+        elif [ -z "$host_v6" ]; then
+          echo "::notice::The runner has no global IPv6 address; skipped the IPv6 smoke test."
+        else
+          deploy/smoke.sh https://ptt.example.com \
+            --resolve "ptt.example.com:443:[${host_v6}]" --cacert "$RUNNER_TEMP/caddy-root.crt"
+        fi
+
+    - name: Container hardening
+      shell: bash
+      run: |
+        set -euo pipefail
+        pttd="$(docker inspect "$(docker compose ps -q pttd)" | jq '.[0]')"
+        caddy="$(docker inspect "$(docker compose ps -q caddy)" | jq '.[0]')"
+        # check <description> <container JSON> <jq filter that must be true> [<jq filter for
+        # the actual value, printed on failure>]
+        check() {
+          if jq -e "$3" <<< "$2" > /dev/null; then
+            echo "ok    $1"
+          else
+            echo "::error::$1${4:+ (actual: $(jq -c "$4" <<< "$2"))}"
+            failed=1
+          fi
+        }
+        # Docker may report capabilities with or without the CAP_ prefix.
+        caps='map(ltrimstr("CAP_"))'
+        failed=0
+        check "pttd runs as 65532:65532" "$pttd" '.Config.User == "65532:65532"' '.Config.User'
+        check "Caddy runs as root in its container (for ports 80/443)" "$caddy" '.Config.User == ""' '.Config.User'
+        for name in pttd caddy; do
+          c="${!name}"
+          check "$name: read-only root filesystem" "$c" '.HostConfig.ReadonlyRootfs == true' '.HostConfig.ReadonlyRootfs'
+          check "$name: all capabilities dropped" "$c" \
+            "(.HostConfig.CapDrop // [] | $caps) == [\"ALL\"]" '.HostConfig.CapDrop'
+          check "$name: no-new-privileges" "$c" \
+            '.HostConfig.SecurityOpt // [] | any(. == "no-new-privileges:true")' '.HostConfig.SecurityOpt'
+          check "$name: restart unless-stopped" "$c" \
+            '.HostConfig.RestartPolicy.Name == "unless-stopped"' '.HostConfig.RestartPolicy.Name'
+        done
+        check "pttd: no added capabilities" "$pttd" \
+          "(.HostConfig.CapAdd // [] | $caps) == []" '.HostConfig.CapAdd'
+        # The image's caddy binary has the file capability cap_net_bind_service=+ep and cannot
+        # be exec'd unless NET_BIND_SERVICE is in the bounding set.
+        check "Caddy: only NET_BIND_SERVICE added" "$caddy" \
+          "(.HostConfig.CapAdd // [] | $caps) == [\"NET_BIND_SERVICE\"]" '.HostConfig.CapAdd'
+        check "pttd: the only writable mount is /data" "$pttd" \
+          '[.Mounts[] | select(.RW) | .Destination] == ["/data"]' \
+          '[.Mounts[] | {Destination, RW}]'
+        check "pttd: only 9090/tcp published" "$pttd" \
+          '[.HostConfig.PortBindings | keys[]] == ["9090/tcp"]' '.HostConfig.PortBindings'
+        check "pttd: 9090 bound only to 127.0.0.1" "$pttd" \
+          '.HostConfig.PortBindings["9090/tcp"] | length > 0 and all(.HostIp == "127.0.0.1")' \
+          '.HostConfig.PortBindings'
+        check "Caddy: only 80/tcp and 443/tcp published (no HTTP/3 UDP)" "$caddy" \
+          '[.HostConfig.PortBindings | keys[]] == ["443/tcp", "80/tcp"]' '.HostConfig.PortBindings'
+        # From the host: the internal listener answers on loopback only.
+        curl -fsS http://127.0.0.1:9090/metrics | grep -q '^pttd_active_sessions 0$'
+        echo "ok    /metrics answers on 127.0.0.1:9090"
+        host_ip="$(hostname -I | awk '{print $1}')"
+        if curl -sS -o /dev/null --connect-timeout 3 "http://${host_ip}:9090/metrics"; then
+          echo "::error::/metrics answers on ${host_ip}:9090; it must be loopback only."
+          failed=1
+        else
+          echo "ok    /metrics is not reachable on ${host_ip}:9090"
+        fi
+        exit "$failed"

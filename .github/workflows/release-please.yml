@@ -1,0 +1,56 @@
+name: release-please
+
+# Opens and updates the release PRs (one for server/, one for android/; see
+# release-please-config.json). Merging a release PR tags the release and creates the GitHub
+# release; for the server, the server-release job below then builds and deploys it (ADR 0005).
+#
+# Release PRs are opened with GITHUB_TOKEN, so ci does not start on them by itself: before
+# merging one, close and reopen it (docs/runbooks/github-setup.md).
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-24.04
+    # On the job, not the workflow: server-release (called below) can then run for one release
+    # while the next push to main already updates the release PRs.
+    concurrency:
+      group: release-please
+      cancel-in-progress: false
+    timeout-minutes: 10
+    permissions:
+      contents: write # tags, releases, and the release PR branches
+      pull-requests: write # open and update release PRs
+      issues: write # labels on release PRs (autorelease: pending / tagged)
+    outputs:
+      server_release_created: ${{ steps.release.outputs['server--release_created'] }}
+      server_tag: ${{ steps.release.outputs['server--tag_name'] }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # android-release (milestone 6) will hang off the android outputs the same way.
+  server-release:
+    name: server-release
+    needs: release-please
+    if: needs.release-please.outputs.server_release_created == 'true'
+    # A called workflow's jobs get at most these permissions.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/server-release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.server_tag }}
+    # A called workflow sees no secrets unless the caller passes them. inherit passes the
+    # repository and organization secrets; the production environment secrets (TS_OAUTH_*,
+    # DEPLOY_SSH_KEY, PTT_DOMAIN) reach server-release's deploy job through its environment.
+    secrets: inherit

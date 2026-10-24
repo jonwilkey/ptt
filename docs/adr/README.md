@@ -28,3 +28,4 @@ ADR that supersedes the old one.
 - [0002 — AWS KMS as the OpenTofu state-encryption key provider](0002-kms-for-opentofu-state-encryption.md)
 - [0003 — Public repository](0003-public-repository.md)
 - [0004 — The AAAA record follows the instance's IPv6 address (no reserved IPv6)](0004-ipv6-not-reserved.md)
+- [0005 — release-please calls server-release directly instead of relying on the tag push](0005-release-please-calls-server-release.md)
