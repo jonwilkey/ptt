@@ -1,7 +1,100 @@
 # server/
 
-The Go service `pttd`: HTTP/WebSocket API, SQLite migrations, and `sqlc` queries, shipped as a
-single binary in a Docker container.
+`pttd`, the family push-to-talk server: one static Go binary (module
+`github.com/jonwilkey/ptt/server`) shipped in a distroless container. It relays end-to-end
+encrypted audio it cannot decrypt and keeps no history. See `docs/spec.md` ("Server") for the
+design; this file is the developer guide.
 
-Milestone 1 adds the skeleton with `/healthz`; milestone 2 adds enrollment, paging, and FCM.
 Released by release-please with tags `server-vX.Y.Z`.
+
+## Layout
+
+| Path | What |
+| --- | --- |
+| `cmd/pttd/` | `main`: signal handling and exit code only |
+| `internal/cli/` | Subcommand parsing and dispatch |
+| `internal/app/` | Wiring: opens the DB, migrates, runs both listeners, graceful shutdown |
+| `internal/config/` | `PTTD_*` environment variables and the `<NAME>_FILE` secret helper |
+| `internal/db/` | SQLite open + pragmas, goose migrator, pre-migration snapshots |
+| `internal/db/queries/` | sqlc query sources |
+| `internal/db/sqlcdb/` | sqlc output (generated, committed; never edit) |
+| `internal/httpapi/` | Public router (`/healthz`), internal router (`/metrics`, `/internal/status`), middleware |
+| `internal/metrics/` | Prometheus registry |
+| `internal/admin/` | `pttd admin` client code |
+| `migrations/` | goose SQL migrations, embedded in the binary |
+
+## Make targets
+
+Tools come from `PATH`: Go 1.27, `golangci-lint` v2, `sqlc`, `govulncheck`.
+
+| Target | Does |
+| --- | --- |
+| `make build` | Static `linux/amd64` binary at `bin/pttd` (`VERSION=` overrides the version string) |
+| `make test` | `go test -race ./...` (needs a C toolchain for `-race`) |
+| `make lint` | `golangci-lint run` with `.golangci.yml` (includes gofmt/goimports) |
+| `make generate` | `sqlc generate` after changing `migrations/` or `internal/db/queries/` |
+| `make sqlc-check` | `sqlc diff`: fails if the committed generated code is stale |
+| `make vuln` | `govulncheck ./...` |
+
+The image is built only in CI: `docker buildx build --platform linux/amd64 --build-arg VERSION=... server/`.
+
+## Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PTTD_LISTEN_ADDR` | `:8080` | Public listener; Caddy proxies to it |
+| `PTTD_INTERNAL_ADDR` | `:9090` | `/metrics` and `/internal/status`; publish only on loopback or the tailnet, never via Caddy |
+| `PTTD_DB_PATH` | `/data/pttd.db` | SQLite database (WAL mode; `-wal` and `-shm` files sit beside it) |
+| `PTTD_SNAPSHOT_DIR` | `/data/snapshots` | Pre-migration snapshots |
+| `PTTD_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+
+Invalid values stop `pttd` at startup with an error naming the variable. Secrets (none yet; the
+FCM key arrives in milestone 2) are never set directly: `<NAME>_FILE` names a file, mounted
+read-only, whose contents (minus trailing newlines) are the secret. Setting `<NAME>` itself is an
+error.
+
+Logs are JSON on stderr. By design there is no access log at `info`: logs carry errors and admin
+events, never pages, client IPs, or tokens. `debug` adds one line per request (method, route
+pattern, status, duration).
+
+## Subcommands
+
+| Command | Does |
+| --- | --- |
+| `pttd serve` (or no command) | Open the DB, snapshot if migrations are pending on an existing DB, migrate, serve; SIGTERM/SIGINT drains for up to 15 s |
+| `pttd healthcheck` | Exit 0 if `GET /healthz` on the local public listener returns 200 (the image's `HEALTHCHECK`) |
+| `pttd migrate up\|down\|status` | Manage the schema of `PTTD_DB_PATH`; `up` and `down` (one step) snapshot first; `status` and `down` refuse to create a missing database |
+| `pttd admin status [--json]` | Summary from the running server's `/internal/status` |
+| `pttd version` | Print the version (set with `-ldflags "-X main.version=..."`) |
+
+Inside the container: `docker compose exec pttd /pttd admin status`.
+
+## Endpoints
+
+- `GET`/`HEAD /healthz` (public): `200 {"status":"ok"}` when the database answers and the
+  schema is migrated; otherwise `503` with a short `reason` (`database_unavailable`,
+  `schema_outdated`). It does not reveal the version. A schema newer than the binary counts as
+  healthy, because migrations are expand-then-contract and a rollback must keep serving. Every
+  other public path is a JSON 404 (or a JSON 405 with `Allow`).
+- `GET /metrics` (internal): Go and process collectors, `pttd_build_info{version}`,
+  `pttd_active_sessions` (0 until milestone 4; deploys wait for it to be 0). No per-person labels.
+- `GET /internal/status` (internal): `{version, uptime_seconds, active_sessions, active_pages,
+  db_ok, schema_version, binary_schema_version}`.
+
+## Migrations and snapshots
+
+Migrations are goose SQL files in `migrations/`, numbered `NNNNN_name.sql`, never edited after
+release, and written expand-then-contract. CI's migration test (`TestMigrationsUpDownUp`) applies
+all of them to an empty database, rolls back to zero, and applies them again, so every `Down`
+section must work.
+
+Before migrating a database that already has a schema, `pttd` writes
+`$PTTD_SNAPSHOT_DIR/pre-migrate-<UTC timestamp>-v<version>.db` with `VACUUM INTO`. If a
+snapshot at the same version is less than 10 minutes old (a crash-looping restart), it is reused
+instead. Retention keeps the newest five plus the oldest snapshot of each of the five highest
+schema versions, so restarts never rotate out the true pre-deploy copy. To restore one, stop `pttd`, copy the snapshot over `pttd.db`, and delete
+`pttd.db-wal` and `pttd.db-shm` before starting the older image.
+
+SQLite runs with `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`,
+`synchronous=NORMAL`, and `temp_store=MEMORY`. The last one, plus `SQLITE_TMPDIR=/data` in the
+image, keeps SQLite's temporary files off the read-only root filesystem.

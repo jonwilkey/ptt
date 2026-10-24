@@ -9,6 +9,16 @@
   "postUpdateOptions": ["gomodTidy", "gomodUpdateImportPaths"],
   "osvVulnerabilityAlerts": true,
   "platformAutomerge": true,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "CLI tool versions in workflow env blocks, each annotated with a '# renovate: datasource=... depName=... [extractVersion=...]' comment on the line above.",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*[A-Z0-9_]+: [\"']?(?<currentValue>[^\\s\"']+)"
+      ]
+    }
+  ],
   "packageRules": [
     {
       "description": "GitHub Actions, Go modules, and Dockerfile base images: auto-merge patch and minor updates (and digest pins/refreshes) when CI passes.",
