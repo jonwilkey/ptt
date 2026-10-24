@@ -1,0 +1,62 @@
+#cloud-config
+# Rendered by infra/tofu/prod (templatefile). Runs once, at first boot of a new instance:
+# creates the admin users, locks SSH down to keys with no root login, and joins the tailnet.
+# From then on all SSH and Ansible traffic goes over Tailscale; the public firewall never opens
+# port 22. Ansible takes over host configuration after this.
+#
+# Hand-off to Ansible (base role):
+# - Admins are created in the standard `sudo` group with no password. cloud-init's per-user
+#   `sudo` setting writes /etc/sudoers.d/90-cloud-init-users (NOPASSWD) so they can sudo at all;
+#   Ansible grants `%sudo` NOPASSWD itself and then deletes that file. Admins stay in `sudo`.
+# - Ansible takes over /etc/ssh/sshd_config.d/01-ptt-hardening.conf written below.
+
+hostname: ${hostname}
+preserve_hostname: false
+
+disable_root: true
+ssh_pwauth: false
+
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+
+users: ${users_json}
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/01-ptt-hardening.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      # Written by cloud-init (infra/tofu/prod) at first boot; Ansible's base role takes it over.
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+%{ if tailscale_auth_key != "" ~}
+  - path: /run/ptt/tailscale-authkey
+    owner: root:root
+    permissions: "0600"
+    content: ${jsonencode(tailscale_auth_key)}
+%{ endif ~}
+
+runcmd:
+  - [systemctl, restart, ssh]
+  # Tailscale from its official apt repository (https://pkgs.tailscale.com/stable/#debian-trixie).
+  - [sh, -ec, 'codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"; curl -fsSL "https://pkgs.tailscale.com/stable/debian/$codename.noarmor.gpg" -o /usr/share/keyrings/tailscale-archive-keyring.gpg; curl -fsSL "https://pkgs.tailscale.com/stable/debian/$codename.tailscale-keyring.list" -o /etc/apt/sources.list.d/tailscale.list']
+  - [apt-get, update]
+  - [env, DEBIAN_FRONTEND=noninteractive, apt-get, install, -y, tailscale]
+  - [systemctl, enable, --now, tailscaled]
+%{ if tailscale_auth_key != "" ~}
+  # The key is read from a root-only file so it never appears in a process list or in
+  # cloud-init's logs. It still persists in /var/lib/cloud/instance/user-data.txt (root-only)
+  # and in the instance metadata endpoint (169.254.169.254), and in the encrypted prod state.
+  # Acceptable: it is a one-time, short-lived key that is useless once the server has joined.
+  # --accept-dns=false: keep the host's resolver (MagicDNS at 100.100.100.100 can break DNS
+  # inside containers); matches Ansible's tailscale_accept_dns: false.
+  - [tailscale, up, --auth-key=file:/run/ptt/tailscale-authkey, --advertise-tags=tag:ptt-server, --hostname=${hostname}, --accept-dns=false]
+  - [rm, -f, /run/ptt/tailscale-authkey]
+%{ else ~}
+  - [sh, -c, 'echo "ptt: no Tailscale auth key was provided; run tailscale up manually from the Vultr console" | tee /dev/console']
+%{ endif ~}

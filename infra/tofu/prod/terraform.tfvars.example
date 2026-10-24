@@ -1,0 +1,63 @@
+# Copy to terraform.tfvars (git-ignored) for a local run and fill in real values. This repository
+# is public: never commit the real file.
+#
+# CI does not use this file. It passes the same values from GitHub Actions secrets (secrets,
+# not variables, so they are masked in public logs): TOFU_ZONE_NAME -> TF_VAR_zone_name,
+# TOFU_RECORD_NAME -> TF_VAR_record_name, TOFU_ADMIN_USERS -> TF_VAR_admin_users, and, only
+# when (re)creating the server, a Tailscale auth key -> TF_VAR_tailscale_auth_key.
+#
+# Never put the Vultr API key or AWS credentials here: they come from the environment
+# (VULTR_API_KEY, AWS_PROFILE / OIDC).
+
+# ---- Required ------------------------------------------------------------------------------
+
+# Existing public Route 53 hosted zone (read only).
+zone_name = "example.com"
+
+# Fully qualified name for the server's A and AAAA records. Must equal bootstrap's record_name,
+# because the CI apply role may change only that name.
+record_name = "ptt.example.com"
+
+# Admin accounts created at first boot. Each gets passwordless sudo and key-only SSH (over
+# Tailscale). Public keys only, in OpenSSH one-line format. Used only when the instance is
+# created; Ansible manages users afterwards.
+admin_users = [
+  {
+    name            = "admin1"
+    ssh_public_keys = ["ssh-ed25519 AAAAC3...replace-me... admin1@laptop"]
+  },
+  {
+    name            = "admin2"
+    ssh_public_keys = ["ssh-ed25519 AAAAC3...replace-me... admin2@laptop"]
+  },
+]
+
+# ---- Needed only when the instance is created or replaced -----------------------------------
+
+# One-time, pre-authorized Tailscale auth key tagged tag:ptt-server. Prefer the environment
+# variable TF_VAR_tailscale_auth_key over writing it here. Leave unset for routine runs; the
+# instance ignores user_data changes after creation.
+# tailscale_auth_key = "tskey-auth-..."
+
+# ---- Optional (defaults shown) --------------------------------------------------------------
+
+# Vultr region ("sea" = Seattle).
+# region = "sea"
+
+# Vultr plan id; smallest regular Cloud Compute plan in sea.
+# plan = "vc2-1c-1gb"
+
+# Exact Vultr OS name (Debian stable).
+# os_name = "Debian 13 x64 (trixie)"
+
+# Hostname, Vultr label, and Tailscale machine name. Changing it replaces the instance.
+# hostname = "ptt-prod"
+
+# UTC hour of the daily Vultr backup (10 = 02:00 PST / 03:00 PDT).
+# backup_hour_utc = 10
+
+# Tags on the Vultr instance.
+# tags = ["ptt", "prod", "managed-by-opentofu"]
+
+# TTL of the A/AAAA records, in seconds.
+# dns_ttl = 300

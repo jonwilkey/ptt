@@ -25,5 +25,6 @@ ADR that supersedes the old one.
 ## Index
 
 - [0001 — Record architecture decisions](0001-record-architecture-decisions.md)
-- 0002 — reserved by the in-flight OpenTofu PR
+- [0002 — AWS KMS as the OpenTofu state-encryption key provider](0002-kms-for-opentofu-state-encryption.md)
 - [0003 — Public repository](0003-public-repository.md)
+- [0004 — The AAAA record follows the instance's IPv6 address (no reserved IPv6)](0004-ipv6-not-reserved.md)

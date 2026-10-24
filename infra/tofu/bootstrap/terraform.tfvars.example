@@ -1,0 +1,27 @@
+# Copy to terraform.tfvars (git-ignored) and fill in real values. This repository is public:
+# never commit the real file. (The AWS region, us-west-2, and the KMS alias,
+# alias/ptt-tofu-state, are hardcoded; see the comment in variables.tf.)
+
+# ---- Required ------------------------------------------------------------------------------
+
+# GitHub repository (owner/name) whose workflows may assume the OpenTofu roles.
+github_repository = "owner/repo"
+
+# Globally unique S3 bucket for OpenTofu state. Use the same name in ../backend.hcl and in the
+# TOFU_STATE_BUCKET GitHub Actions secret.
+state_bucket_name = "example-ptt-tofu-state"
+
+# Existing public Route 53 hosted zone (read only).
+zone_name = "example.com"
+
+# The only record name the apply role may change (A and AAAA). Must equal prod's record_name.
+record_name = "ptt.example.com"
+
+# ---- Optional (defaults shown) --------------------------------------------------------------
+
+# GitHub environment (with required reviewers) whose jobs may assume the apply role.
+# github_apply_environment = "production"
+
+# Set to false if the AWS account already has a GitHub Actions OIDC provider
+# (IAM > Identity providers > token.actions.githubusercontent.com).
+# create_github_oidc_provider = true
