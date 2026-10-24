@@ -21,10 +21,12 @@ in front of `pttd`. See `docs/spec.md` ("Infrastructure as code" › "Runtime" a
   the compose network; port 9090 (`/metrics`, `/internal/status`) is published on the host's
   `127.0.0.1` only. On SIGTERM it drains for 15 s; compose waits 20 s.
 - **Caddy** (official image, pinned by digest) publishes TCP 80 and 443. It also runs with a
-  read-only root filesystem, all capabilities dropped, and `no-new-privileges`; Docker lets
-  containers bind ports below 1024 without `NET_BIND_SERVICE`. On stop it lets in-flight
-  requests finish for up to 10 s (compose waits 15 s). Certificates and the ACME account live
-  in `/opt/ptt/caddy/data`, which survives container recreation. Decisions in the `Caddyfile`:
+  read-only root filesystem, all capabilities dropped except `NET_BIND_SERVICE`, and
+  `no-new-privileges`. Docker lets containers bind low ports without it, but the image's
+  `caddy` binary carries that file capability and cannot be exec'd without it. On stop it lets
+  in-flight requests finish for up to 10 s (compose waits 15 s). Certificates and the ACME
+  account live in `/opt/ptt/caddy/data`, which survives container recreation. Decisions in the
+  `Caddyfile`:
   - TLS 1.3 only; certificates only from Let's Encrypt (no ZeroSSL fallback), because the app
     trusts only ISRG Root X1 and X2.
   - HTTP/3 is off: it needs UDP 443, which the firewalls do not allow.

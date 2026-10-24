@@ -617,9 +617,13 @@ jobs:
               '.HostConfig.SecurityOpt // [] | any(. == "no-new-privileges:true")' '.HostConfig.SecurityOpt'
             check "$name: restart unless-stopped" "$c" \
               '.HostConfig.RestartPolicy.Name == "unless-stopped"' '.HostConfig.RestartPolicy.Name'
-            check "$name: no added capabilities" "$c" \
-              "(.HostConfig.CapAdd // [] | $caps) == []" '.HostConfig.CapAdd'
           done
+          check "pttd: no added capabilities" "$pttd" \
+            "(.HostConfig.CapAdd // [] | $caps) == []" '.HostConfig.CapAdd'
+          # The image's caddy binary has the file capability cap_net_bind_service=+ep and cannot
+          # be exec'd unless NET_BIND_SERVICE is in the bounding set.
+          check "Caddy: only NET_BIND_SERVICE added" "$caddy" \
+            "(.HostConfig.CapAdd // [] | $caps) == [\"NET_BIND_SERVICE\"]" '.HostConfig.CapAdd'
           check "pttd: the only writable mount is /data" "$pttd" \
             '[.Mounts[] | select(.RW) | .Destination] == ["/data"]' \
             '[.Mounts[] | {Destination, RW}]'
