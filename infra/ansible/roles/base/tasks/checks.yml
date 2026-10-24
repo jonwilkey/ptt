@@ -1,0 +1,48 @@
+---
+# Lock-out guards first: nothing below runs unless every admin has a key and the
+# account running this play will still be allowed in afterwards.
+- name: Check admin user definitions
+  ansible.builtin.assert:
+    that:
+      - base_admin_users is defined
+      - base_admin_users is sequence and base_admin_users is not string
+      - base_admin_users | length > 0
+      - base_deploy_ssh_keys is defined
+      - base_deploy_ssh_keys is sequence and base_deploy_ssh_keys is not string
+      - base_deploy_ssh_keys | length > 0
+      - base_deploy_ssh_keys | select('search', 'replace-me') | list | length == 0
+    fail_msg: >-
+      base_admin_users and base_deploy_ssh_keys are required. Set them in
+      inventory/group_vars/prod/site.yml (see site.yml.example) or pass them as extra vars.
+    quiet: true
+
+- name: Check each admin has a valid login and at least one SSH key
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - item.ssh_keys | default([]) | length > 0
+      # Placeholder keys from site.yml.example would replace the real ones.
+      - item.ssh_keys | default([]) | select('search', 'replace-me') | list | length == 0
+    fail_msg: "Admin {{ item.name | default('?') }} needs a valid login and at least one SSH key."
+    quiet: true
+  loop: "{{ base_admin_users }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+- name: Find the login this play connects as
+  ansible.builtin.command: id -un
+  become: false
+  changed_when: false
+  check_mode: false
+  register: base_connecting_user
+
+- name: Refuse to lock out the account running this play
+  ansible.builtin.assert:
+    that:
+      - base_connecting_user.stdout in base_allowed_logins
+    fail_msg: >-
+      Connected as {{ base_connecting_user.stdout }}, which is not in base_admin_users or
+      the deploy user; SSH would refuse this login after the run.
+    quiet: true
+  vars:
+    base_allowed_logins: "{{ base_admin_users | map(attribute='name') | list + [base_deploy_user] }}"

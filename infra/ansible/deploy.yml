@@ -1,0 +1,15 @@
+---
+# CI's deploy path: only the app role, and an explicit image is required.
+#   GHCR_TOKEN=<token> ansible-playbook deploy.yml -u deploy \
+#     -e pttd_image=ghcr.io/<owner>/ptt/pttd@sha256:<digest> -e ptt_domain=<domain>
+# GHCR_TOKEN (optional, read from the environment) logs in to ghcr.io for the pull.
+# ptt_domain can instead come from inventory/group_vars/prod/site.yml (git-ignored).
+- name: Deploy pttd
+  hosts: prod
+  become: true
+  gather_facts: false
+  vars:
+    app_image_required: true
+  roles:
+    - role: app
+      tags: [app]

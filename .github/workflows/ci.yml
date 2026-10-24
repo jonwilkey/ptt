@@ -425,3 +425,32 @@ jobs:
         run: |
           echo "::error::tofu plan failed; see the plan step log."
           exit 1
+
+  ansible:
+    name: Ansible (syntax check, ansible-lint)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: infra/ansible
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Ansible tooling
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install --quiet \
+            ansible-core==2.21.5 ansible-lint==26.10.1 yamllint==1.38.0
+          echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
+      - name: Install collections
+        run: ansible-galaxy collection install -r requirements.yml
+      - name: Syntax check
+        run: |
+          ansible-playbook -i inventory/prod.yml --syntax-check site.yml
+          ansible-playbook -i inventory/prod.yml --syntax-check deploy.yml
+      - name: yamllint
+        run: yamllint -s .
+      - name: ansible-lint
+        run: ansible-lint

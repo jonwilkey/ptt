@@ -1,0 +1,8 @@
+---
+# Run from infra/ansible/: `ansible-lint`
+profile: production
+# Collections come from requirements.yml via `ansible-galaxy collection install`;
+# do not let ansible-lint install anything itself.
+offline: true
+exclude_paths:
+  - .cache/

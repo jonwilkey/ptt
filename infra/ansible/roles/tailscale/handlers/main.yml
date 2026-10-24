@@ -1,0 +1,16 @@
+---
+# Own handlers (not the base role's) so this role works on its own.
+- name: Reload systemd for sshd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Check the full sshd configuration before the tailnet restart
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  listen: Restart sshd on the tailnet
+
+- name: Restart sshd with the tailnet listen addresses
+  ansible.builtin.systemd_service:
+    name: ssh.service
+    state: restarted
+  listen: Restart sshd on the tailnet

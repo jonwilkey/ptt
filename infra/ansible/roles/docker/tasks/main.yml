@@ -1,0 +1,71 @@
+---
+- name: Remove conflicting distro container packages
+  ansible.builtin.apt:
+    name: "{{ docker_conflicting_packages }}"
+    state: absent
+
+- name: Create the apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download Docker's apt signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Add Docker's apt repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker.sources
+    content: |
+      # Managed by Ansible.
+      Types: deb
+      URIs: https://download.docker.com/linux/debian
+      Suites: {{ ansible_facts['distribution_release'] }}
+      Components: stable
+      Architectures: {{ docker_apt_arch }}
+      Signed-By: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+  register: docker_apt_source
+
+- name: Install Docker Engine and the compose plugin
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: "{{ docker_apt_source is changed }}"
+
+- name: Create the Docker config directory
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure the Docker daemon
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: "{{ docker_daemon_config | to_nice_json }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/dockerd --validate --config-file %s
+  notify: Restart docker
+
+- name: Enable and start Docker
+  ansible.builtin.systemd_service:
+    name: docker.service
+    enabled: true
+    state: started
+
+# Apply daemon.json now, before the app role starts containers.
+- name: Apply pending Docker changes
+  ansible.builtin.meta: flush_handlers

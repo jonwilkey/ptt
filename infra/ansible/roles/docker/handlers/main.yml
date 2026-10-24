@@ -1,0 +1,6 @@
+---
+# With live-restore enabled, running containers survive a daemon restart.
+- name: Restart docker
+  ansible.builtin.systemd_service:
+    name: docker.service
+    state: restarted

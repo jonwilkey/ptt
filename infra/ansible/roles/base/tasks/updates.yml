@@ -1,0 +1,70 @@
+---
+- name: Enable the periodic apt jobs
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      // Managed by Ansible.
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/apt-config -c %s dump
+
+- name: Configure unattended-upgrades
+  ansible.builtin.template:
+    src: 52ptt-unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52ptt-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/apt-config -c %s dump
+
+- name: Create apt timer drop-in directories
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+
+# Debian's defaults run these at random times (06:00/18:00 plus up to 12 h, and
+# 06:00 plus up to 1 h), so a reboot could otherwise wait until the next night or
+# land during the day. Pin them just before the reboot window instead.
+- name: Schedule the apt timers before the reboot window
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.timer }}.d/10-ptt-schedule.conf"
+    content: |
+      # Managed by Ansible. Times are local ({{ base_timezone }}).
+      [Timer]
+      OnCalendar=
+      OnCalendar=*-*-* {{ item.time }}
+      RandomizedDelaySec={{ item.delay }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - timer: apt-daily.timer
+      time: "{{ base_apt_daily_time }}"
+      delay: 10m
+    - timer: apt-daily-upgrade.timer
+      time: "{{ base_apt_daily_upgrade_time }}"
+      delay: 0
+  loop_control:
+    label: "{{ item.timer }}"
+  notify:
+    - Reload systemd
+    - Restart apt timers
+
+- name: Enable the apt timers
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer

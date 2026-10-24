@@ -1,0 +1,65 @@
+---
+# --- Users -------------------------------------------------------------------
+# Required, no defaults (deployment-specific; see
+# inventory/group_vars/prod/site.yml.example):
+#   base_admin_users: list of {name: <login>, ssh_keys: [<public key>, ...]}. The
+#     listed keys replace each user's authorized_keys entirely.
+#   base_deploy_ssh_keys: list of public keys for the CI deploy user.
+# Logins to delete (for example a former admin). Home directories are kept.
+base_admin_users_removed: []
+# Debian's sudo group: cloud-init already puts the admins in it, so the running
+# session keeps access while AllowGroups and sudoers switch to it.
+base_admin_group: sudo
+
+# CI account. Ansible's become runs a different `/bin/sh -c ...` command for every
+# task, so a sudo rule narrower than "ALL" cannot be written for it; see README.
+base_deploy_user: deploy
+# authorized_keys options for the CI key: tailnet source addresses only and no
+# forwarding (Ansible needs neither).
+base_deploy_key_options: >-
+  from="100.64.0.0/10,fd7a:115c:a1e0::/48",no-agent-forwarding,no-port-forwarding,no-X11-forwarding
+
+# --- Packages and services ----------------------------------------------------
+base_packages:
+  - ca-certificates
+  - curl
+  - needrestart
+  - nftables
+  - openssh-server
+  - procps
+  - sudo
+  - systemd-timesyncd
+  - unattended-upgrades
+# Stopped and disabled if present. Nothing on a Debian cloud image needs these.
+base_disabled_services:
+  - avahi-daemon.service
+  - cups.service
+  - exim4.service
+  - postfix.service
+  - rpcbind.service
+
+# --- Firewall (nftables, own table only) ---------------------------------------
+base_firewall_table: host_firewall
+base_firewall_public_tcp_ports: [80, 443]
+base_firewall_tailnet_interface: tailscale0
+# 22: SSH. 9100: Prometheus node exporter (monitoring role, later milestone).
+base_firewall_tailnet_tcp_ports: [22, 9100]
+base_firewall_tailscale_udp_port: 41641
+
+# --- Time -----------------------------------------------------------------------
+# Pacific, so the 04:00 reboot window and timers below are Pacific time.
+base_timezone: America/Los_Angeles
+
+# --- Automatic updates -----------------------------------------------------------
+# unattended-upgrades Origins-Pattern entries. This list replaces Debian's default
+# list (which also takes point-release updates).
+base_unattended_origins_patterns:
+  - origin=Debian,codename=${distro_codename}-security,label=Debian-Security
+  - origin=Debian,codename=${distro_codename},label=Debian-Security
+  - site=pkgs.tailscale.com
+  - site=download.docker.com
+base_unattended_reboot_time: "04:00"
+# apt-daily refreshes package lists, apt-daily-upgrade installs; both run shortly
+# before the reboot window so any reboot happens the same night.
+base_apt_daily_time: "03:00"
+base_apt_daily_upgrade_time: "03:30"

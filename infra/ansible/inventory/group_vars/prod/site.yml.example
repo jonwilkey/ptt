@@ -1,0 +1,30 @@
+---
+# Copy to site.yml in this directory (git-ignored) and fill in the real values.
+# Ansible loads every *.yml here; this .example file is ignored.
+# CI passes the same variables as extra vars (-e) instead.
+
+# Public hostname Caddy serves and gets a certificate for.
+ptt_domain: ptt.example.com
+
+# Admin logins with passwordless sudo. Names must match the admin users cloud-init
+# creates (infra/tofu). The keys listed become each user's ONLY authorized keys,
+# so include every key the person uses.
+base_admin_users:
+  - name: alice
+    ssh_keys:
+      - ssh-ed25519 AAAA...replace-me... alice@laptop
+  - name: bob
+    ssh_keys:
+      - ssh-ed25519 AAAA...replace-me... bob@laptop
+
+# Public half of the CI deploy key (the private half is a GitHub Actions secret).
+base_deploy_ssh_keys:
+  - ssh-ed25519 AAAA...replace-me... ptt-ci-deploy
+
+# Former admins to delete (home directories are kept). Remove them from
+# base_admin_users at the same time.
+# base_admin_users_removed: [carol]
+
+# pttd_image is not set here. deploy.yml needs it per run, pinned by digest:
+#   -e pttd_image=ghcr.io/<owner>/ptt/pttd@sha256:<64 hex digits>
+# site.yml keeps the deployed image when it is not given.

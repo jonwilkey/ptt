@@ -1,0 +1,18 @@
+---
+# Full host configuration. Idempotent: safe to rerun at any time.
+#   ansible-playbook site.yml [--tags base,tailscale,docker,app] [-e pttd_image=...]
+# Without pttd_image the app role keeps the image already deployed (or, before the
+# first release, writes the files without starting anything).
+# Required values: see inventory/group_vars/prod/site.yml.example.
+- name: Configure the ptt production host
+  hosts: prod
+  become: true
+  roles:
+    - role: base
+      tags: [base]
+    - role: tailscale
+      tags: [tailscale]
+    - role: docker
+      tags: [docker]
+    - role: app
+      tags: [app]

@@ -1,0 +1,30 @@
+---
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+- name: Stop and disable unneeded services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ base_disabled_services | select('in', ansible_facts['services']) | list }}"
+
+- name: Let needrestart restart services after library updates
+  ansible.builtin.copy:
+    dest: /etc/needrestart/conf.d/50-ptt.conf
+    content: |
+      # Managed by Ansible. Restart services using outdated libraries without
+      # asking, so unattended security updates take effect without waiting for a
+      # reboot. Kernel updates still reboot at the unattended-upgrades window.
+      $nrconf{restart} = 'a';
+      $nrconf{kernelhints} = 0;
+    owner: root
+    group: root
+    mode: "0644"

@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# /etc/ssh/sshd_config.d/01-ptt-hardening.conf: cloud-init writes the first version at
+# boot; Ansible owns it afterwards.
+# Key-only SSH for the admins and the CI deploy user. Reachable only over the
+# tailnet (see the tailscale role's 20-ptt-listen.conf and the nftables ruleset).
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AllowGroups {{ base_admin_group }} {{ base_deploy_user }}
+X11Forwarding no

@@ -1,0 +1,29 @@
+---
+- name: Check the target is Debian 13
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - ansible_facts['distribution_major_version'] == '13'
+    fail_msg: "This playbook targets Debian 13 (trixie)."
+    quiet: true
+
+- name: Check required settings and lock-out guards
+  ansible.builtin.import_tasks: checks.yml
+
+- name: Install packages
+  ansible.builtin.import_tasks: packages.yml
+
+- name: Manage users and sudo
+  ansible.builtin.import_tasks: users.yml
+
+- name: Harden SSH
+  ansible.builtin.import_tasks: ssh.yml
+
+- name: Configure the host firewall
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: Configure time
+  ansible.builtin.import_tasks: time.yml
+
+- name: Configure automatic updates
+  ansible.builtin.import_tasks: updates.yml

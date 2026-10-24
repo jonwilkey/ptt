@@ -1,0 +1,29 @@
+---
+# Distro packages that conflict with Docker's own (removed first).
+docker_conflicting_packages:
+  - docker.io
+  - docker-doc
+  - docker-compose
+  - podman-docker
+  - containerd
+  - runc
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-compose-plugin
+  # community.docker.docker_login talks to the Docker API through requests.
+  - python3-requests
+
+# Debian architecture name for Docker's apt repository.
+docker_apt_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
+
+# /etc/docker/daemon.json
+docker_daemon_config:
+  log-driver: local
+  log-opts:
+    max-size: 10m
+    max-file: "5"
+  live-restore: true
+  no-new-privileges: true
+  userland-proxy: false
