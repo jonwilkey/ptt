@@ -1,7 +1,8 @@
 ---
 # Copy to site.yml in this directory (git-ignored) and fill in the real values.
 # Ansible loads every *.yml here; this .example file is ignored.
-# CI passes the same variables as extra vars (-e) instead.
+# CI passes the same variables as an extra-vars file (-e @file) instead: the infra workflow
+# from the production secret ANSIBLE_SITE_VARS, which holds this file's full content.
 
 # Public hostname Caddy serves and gets a certificate for.
 ptt_domain: ptt.example.com

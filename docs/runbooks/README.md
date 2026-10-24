@@ -4,3 +4,8 @@ Step-by-step operational runbooks (server down, VPS rebuild, lost phone, key rot
 on), expanding the runbook table in `docs/spec.md`.
 
 Written alongside the features they cover, mostly in milestone 6 (hardening and operations).
+
+| Runbook | When |
+| --- | --- |
+| [infra-bootstrap.md](infra-bootstrap.md) | Once: from nothing to a running server with DNS |
+| [github-setup.md](github-setup.md) | Once: repository settings, `production` environment, secrets, and the first deploy |

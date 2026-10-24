@@ -21,13 +21,13 @@ ID, repository slug, or user names. Those values have no defaults and come from:
 | IAM role ARNs | Not needed (admin's own credentials) | Repository secret `AWS_TOFU_PLAN_ROLE_ARN`; `production` environment secret `AWS_TOFU_APPLY_ROLE_ARN` |
 | Vultr API key | `VULTR_API_KEY` environment variable | Plan: repository secret `VULTR_API_KEY_PLAN` (minimal sub-user). Apply: `production` environment secret `VULTR_API_KEY` |
 | AWS credentials | The admin's own profile (`AWS_PROFILE`, SSO) | OIDC: `ptt-tofu-plan` / `ptt-tofu-apply` roles; no stored keys |
-| Tailscale auth key | `TF_VAR_tailscale_auth_key`, only when creating or replacing the server | A `production` environment secret, only when creating or replacing the server (added with the `infra` workflow) |
+| Tailscale auth key | `TF_VAR_tailscale_auth_key`, only when creating or replacing the server | `production` environment secret `TS_SERVER_AUTH_KEY`, only when creating or replacing the server |
 
 These are **secrets, not variables**, even where the value is not secret (bucket name, domain,
 user names, account ID inside the role ARNs): the repository and its Actions logs are public, and
-GitHub masks secret values in logs. `TOFU_ENABLED` is the only Actions variable. The CI Tailscale
-credentials for deploys (`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`) are added with the `infra`
-workflow.
+GitHub masks secret values in logs. `TOFU_ENABLED` is the only Actions variable OpenTofu uses.
+The full list of secrets and variables for all workflows is in
+[docs/runbooks/github-setup.md](../../docs/runbooks/github-setup.md).
 
 `*.tfvars`, `backend.hcl`, `*.tfplan`, `*_override.tf` and all state files are git-ignored.
 Commit only the `.example` files and the `.terraform.lock.hcl` lock files.
@@ -76,8 +76,12 @@ The `ci` workflow, on every PR and push:
    resource, plus a link to the run) as a single sticky PR comment. The human-readable plan is
    never printed, in the comment or the log, because both are public.
 
-The `infra` workflow (added in a later PR) runs `tofu plan` and then, after an admin approves the
-`production` environment, `tofu apply` with `ptt-tofu-apply`.
+The `infra` workflow, on every push to `main` that touches `infra/` (and on demand), runs
+`tofu plan` with `ptt-tofu-plan` and posts the same summary to the run's job summary. If there
+are changes, the `apply` job waits for an admin to approve the `production` environment, then
+assumes `ptt-tofu-apply`, plans again (with `TS_SERVER_AUTH_KEY` if set), refuses to continue
+unless the changes match the approved summary, and applies that plan. Apply output is not
+printed either; only the `Apply complete!` line.
 
 ## Running locally (admins)
 

@@ -373,7 +373,7 @@ GitHub Actions builds, tests, and ships everything; a person only merges pull re
 
 1. CI connects over Tailscale (GitHub's Tailscale action with an ephemeral, tagged key).
 2. CI waits until `pttd` reports no active sessions (up to 10 min), so a deploy never cuts off a conversation. Ringing pages survive the restart because they are in SQLite.
-3. Ansible's `app` role updates the image digest in `compose.yaml`.
+3. Ansible's `app` role writes the image digest to `/opt/ptt/.env` (read by `compose.yaml`).
 4. `pttd` snapshots the SQLite database, then runs pending migrations on startup.
 5. CI polls `/healthz` and runs smoke tests with two pre-provisioned test devices (hidden from contacts and absent from the family roster): page one from the other, answer, and relay one opaque audio frame.
 6. If health fails within 2 minutes, CI restores the previous digest and the pre-migration snapshot, then fails the job loudly.
