@@ -1,0 +1,33 @@
+# CI and local development override, layered on compose.yaml:
+#
+#   PTTD_IMAGE=ptt/pttd:ci PTT_DOMAIN=ptt.example.com \
+#     docker compose -f compose.yaml -f compose.ci.yaml up -d --wait
+#
+# Same services and hardening as production, with three differences: a locally built image
+# instead of a digest, named volumes instead of the server's host directories, and Caddy's
+# internal CA instead of Let's Encrypt. compose.yaml still requires PTTD_IMAGE and PTT_DOMAIN to
+# be set (Compose checks them before applying this file); this file fixes the values used.
+
+services:
+  pttd:
+    image: ptt/pttd:ci
+    volumes:
+      - pttd-data:/data
+      - pttd-secrets:/run/secrets/ptt:ro
+
+  caddy:
+    environment:
+      PTT_DOMAIN: ptt.example.com
+      ACME_EMAIL: ""
+      PTT_TLS: internal
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  # A fresh volume inherits the image's /data (owned by 65532).
+  pttd-data:
+  # Empty: there are no secrets until milestone 2.
+  pttd-secrets:
+  caddy-data:
+  caddy-config:

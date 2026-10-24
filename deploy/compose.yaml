@@ -1,0 +1,93 @@
+# Production runtime: Caddy (TLS, reverse proxy) in front of pttd. See README.md here.
+#
+# Ansible's app role copies this file and the Caddyfile to /opt/ptt and writes /opt/ptt/.env
+# (PTTD_IMAGE, PTT_DOMAIN). Relative paths resolve against /opt/ptt. For CI and local runs,
+# layer compose.ci.yaml on top; never run this file alone outside the server.
+#
+# Short-syntax bind mounts create a missing host directory as root, which pttd (uid 65532)
+# cannot write; the app role creates every directory with the right owner first.
+
+name: ptt
+
+services:
+  pttd:
+    # Pinned by digest (<registry>/<name>@sha256:...); set only by the deploy pipeline.
+    image: ${PTTD_IMAGE:?PTTD_IMAGE must be set to an image pinned by digest}
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      # SQLite database, WAL files, and pre-migration snapshots: the only writable path.
+      - /data:/data
+      # Decrypted secrets (0600, uid 65532), read through PTTD_*_FILE variables.
+      - ./secrets:/run/secrets/ptt:ro
+    # No environment: the image's defaults (PTTD_LISTEN_ADDR=:8080, PTTD_INTERNAL_ADDR=:9090,
+    # database and snapshots under /data) are the production settings.
+    ports:
+      # /metrics and /internal/status, for the host only (and later the tailnet exporter).
+      # Caddy proxies only to :8080, which is not published at all.
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "/pttd", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 2s
+      retries: 3
+    # pttd drains open connections for up to 15 s on SIGTERM.
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+  caddy:
+    # Renovate keeps the tag and digest current.
+    image: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    read_only: true
+    # Caddy runs as root inside its container. Docker lets containers bind ports below 1024
+    # without NET_BIND_SERVICE, but the image's /usr/bin/caddy carries the file capability
+    # cap_net_bind_service=+ep, and the kernel refuses to exec it ("operation not permitted")
+    # unless that capability is in the bounding set. So it is the one capability kept.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PTT_DOMAIN: ${PTT_DOMAIN:?PTT_DOMAIN must be set to the public hostname}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      # Certificates from Let's Encrypt. Fixed here, not read from .env, so production cannot
+      # be switched to Caddy's internal CA by an environment value.
+      PTT_TLS: acme
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account (XDG_DATA_HOME); must survive container recreation, or
+      # every deploy would request new certificates and hit Let's Encrypt's rate limits.
+      - ./caddy/data:/data
+      # Autosaved config (XDG_CONFIG_HOME).
+      - ./caddy/config:/config
+    tmpfs:
+      - /tmp
+    # TCP only: HTTP/3 (UDP 443) is disabled in the Caddyfile because the firewalls block it.
+    ports:
+      - "80:80"
+      - "443:443"
+    healthcheck:
+      # A loopback-only listener in the Caddyfile; the admin API is off.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 2s
+      retries: 3
+    depends_on:
+      pttd:
+        condition: service_healthy
+    # The Caddyfile's grace_period (10 s) lets in-flight requests finish first.
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+networks:
+  default:
+    # Required: the daemon runs with userland-proxy off, so Docker forwards IPv6 to a published
+    # port only when the container's network has IPv6 (and Caddy then sees real client
+    # addresses). Docker Engine 28+ (the minimum) assigns a ULA /64 automatically when no
+    # subnet is given.
+    enable_ipv6: true
