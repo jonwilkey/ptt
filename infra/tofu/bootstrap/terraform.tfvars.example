@@ -7,6 +7,12 @@
 # GitHub repository (owner/name) whose workflows may assume the OpenTofu roles.
 github_repository = "owner/repo"
 
+# Immutable OIDC subject prefix of that repository (see ADR 0006). Get it with
+#   gh api repos/<owner>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix
+# If it has no @<id> parts, the repository still uses legacy subject claims: enable immutable
+# subject claims for it first.
+github_oidc_subject_prefix = "repo:owner@123/repo@456"
+
 # Globally unique S3 bucket for OpenTofu state. Use the same name in ../backend.hcl and in the
 # TOFU_STATE_BUCKET GitHub Actions secret.
 state_bucket_name = "example-ptt-tofu-state"

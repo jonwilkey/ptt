@@ -15,6 +15,21 @@ variable "github_repository" {
   }
 }
 
+variable "github_oidc_subject_prefix" {
+  description = "Immutable OIDC subject prefix of github_repository, repo:<owner>@<owner-id>/<repo>@<repo-id>, as returned by `gh api repos/<owner>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix`. The trust policies match only this prefix, so a deleted and recreated (or renamed and re-registered) repository with the same name cannot assume the roles."
+  type        = string
+
+  validation {
+    condition     = can(regex("^repo:[A-Za-z0-9-]+@[0-9]+/[A-Za-z0-9._-]+@[0-9]+$", var.github_oidc_subject_prefix))
+    error_message = "github_oidc_subject_prefix must look like repo:owner@123/name@456 (the immutable form)."
+  }
+
+  validation {
+    condition     = replace(var.github_oidc_subject_prefix, "/^repo:([^@]+)@[0-9]+/([^@]+)@[0-9]+$/", "$1/$2") == var.github_repository
+    error_message = "github_oidc_subject_prefix must name the same owner and repository as github_repository."
+  }
+}
+
 variable "github_apply_environment" {
   description = "GitHub environment whose jobs may assume the apply role. It must require approval by an admin."
   type        = string

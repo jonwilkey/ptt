@@ -61,14 +61,15 @@ data "aws_iam_policy_document" "plan_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Exact subjects only: PR jobs (sub "...:pull_request") and runs on main. Other branches,
-    # tags, and environments cannot assume this role.
+    # Exact immutable subjects only (docs/adr/0006-immutable-oidc-subject-claims.md): PR jobs
+    # (sub "...:pull_request") and runs on main. Other branches, tags, and environments cannot
+    # assume this role.
     condition {
       test     = "StringEquals"
       variable = "${local.github_oidc_host}:sub"
       values = [
-        "repo:${var.github_repository}:pull_request",
-        "repo:${var.github_repository}:ref:refs/heads/main",
+        "${var.github_oidc_subject_prefix}:pull_request",
+        "${var.github_oidc_subject_prefix}:ref:refs/heads/main",
       ]
     }
   }
@@ -93,7 +94,7 @@ data "aws_iam_policy_document" "apply_trust" {
     condition {
       test     = "StringEquals"
       variable = "${local.github_oidc_host}:sub"
-      values   = ["repo:${var.github_repository}:environment:${var.github_apply_environment}"]
+      values   = ["${var.github_oidc_subject_prefix}:environment:${var.github_apply_environment}"]
     }
   }
 }

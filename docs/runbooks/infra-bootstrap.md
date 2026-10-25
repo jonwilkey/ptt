@@ -65,12 +65,19 @@ cp backend.hcl.example backend.hcl
 #   edit backend.hcl: bucket = "<state-bucket>"
 cd bootstrap
 cp terraform.tfvars.example terraform.tfvars
-#   edit terraform.tfvars: github_repository = "<owner>/<repo>", state_bucket_name = "<state-bucket>",
-#   zone_name = "<your-domain>", record_name = "<server-name>"
+#   edit terraform.tfvars: github_repository = "<owner>/<repo>", github_oidc_subject_prefix
+#   (see below), state_bucket_name = "<state-bucket>", zone_name = "<your-domain>",
+#   record_name = "<server-name>"
 cp local_backend_override.tf.example local_backend_override.tf
 tofu init
 tofu apply
 ```
+
+Get `github_oidc_subject_prefix` with
+`gh api repos/<owner>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix`; it looks like
+`repo:<owner>@<owner-id>/<repo>@<repo-id>` (see
+[ADR 0006](../adr/0006-immutable-oidc-subject-claims.md)). The IDs are identifying, so the value
+goes only in the git-ignored `terraform.tfvars`, never in the repository.
 
 Read the plan before typing `yes`: it creates one S3 bucket and its settings, one KMS key and
 alias, (optionally) the OIDC provider, and two IAM roles with inline policies. Nothing else.
