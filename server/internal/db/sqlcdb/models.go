@@ -41,6 +41,8 @@ type Device struct {
 	LastSeenAt      sql.NullInt64
 	RevokedAt       sql.NullInt64
 	IsTest          int64
+	Ed25519Pub      []byte
+	X25519Pub       []byte
 }
 
 type EnrollmentCode struct {
@@ -51,6 +53,9 @@ type EnrollmentCode struct {
 	CreatedAt       int64
 	ExpiresAt       int64
 	UsedAt          sql.NullInt64
+	UserID          sql.NullString
+	DeviceID        sql.NullString
+	EnrollMac       []byte
 }
 
 type PageTombstone struct {

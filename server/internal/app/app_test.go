@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/config"
 	"github.com/jonwilkey/ptt/server/internal/db"
 	"github.com/jonwilkey/ptt/server/internal/httpapi"
+	"github.com/jonwilkey/ptt/server/migrations"
 )
 
 func newApp(t *testing.T, migrate bool) (*App, func() error) {
@@ -88,9 +90,15 @@ func TestInternalStatusWithRealDatabase(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status code %d", code)
 	}
+	// Migrations are numbered 1..N without gaps, so the newest version is the file count.
+	files, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := float64(len(files))
 	want := map[string]any{
 		"version": "test", "active_sessions": 0.0, "active_pages": 0.0,
-		"db_ok": true, "schema_version": 1.0, "binary_schema_version": 1.0,
+		"db_ok": true, "schema_version": latest, "binary_schema_version": latest,
 	}
 	for k, v := range want {
 		if body[k] != v {

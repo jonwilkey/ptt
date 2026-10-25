@@ -22,8 +22,11 @@ services:
       - /data:/data
       # Decrypted secrets (0600, uid 65532), read through PTTD_*_FILE variables.
       - ./secrets:/run/secrets/ptt:ro
-    # No environment: the image's defaults (PTTD_LISTEN_ADDR=:8080, PTTD_INTERNAL_ADDR=:9090,
-    # database and snapshots under /data) are the production settings.
+    environment:
+      # Put in the enrollment QR by `pttd admin bootstrap`. Everything else uses the image's
+      # defaults (PTTD_LISTEN_ADDR=:8080, PTTD_INTERNAL_ADDR=:9090, database and snapshots under
+      # /data), which are the production settings.
+      PTTD_PUBLIC_URL: https://${PTT_DOMAIN:?PTT_DOMAIN must be set to the public hostname}
     ports:
       # /metrics and /internal/status, for the host only (and later the tailnet exporter).
       # Caddy proxies only to :8080, which is not published at all.

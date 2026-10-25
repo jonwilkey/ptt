@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,7 @@ const (
 	EnvDBPath       = "PTTD_DB_PATH"
 	EnvSnapshotDir  = "PTTD_SNAPSHOT_DIR"
 	EnvLogLevel     = "PTTD_LOG_LEVEL"
+	EnvPublicURL    = "PTTD_PUBLIC_URL"
 )
 
 // Defaults match the container layout: Caddy proxies to :8080, :9090 is published only on the
@@ -52,6 +54,10 @@ type Config struct {
 	DBPath       string
 	SnapshotDir  string
 	LogLevel     slog.Level
+	// PublicURL is the origin phones reach the server at (no trailing slash), for example
+	// "https://ptt.example.com". Optional: only `pttd admin bootstrap` needs it, to put it in the
+	// enrollment QR.
+	PublicURL string
 }
 
 // Load reads and validates the configuration. Unset or empty variables take their defaults.
@@ -93,10 +99,44 @@ func Load(lookup LookupFunc) (Config, error) {
 	}
 	cfg.LogLevel = level
 
+	if raw := get(EnvPublicURL, ""); raw != "" {
+		u, err := parsePublicURL(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", EnvPublicURL, err))
+		}
+		cfg.PublicURL = u
+	}
+
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 	}
 	return cfg, nil
+}
+
+// parsePublicURL accepts an absolute https origin with no path, query or userinfo. Plain http
+// is allowed only for local development, because the QR carries a one-time code and phones must
+// not be told to send it over cleartext. A single trailing slash is dropped.
+func parsePublicURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("%q is not a valid URL: %w", raw, err)
+	}
+	switch {
+	case u.Scheme != "https" && u.Scheme != "http":
+		return "", fmt.Errorf("%q must be an absolute https URL such as https://ptt.example.com", raw)
+	case u.Host == "" || u.Hostname() == "":
+		return "", fmt.Errorf("%q has no host", raw)
+	case u.User != nil:
+		return "", fmt.Errorf("%q must not contain credentials", raw)
+	case u.Path != "" && u.Path != "/", u.RawQuery != "", u.Fragment != "", u.ForceQuery:
+		return "", fmt.Errorf("%q must not have a path, query, or fragment", raw)
+	}
+	if u.Scheme == "http" {
+		if h := u.Hostname(); h != "localhost" && h != "127.0.0.1" {
+			return "", fmt.Errorf("%q must use https (http is allowed only for localhost and 127.0.0.1)", raw)
+		}
+	}
+	return u.Scheme + "://" + u.Host, nil
 }
 
 func validateAddr(addr string) error {

@@ -81,6 +81,27 @@ func TestLoadLogLevels(t *testing.T) {
 	}
 }
 
+func TestLoadPublicURL(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"https://ptt.example.com", "https://ptt.example.com"},
+		{"https://ptt.example.com/", "https://ptt.example.com"},
+		{" https://ptt.example.com:8443 ", "https://ptt.example.com:8443"},
+		{"http://localhost:8080", "http://localhost:8080"},
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			cfg, err := Load(env(map[string]string{EnvPublicURL: tt.in}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.PublicURL != tt.want {
+				t.Errorf("PublicURL = %q, want %q", cfg.PublicURL, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadInvalid(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -93,6 +114,13 @@ func TestLoadInvalid(t *testing.T) {
 		{"port too big", map[string]string{EnvListenAddr: ":70000"}, []string{EnvListenAddr, "invalid port"}},
 		{"same port", map[string]string{EnvListenAddr: ":9090"}, []string{"different ports"}},
 		{"query in db path", map[string]string{EnvDBPath: "/data/x.db?mode=ro"}, []string{EnvDBPath, "'?'"}},
+		{"public url http", map[string]string{EnvPublicURL: "http://ptt.example.com"}, []string{EnvPublicURL, "https"}},
+		{"public url no scheme", map[string]string{EnvPublicURL: "ptt.example.com"}, []string{EnvPublicURL, "https"}},
+		{"public url path", map[string]string{EnvPublicURL: "https://ptt.example.com/app"}, []string{EnvPublicURL, "path"}},
+		{"public url query", map[string]string{EnvPublicURL: "https://ptt.example.com/?a=b"}, []string{EnvPublicURL, "query"}},
+		{"public url fragment", map[string]string{EnvPublicURL: "https://ptt.example.com#x"}, []string{EnvPublicURL, "fragment"}},
+		{"public url credentials", map[string]string{EnvPublicURL: "https://u:p@ptt.example.com"}, []string{EnvPublicURL, "credentials"}},
+		{"public url no host", map[string]string{EnvPublicURL: "https://"}, []string{EnvPublicURL, "host"}},
 		{"log level", map[string]string{EnvLogLevel: "loud"}, []string{EnvLogLevel, `"loud"`}},
 		{
 			"reports every problem",
