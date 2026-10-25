@@ -14,16 +14,16 @@ commit them):
 | `<state-bucket>` | `example-ptt-tofu-state` | New, globally unique S3 bucket name |
 | `<aws-profile>` | `admin` | Your AWS CLI profile with admin rights in the account |
 
-You need: OpenTofu 1.13.x, the AWS CLI v2, `dig`, `nc`, a Tailscale admin login, admin access to
-the GitHub repository, and admin access to the AWS account that hosts `<your-domain>`.
+You need: OpenTofu 1.13.x, the AWS CLI v2, `dig`, `nc`, `jq`, a Tailscale admin login, admin
+access to the GitHub repository, and admin access to the AWS account that hosts `<your-domain>`.
 
 Step 10 also needs the Tailscale client on the machine you run this from, logged in as one of the
 admins in `group:ptt-admins` (step 5). On Debian or Ubuntu (including WSL2 with systemd):
 
 ```sh
-sudo apt install -y bind9-dnsutils netcat-openbsd   # dig and nc
+sudo apt install -y bind9-dnsutils netcat-openbsd jq   # dig, nc, jq
 curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up                                   # open the printed URL and log in
+sudo tailscale up                                      # open the printed URL and log in
 ```
 
 ## 1. Vultr account and API keys
