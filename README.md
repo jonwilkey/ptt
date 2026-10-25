@@ -6,7 +6,8 @@ is a signed, sideloaded APK; a single Go server (`pttd`) on a Seattle VPS wakes 
 and relays end-to-end encrypted audio it cannot read. Nothing is recorded and no history is
 kept.
 
-The full design is in [docs/spec.md](docs/spec.md). Setting up the infrastructure and the CI/CD
+The full design is in [docs/spec.md](docs/spec.md); the wire formats shared by the server and
+the app are in [docs/protocol.md](docs/protocol.md). Setting up the infrastructure and the CI/CD
 pipeline: [docs/runbooks/infra-bootstrap.md](docs/runbooks/infra-bootstrap.md), then
 [docs/runbooks/github-setup.md](docs/runbooks/github-setup.md).
 
@@ -20,7 +21,7 @@ pipeline: [docs/runbooks/infra-bootstrap.md](docs/runbooks/infra-bootstrap.md), 
 | `infra/tofu/` | OpenTofu: VPS, firewall, DNS |
 | `infra/ansible/` | Host configuration |
 | `infra/secrets/` | sops-encrypted secrets (age) — never commit plaintext |
-| `docs/` | Spec, runbooks (`docs/runbooks/`), ADRs (`docs/adr/`) |
+| `docs/` | Spec, wire protocol (`protocol.md`), runbooks (`docs/runbooks/`), ADRs (`docs/adr/`) |
 | `.github/workflows/` | CI/CD |
 | `renovate.json` | Renovate dependency-update policy |
 | `.githooks/`, `scripts/` | Local git hooks (secrets, personal data) and their setup/test scripts |
