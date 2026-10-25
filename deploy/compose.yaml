@@ -27,6 +27,10 @@ services:
       # defaults (PTTD_LISTEN_ADDR=:8080, PTTD_INTERNAL_ADDR=:9090, database and snapshots under
       # /data), which are the production settings.
       PTTD_PUBLIC_URL: https://${PTT_DOMAIN:?PTT_DOMAIN must be set to the public hostname}
+      # Firebase service-account key for FCM. Ansible writes the variable to .env when
+      # app_secrets has the fcm-service-account.json entry; empty means "not configured" and
+      # pttd runs with pushes disabled.
+      PTTD_FCM_CREDENTIALS_FILE: ${PTTD_FCM_CREDENTIALS_FILE:-}
     ports:
       # /metrics and /internal/status, for the host only (and later the tailnet exporter).
       # Caddy proxies only to :8080, which is not published at all.

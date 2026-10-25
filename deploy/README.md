@@ -8,7 +8,7 @@ in front of `pttd`. See `docs/spec.md` ("Infrastructure as code" › "Runtime" a
 | --- | --- |
 | `compose.yaml` | The production stack (project `ptt`): `pttd` pinned by digest, Caddy, an IPv6-enabled network |
 | `Caddyfile` | Caddy: TLS 1.3 only, Let's Encrypt, HSTS and security headers, proxy to `pttd:8080`, no access log, no admin API |
-| `compose.ci.yaml` | Override for CI and local runs: local image `ptt/pttd:ci`, named volumes, Caddy's internal CA |
+| `compose.ci.yaml` | Override for CI and local runs: local image `ptt/pttd:ci`, named volumes, Caddy's internal CA, fake FCM sender (`PTTD_FCM_FAKE`) |
 | `.env.example` | Every variable compose reads, with placeholder values |
 | `smoke.sh` | External smoke test through Caddy; used by CI and after production deploys |
 
@@ -17,7 +17,8 @@ in front of `pttd`. See `docs/spec.md` ("Infrastructure as code" › "Runtime" a
 - **`pttd`** runs as uid/gid 65532 with a read-only root filesystem, all capabilities dropped,
   and `no-new-privileges`. Its only writable path is `/data` (SQLite). Secrets from
   `/opt/ptt/secrets/` are mounted read-only at `/run/secrets/ptt` and read through `PTTD_*_FILE`
-  variables (none until milestone 2). Port 8080 (public API) is reachable only from Caddy on
+  variables (`PTTD_FCM_CREDENTIALS_FILE` once the Firebase key exists; see
+  `docs/runbooks/firebase-setup.md`). Port 8080 (public API) is reachable only from Caddy on
   the compose network; port 9090 (`/metrics`, `/internal/status`) is published on the host's
   `127.0.0.1` only. On SIGTERM it drains for 15 s; compose waits 20 s.
 - **Caddy** (official image, pinned by digest) publishes TCP 80 and 443. It also runs with a
@@ -54,6 +55,7 @@ Compose reads `.env` next to `compose.yaml` (see `.env.example`):
 | `PTTD_IMAGE` | yes | `<registry>/<name>@sha256:<64 hex>` |
 | `PTT_DOMAIN` | yes | Public hostname Caddy serves |
 | `ACME_EMAIL` | no | Let's Encrypt account contact; empty registers without one |
+| `PTTD_FCM_CREDENTIALS_FILE` | no | Path inside the container of the Firebase service-account key, `/run/secrets/ptt/fcm-service-account.json`; written by Ansible when the secret is configured, empty otherwise (pushes disabled) |
 
 `PTT_TLS` (Caddy's certificate source) is set in the compose files, not `.env`: `acme` in
 `compose.yaml`, `internal` in `compose.ci.yaml`.
@@ -85,7 +87,7 @@ hardening with `docker inspect`.
 ## Production
 
 Ansible's `app` role (`infra/ansible/roles/app/`) copies `compose.yaml` and `Caddyfile` to
-`/opt/ptt/`, writes `/opt/ptt/.env` (`PTTD_IMAGE`, `PTT_DOMAIN`) and the decrypted secrets
+`/opt/ptt/`, writes `/opt/ptt/.env` (`PTTD_IMAGE`, `PTT_DOMAIN`, and `PTTD_FCM_CREDENTIALS_FILE` when configured) and the decrypted secrets
 (`/opt/ptt/secrets/`), creates `/data` and `/opt/ptt/caddy/{data,config}` with the right owners,
 and runs `docker compose up --wait`. Never edit the files on the server; change them here and
 run the playbook (see `infra/ansible/README.md`).

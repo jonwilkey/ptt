@@ -10,6 +10,22 @@ import (
 	"database/sql"
 )
 
+const clearFCMToken = `-- name: ClearFCMToken :exec
+UPDATE devices SET fcm_token = NULL WHERE id = ? AND fcm_token = ?
+`
+
+type ClearFCMTokenParams struct {
+	ID       string
+	FcmToken sql.NullString
+}
+
+// Clears a token FCM reported as unregistered. The token comparison keeps a token the phone
+// registered while the push was in flight.
+func (q *Queries) ClearFCMToken(ctx context.Context, arg ClearFCMTokenParams) error {
+	_, err := q.db.ExecContext(ctx, clearFCMToken, arg.ID, arg.FcmToken)
+	return err
+}
+
 const deviceExists = `-- name: DeviceExists :one
 SELECT COUNT(*) FROM devices WHERE id = ?
 `
@@ -85,6 +101,25 @@ func (q *Queries) GetDeviceForRoster(ctx context.Context, id string) (GetDeviceF
 		&i.RevokedAt,
 		&i.IsTest,
 	)
+	return i, err
+}
+
+const getDevicePushInfo = `-- name: GetDevicePushInfo :one
+SELECT id, fcm_token, revoked_at
+FROM devices
+WHERE id = ?
+`
+
+type GetDevicePushInfoRow struct {
+	ID        string
+	FcmToken  sql.NullString
+	RevokedAt sql.NullInt64
+}
+
+func (q *Queries) GetDevicePushInfo(ctx context.Context, id string) (GetDevicePushInfoRow, error) {
+	row := q.db.QueryRowContext(ctx, getDevicePushInfo, id)
+	var i GetDevicePushInfoRow
+	err := row.Scan(&i.ID, &i.FcmToken, &i.RevokedAt)
 	return i, err
 }
 
@@ -240,6 +275,42 @@ func (q *Queries) ListDevicesWithUsers(ctx context.Context) ([]ListDevicesWithUs
 			&i.RevokedAt,
 			&i.IsTest,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPushTargets = `-- name: ListPushTargets :many
+SELECT id, fcm_token
+FROM devices
+WHERE revoked_at IS NULL AND is_test = 0 AND fcm_token IS NOT NULL AND fcm_token <> ''
+ORDER BY id
+`
+
+type ListPushTargetsRow struct {
+	ID       string
+	FcmToken sql.NullString
+}
+
+// Push targets for broadcasts: live, non-test devices that registered an FCM token.
+func (q *Queries) ListPushTargets(ctx context.Context) ([]ListPushTargetsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPushTargets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPushTargetsRow{}
+	for rows.Next() {
+		var i ListPushTargetsRow
+		if err := rows.Scan(&i.ID, &i.FcmToken); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

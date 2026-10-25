@@ -11,6 +11,9 @@
 services:
   pttd:
     image: ptt/pttd:ci
+    environment:
+      # Records pushes in memory instead of calling FCM (GET /internal/fake-fcm on :9090).
+      PTTD_FCM_FAKE: "true"
     volumes:
       - pttd-data:/data
       - pttd-secrets:/run/secrets/ptt:ro
@@ -27,7 +30,7 @@ services:
 volumes:
   # A fresh volume inherits the image's /data (owned by 65532).
   pttd-data:
-  # Empty: there are no secrets until milestone 2.
+  # Empty: CI has no secrets; FCM uses the fake sender.
   pttd-secrets:
   caddy-data:
   caddy-config:

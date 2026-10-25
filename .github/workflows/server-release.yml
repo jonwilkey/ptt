@@ -403,12 +403,18 @@ jobs:
           echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r requirements.yml
 
+      # The app role decrypts app_secrets on this runner (community.sops).
+      - name: Install sops
+        run: .github/scripts/install-sops.sh
+
       - name: Deploy with Ansible (deploy.yml)
         id: ansible
         working-directory: infra/ansible
         env:
           PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
           GHCR_TOKEN: ${{ github.token }}
+          # Empty (and unused) while app_secrets is empty. Only this step can see it.
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
           set -euo pipefail
           vars="$RUNNER_TEMP/deploy-vars.json"

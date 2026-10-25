@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"text/tabwriter"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/adminops"
 	"github.com/jonwilkey/ptt/server/internal/config"
 	"github.com/jonwilkey/ptt/server/internal/db"
+	"github.com/jonwilkey/ptt/server/internal/push"
 )
 
 // enrollPrefix starts every enrollment QR payload (docs/protocol.md section 5).
@@ -175,4 +177,56 @@ func when(t *time.Time) string {
 		return "-"
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// testPushTTL is the FCM time-to-live of the `test` message (protocol section 9).
+const testPushTTL = 15 * time.Minute
+
+func adminTestPush(ctx context.Context, args []string, env Env) error {
+	fs := newFlagSet("admin test-push", env)
+	if err := parseFlags(fs, args, 1, "exactly one <device-id> argument"); err != nil {
+		return err
+	}
+	id := fs.Arg(0)
+
+	cfg, err := config.Load(env.Lookup)
+	if err != nil {
+		return err
+	}
+	d, err := openAdminDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+
+	token, err := adminops.PushToken(ctx, d, id)
+	if err != nil {
+		return fmt.Errorf("admin test-push: %w", err)
+	}
+	sender, fake, mode, err := push.FromEnv(ctx, env.Lookup, slog.New(slog.DiscardHandler))
+	if err != nil {
+		return err
+	}
+	if mode == push.ModeDisabled {
+		return errors.New("admin test-push: FCM is not configured; set PTTD_FCM_CREDENTIALS_FILE (see docs/runbooks/firebase-setup.md)")
+	}
+
+	msg := push.Message{
+		Token:    token,
+		Data:     map[string]string{push.TypeKey: "test"},
+		Priority: push.High,
+		TTL:      testPushTTL,
+	}
+	if err := sender.Send(ctx, msg); err != nil {
+		// The error text never contains the token.
+		return fmt.Errorf("admin test-push: %w", err)
+	}
+	if fake != nil {
+		// Nothing was sent; show what would have been, without the token.
+		_, _ = fmt.Fprintf(env.Stdout, "FCM fake mode: would send to device %s: type=test priority=%s ttl=%s\n",
+			id, msg.Priority, msg.TTL)
+		return nil
+	}
+	_, err = fmt.Fprintf(env.Stdout, "Sent a test push to device %s.\n", id)
+	return err
 }

@@ -40,6 +40,9 @@ type InternalOptions struct {
 	ActivePages   func(ctx context.Context) (int64, error)
 	// BinarySchemaVersion is reported as-is.
 	BinarySchemaVersion int64
+	// FakeFCM, when set, is served at /internal/fake-fcm (GET lists, DELETE clears). Only the
+	// fake FCM sender provides it.
+	FakeFCM http.Handler
 }
 
 // NewInternal returns the handler for the internal listener: /metrics and /internal/status.
@@ -61,6 +64,9 @@ func NewInternal(opts InternalOptions) http.Handler {
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}))
 	r.Get("/internal/status", status(opts, logger))
+	if opts.FakeFCM != nil {
+		r.Handle("/internal/fake-fcm", opts.FakeFCM)
+	}
 	return r
 }
 

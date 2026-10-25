@@ -26,6 +26,12 @@ const (
 	EnvSnapshotDir  = "PTTD_SNAPSHOT_DIR"
 	EnvLogLevel     = "PTTD_LOG_LEVEL"
 	EnvPublicURL    = "PTTD_PUBLIC_URL"
+
+	// EnvFCMCredentials is the secret name for the Firebase service-account JSON; the file path
+	// is PTTD_FCM_CREDENTIALS_FILE (see ReadSecret). EnvFCMFake selects the in-memory fake
+	// sender for CI.
+	EnvFCMCredentials = "PTTD_FCM_CREDENTIALS" //nolint:gosec // an env var name, not a credential
+	EnvFCMFake        = "PTTD_FCM_FAKE"
 )
 
 // Defaults match the container layout: Caddy proxies to :8080, :9090 is published only on the

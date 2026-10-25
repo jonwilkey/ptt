@@ -18,6 +18,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/config"
 	"github.com/jonwilkey/ptt/server/internal/db"
 	"github.com/jonwilkey/ptt/server/internal/httpapi"
+	"github.com/jonwilkey/ptt/server/internal/push"
 	"github.com/jonwilkey/ptt/server/migrations"
 )
 
@@ -200,5 +201,25 @@ func TestServeFailsOnPortConflict(t *testing.T) {
 	}
 	if want := fmt.Sprintf("listen on %s", ln.Addr()); !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q does not mention %q", err, want)
+	}
+}
+
+func TestFakeFCMEndpointOnlyInFakeMode(t *testing.T) {
+	a, _ := newApp(t, true)
+	rec := httptest.NewRecorder()
+	a.InternalHandler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/internal/fake-fcm", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("without the fake sender: %d, want 404", rec.Code)
+	}
+
+	f := push.NewFake()
+	a.fake = f
+	if err := f.Send(t.Context(), push.Message{Token: "tok", Data: map[string]string{"type": "test"}, Priority: push.High}); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	a.InternalHandler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/internal/fake-fcm", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"type":"test"`) {
+		t.Errorf("with the fake sender: %d %s", rec.Code, rec.Body)
 	}
 }
