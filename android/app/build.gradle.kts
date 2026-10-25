@@ -1,0 +1,154 @@
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.detekt)
+    alias(libs.plugins.ktlint)
+}
+
+// version.txt is bumped by release-please; AppVersion (buildSrc) rejects a malformed file.
+val appVersion = AppVersion.parse(
+    providers.fileContents(rootProject.layout.projectDirectory.file("version.txt")).asText.get()
+)
+
+// Firebase settings come from Gradle properties (ptt.firebase.*, e.g. in ~/.gradle/gradle.properties)
+// or the environment (PTT_FIREBASE_*). All empty when absent, and the app then skips Firebase.
+fun firebaseSetting(name: String): String = providers.gradleProperty("ptt.firebase.$name")
+    .orElse(providers.environmentVariable("PTT_FIREBASE_${name.uppercase().replace('-', '_')}"))
+    .getOrElse("")
+    .trim()
+
+android {
+    namespace = "com.example.ptt"
+    compileSdk = 37
+    compileSdkMinor = 2
+
+    defaultConfig {
+        applicationId = "com.example.ptt"
+        minSdk = 29
+        targetSdk = 37
+        // Android requires a positive versionCode; 0.0.0 (before the first release) maps to 1.
+        versionCode = maxOf(appVersion.code, 1)
+        versionName = appVersion.name
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        for ((field, key) in mapOf(
+            "FIREBASE_PROJECT_ID" to "project-id",
+            "FIREBASE_APP_ID" to "app-id",
+            "FIREBASE_API_KEY" to "api-key",
+            "FIREBASE_SENDER_ID" to "sender-id"
+        )) {
+            buildConfigField("String", field, "\"${firebaseSetting(key)}\"")
+        }
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    buildTypes {
+        release {
+            // Signing is configured in milestone 6; release builds stay unsigned until then.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    lint {
+        abortOnError = true
+        warningsAsErrors = true
+        checkDependencies = true
+        lintConfig = file("lint.xml")
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+}
+
+kotlin {
+    jvmToolchain(21)
+    compilerOptions {
+        allWarningsAsErrors.set(true)
+    }
+}
+
+ktlint {
+    version.set(libs.versions.ktlint.get())
+    android.set(true)
+}
+
+detekt {
+    config.setFrom(rootProject.file("config/detekt/detekt.yml"))
+    buildUponDefaultConfig = true
+    source.setFrom("src/main/kotlin", "src/test/kotlin")
+}
+
+// Robolectric's android-all jar, resolved by Gradle so it is locked and checksum-verified.
+val robolectricAndroidAll by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
+val robolectricDepsDir = layout.buildDirectory.dir("robolectric-deps")
+
+val syncRobolectricDeps by tasks.registering(Sync::class) {
+    from(robolectricAndroidAll)
+    into(robolectricDepsDir)
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(syncRobolectricDeps)
+    // Offline: Robolectric reads the jar from this directory instead of downloading it itself.
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricDepsDir.get().asFile.path)
+    // Robolectric's sandbox (API 36+) reaches into java.base internals (FileDescriptor).
+    jvmArgs(
+        "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+        "--add-exports=java.base/jdk.internal.access=ALL-UNNAMED"
+    )
+    testLogging {
+        events("failed")
+        exceptionFormat = TestExceptionFormat.FULL
+    }
+}
+
+dependencies {
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.hilt.navigation.compose)
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
+    implementation(libs.kotlinx.serialization.json)
+    // See gradle/libs.versions.toml: keeps dependency locking consistent with AGP's second resolution.
+    runtimeOnly(libs.kotlin.stdlib.common)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
+
+    debugImplementation(libs.androidx.compose.ui.tooling)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    robolectricAndroidAll(libs.robolectric.android.all.api36)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+}

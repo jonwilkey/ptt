@@ -1,0 +1,18 @@
+# Layered on detekt's default config (buildUponDefaultConfig = true); only deviations are listed.
+# Formatting is ktlint's job, so detekt's formatting ruleset stays off (it is not applied).
+style:
+  MagicNumber:
+    # Compose UI code and tests use literals naturally; production logic should still name them.
+    excludes: ["**/test/**", "**/androidTest/**"]
+  MaxLineLength:
+    # Matches .editorconfig / ktlint android style.
+    maxLineLength: 120
+complexity:
+  LongMethod:
+    # @Composable functions describe a UI tree and run long; the default threshold is 60 lines.
+    threshold: 80
+naming:
+  FunctionNaming:
+    # Composable functions are PascalCase by convention.
+    functionPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    excludes: ["**/test/**"]
