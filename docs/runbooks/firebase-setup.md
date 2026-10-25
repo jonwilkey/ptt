@@ -108,7 +108,7 @@ registers a fresh one the next time it opens.
 
 ## 6. Restrict the Android API key
 
-The `google-services.json` that ships in the app contains an API key. Restrict it so a copy
+The API key the app is built with (step 7) can be read out of the APK. Restrict it so a copy
 extracted from the APK is useless elsewhere (the spec's "Secrets" section):
 
 1. Google Cloud console > **APIs & Services > Credentials**, open the project's **Android key**
@@ -123,10 +123,31 @@ extracted from the APK is useless elsewhere (the spec's "Secrets" section):
 
 ## 7. Android app configuration
 
-*Placeholder.* How the Android app gets its Firebase configuration values (the
-`google-services` project number, application ID, and API key, and where they live without
-being committed) is decided in the Android milestone and will be documented here when that PR
-lands.
+The app does not use the `google-services` Gradle plugin or a `google-services.json` file.
+It builds its `FirebaseOptions` at runtime from four values, which come from the Firebase
+console (**Project settings > General > Your apps**; the values are in the downloaded
+`google-services.json`, which you read and then discard):
+
+| Property (Gradle) | Environment variable | `google-services.json` field |
+| --- | --- | --- |
+| `ptt.firebase.project-id` | `PTT_FIREBASE_PROJECT_ID` | `project_info.project_id` |
+| `ptt.firebase.app-id` | `PTT_FIREBASE_APP_ID` | `client[0].client_info.mobilesdk_app_id` |
+| `ptt.firebase.api-key` | `PTT_FIREBASE_API_KEY` | `client[0].api_key[0].current_key` |
+| `ptt.firebase.sender-id` | `PTT_FIREBASE_SENDER_ID` | `project_info.project_number` |
+
+Put them in `~/.gradle/gradle.properties` on the machine that builds the APK (never in the
+repository):
+
+```properties
+ptt.firebase.project-id=example-ptt
+ptt.firebase.app-id=1:000000000000:android:0000000000000000
+ptt.firebase.api-key=EXAMPLE_API_KEY
+ptt.firebase.sender-id=000000000000
+```
+
+The values are baked into `BuildConfig`. When any of them is empty (CI, contributors without a
+Firebase project) the app skips Firebase initialisation and logs that FCM is unavailable; it
+still builds and runs. See `android/README.md`.
 
 ## Rotation (yearly, or on suspicion of a leak)
 
