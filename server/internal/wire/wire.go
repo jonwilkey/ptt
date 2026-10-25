@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -16,9 +17,26 @@ import (
 	"github.com/google/uuid"
 )
 
+// b64uCodec is strict unpadded base64url. The standard library's Strict() mode rejects padding, the
+// standard alphabet and non-zero trailing bits, but still silently skips '\r' and '\n'; a phone's
+// decoder does not, so DecodeString rejects them here.
+type b64uCodec struct{ enc *base64.Encoding }
+
 // B64u is the strict unpadded base64url of docs/protocol.md section 1: padding, the standard
-// alphabet and non-zero trailing bits are all rejected.
-var B64u = base64.RawURLEncoding.Strict()
+// alphabet, non-zero trailing bits and embedded line breaks are all rejected. Use it for every
+// protocol value; never call base64.Encoding methods (Decode, DecodeString) on the raw encoding.
+var B64u = b64uCodec{enc: base64.RawURLEncoding.Strict()}
+
+// DecodeString decodes s strictly.
+func (c b64uCodec) DecodeString(s string) ([]byte, error) {
+	if strings.ContainsAny(s, "\r\n") {
+		return nil, errors.New("base64url: line break in input")
+	}
+	return c.enc.DecodeString(s)
+}
+
+// EncodeToString encodes b without padding.
+func (c b64uCodec) EncodeToString(b []byte) string { return c.enc.EncodeToString(b) }
 
 // ValidUUID reports whether s is a canonical lowercase UUID (36 characters).
 func ValidUUID(s string) bool {
@@ -91,6 +109,10 @@ func strictMembers(data []byte, accept func(key string) error) (map[string]json.
 	if !utf8.Valid(data) {
 		return nil, errors.New("invalid UTF-8")
 	}
+	// ...and a lone surrogate escape into U+FFFD, which a strict parser would reject.
+	if err := checkSurrogateEscapes(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return nil, errors.New("not a JSON object")
@@ -127,4 +149,39 @@ func strictMembers(data []byte, accept func(key string) error) (map[string]json.
 		return nil, errors.New("trailing data")
 	}
 	return out, nil
+}
+
+// checkSurrogateEscapes rejects a \uD800-\uDBFF escape that is not immediately followed by a
+// \uDC00-\uDFFF escape, and a low-surrogate escape that does not directly follow a high one.
+// A backslash pair (an escaped backslash) is skipped as a unit, so `\\u` is not an escape.
+func checkSurrogateEscapes(data []byte) error {
+	hexVal := func(i int) (rune, bool) {
+		if i+6 > len(data) || data[i] != '\\' || data[i+1] != 'u' {
+			return 0, false
+		}
+		v, err := strconv.ParseUint(string(data[i+2:i+6]), 16, 16)
+		return rune(v), err == nil
+	}
+	for i := 0; i < len(data); {
+		if data[i] != '\\' {
+			i++
+			continue
+		}
+		v, ok := hexVal(i)
+		switch {
+		case !ok:
+			i += 2 // some other escape, or malformed (the JSON decoder rejects that)
+		case v >= 0xD800 && v <= 0xDBFF:
+			low, ok := hexVal(i + 6)
+			if !ok || low < 0xDC00 || low > 0xDFFF {
+				return errors.New("unpaired surrogate escape")
+			}
+			i += 12
+		case v >= 0xDC00 && v <= 0xDFFF:
+			return errors.New("unpaired surrogate escape")
+		default:
+			i += 6
+		}
+	}
+	return nil
 }
