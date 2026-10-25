@@ -35,12 +35,13 @@ type api struct {
 	now    func() time.Time
 
 	notifier RosterNotifier
+	pages    PageService // nil: the page endpoints are not served
 
 	enrollLimiter   *ratelimit.Limiter
 	authFailLimiter *ratelimit.Limiter
 }
 
-func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time, notifier RosterNotifier) *api {
+func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time, notifier RosterNotifier, pages PageService) *api {
 	if notifier == nil {
 		notifier = NopRosterNotifier{}
 	}
@@ -53,6 +54,7 @@ func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time, notifier Rost
 		logger:          logger,
 		now:             now,
 		notifier:        notifier,
+		pages:           pages,
 		enrollLimiter:   ratelimit.New(enrollLimit, enrollWindow, now),
 		authFailLimiter: ratelimit.New(1, authFailAuditWindow, now),
 	}
@@ -68,6 +70,9 @@ func (a *api) routes(r chi.Router) {
 		r.Put("/v1/devices/me", a.updateSelf)
 		r.Get("/v1/contacts", a.contacts)
 		r.Get("/v1/roster", a.getRoster)
+		if a.pages != nil {
+			a.pageRoutes(r)
+		}
 
 		r.Group(func(r chi.Router) {
 			r.Use(requireAdmin)

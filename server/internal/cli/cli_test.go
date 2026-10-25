@@ -254,8 +254,10 @@ func TestMigrateCommands(t *testing.T) {
 	if err != nil || len(snaps) != 1 || snaps[0].Name() != fmt.Sprintf("pre-migrate-20261024T150405.000Z-v%d.db", latest) {
 		t.Fatalf("snapshots after down = %v, %v", snaps, err)
 	}
-	if r := run(t, vars, "migrate", "down"); r.code != 0 {
-		t.Fatalf("down to 0 again = %+v", r)
+	for range latest - 1 { // the rest, down to an empty schema
+		if r := run(t, vars, "migrate", "down"); r.code != 0 {
+			t.Fatalf("down to 0 again = %+v", r)
+		}
 	}
 	if r := run(t, vars, "migrate", "down"); r.code != 1 || !strings.Contains(r.stderr, "no migrations are applied") {
 		t.Fatalf("second down = %+v", r)

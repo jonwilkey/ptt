@@ -9,13 +9,19 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/jonwilkey/ptt/server/internal/cleanup"
+	"github.com/jonwilkey/ptt/server/internal/clock"
 	"github.com/jonwilkey/ptt/server/internal/config"
 	"github.com/jonwilkey/ptt/server/internal/db"
 	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 	"github.com/jonwilkey/ptt/server/internal/httpapi"
 	"github.com/jonwilkey/ptt/server/internal/metrics"
+	"github.com/jonwilkey/ptt/server/internal/pages"
 	"github.com/jonwilkey/ptt/server/internal/push"
 )
 
@@ -34,6 +40,13 @@ type App struct {
 	sender   push.Sender
 	fake     *push.Fake
 	notifier *push.RosterNotifier
+	clk      clock.Clock
+	pageSvc  *pages.Service
+	pageMet  *metrics.Pages
+
+	// The background loops started by Start.
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
 }
 
 // Option customizes an App.
@@ -43,6 +56,12 @@ type Option func(*App)
 // messages are then served on the internal listener. Without this option FCM is disabled.
 func WithSender(s push.Sender, fake *push.Fake) Option {
 	return func(a *App) { a.sender, a.fake = s, fake }
+}
+
+// WithClock sets the clock of the page lifecycle, its scheduler and the nightly cleanup; tests
+// use a fake one. The default is the wall clock.
+func WithClock(c clock.Clock) Option {
+	return func(a *App) { a.clk = c }
 }
 
 // New returns an App over an open, migrated database.
@@ -55,16 +74,46 @@ func New(version string, logger *slog.Logger, sqlDB *sql.DB, migrator *db.Migrat
 		queries:  sqlcdb.New(sqlDB),
 		started:  time.Now(),
 		sender:   push.Disabled{},
+		clk:      clock.Real{},
+		pageMet:  metrics.NewPages(),
 	}
 	for _, o := range opts {
 		o(a)
 	}
 	a.notifier = push.NewRosterNotifier(sqlDB, a.sender, logger)
+	a.pageSvc = pages.NewService(pages.Options{
+		DB: sqlDB, Sender: a.sender, Logger: logger, Clock: a.clk, Metrics: a.pageMet,
+	})
 	return a
 }
 
-// Close lets in-flight background pushes finish until ctx ends, then cancels them.
-func (a *App) Close(ctx context.Context) { a.notifier.Close(ctx) }
+// Start runs the background work: the page scheduler (which first picks up any page already in
+// the database, so a restart while a page is ringing carries on) and the nightly cleanup, which
+// sweeps once now and then every 24 h. Close stops both.
+func (a *App) Start() {
+	if a.bgCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.bgCancel = cancel
+	a.pageSvc.Start()
+	a.bgWG.Add(1)
+	go func() {
+		defer a.bgWG.Done()
+		cleanup.Run(ctx, a.db, a.clk, a.logger)
+	}()
+}
+
+// Close stops the background loops, then lets in-flight pushes finish until ctx ends and
+// cancels whatever is left.
+func (a *App) Close(ctx context.Context) {
+	if a.bgCancel != nil {
+		a.bgCancel()
+		a.bgWG.Wait()
+	}
+	a.pageSvc.Close(ctx)
+	a.notifier.Close(ctx)
+}
 
 // activeSessions is the number of open talk sessions. Sessions arrive with the WebSocket relay
 // in milestone 4; until then there are none, which is what the deploy workflow waits for.
@@ -91,9 +140,10 @@ func (a *App) PublicHandler() http.Handler {
 		Logger: a.logger,
 		Health: a.Health,
 		DB:     a.db,
-		Now:    time.Now,
+		Now:    a.clk.Now,
 
 		RosterNotifier: a.notifier,
+		Pages:          a.pageSvc,
 	})
 }
 
@@ -102,7 +152,7 @@ func (a *App) InternalHandler() http.Handler {
 	return httpapi.NewInternal(httpapi.InternalOptions{
 		Version:        a.version,
 		Logger:         a.logger,
-		Registry:       metrics.New(a.version, a.activeSessions),
+		Registry:       a.registry(),
 		Started:        a.started,
 		ActiveSessions: a.activeSessions,
 		DBPing:         a.db.PingContext,
@@ -114,6 +164,12 @@ func (a *App) InternalHandler() http.Handler {
 		BinarySchemaVersion: a.migrator.LatestVersion(),
 		FakeFCM:             fakeHandler(a.fake),
 	})
+}
+
+func (a *App) registry() *prometheus.Registry {
+	reg := metrics.New(a.version, a.activeSessions)
+	a.pageMet.Register(reg)
+	return reg
 }
 
 func fakeHandler(f *push.Fake) http.Handler {
@@ -155,6 +211,7 @@ func Serve(ctx context.Context, cfg config.Config, logger *slog.Logger, version 
 	}
 
 	a := New(version, logger, sqlDB, migrator, opts...)
+	a.Start()
 	servers := []*http.Server{
 		httpapi.NewServer(cfg.ListenAddr, a.PublicHandler(), logger),
 		httpapi.NewServer(cfg.InternalAddr, a.InternalHandler(), logger),

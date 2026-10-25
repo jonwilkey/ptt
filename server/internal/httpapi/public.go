@@ -52,6 +52,8 @@ type PublicOptions struct {
 	Now func() time.Time
 	// RosterNotifier is called after each accepted roster; defaults to a no-op.
 	RosterNotifier RosterNotifier
+	// Pages serves the /v1/pages endpoints; without it they are not registered.
+	Pages PageService
 }
 
 // NewPublic returns the public API handler.
@@ -80,7 +82,7 @@ func NewPublic(opts PublicOptions) http.Handler {
 	r.Head("/healthz", health)
 
 	if opts.DB != nil {
-		newAPI(opts.DB, logger, opts.Now, opts.RosterNotifier).routes(r)
+		newAPI(opts.DB, logger, opts.Now, opts.RosterNotifier, opts.Pages).routes(r)
 	}
 	return r
 }

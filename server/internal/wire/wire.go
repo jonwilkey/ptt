@@ -51,6 +51,42 @@ func ValidText(s string, maxRunes int) bool {
 // caller of it) before being decoded into a struct, because phones parse them case-sensitively
 // and a lenient server parse would disagree about what was signed.
 func StrictObject(data []byte, keys ...string) (map[string]json.RawMessage, error) {
+	allowed := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		allowed[k] = true
+	}
+	out, err := strictMembers(data, func(k string) error {
+		if !allowed[k] {
+			return fmt.Errorf("unexpected key %q", k)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range keys {
+		if _, ok := out[k]; !ok {
+			return nil, fmt.Errorf("missing key %q", k)
+		}
+	}
+	return out, nil
+}
+
+// StrictMap parses data as one JSON object whose keys are not fixed, such as a map from device
+// id to a wrapped key. It applies the same rules as StrictObject (valid UTF-8, no duplicate
+// key, no null value, no trailing data) and additionally requires every key to satisfy
+// validKey. An empty object is allowed; callers that need entries check the length.
+func StrictMap(data []byte, validKey func(string) bool) (map[string]json.RawMessage, error) {
+	return strictMembers(data, func(k string) error {
+		if !validKey(k) {
+			return fmt.Errorf("invalid key %q", k)
+		}
+		return nil
+	})
+}
+
+// strictMembers is the shared parser: accept vets each key as it is read.
+func strictMembers(data []byte, accept func(key string) error) (map[string]json.RawMessage, error) {
 	// encoding/json would silently turn invalid UTF-8 into U+FFFD.
 	if !utf8.Valid(data) {
 		return nil, errors.New("invalid UTF-8")
@@ -59,19 +95,18 @@ func StrictObject(data []byte, keys ...string) (map[string]json.RawMessage, erro
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return nil, errors.New("not a JSON object")
 	}
-	allowed := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		allowed[k] = true
-	}
-	out := make(map[string]json.RawMessage, len(keys))
+	out := make(map[string]json.RawMessage)
 	for dec.More() {
 		tok, err := dec.Token()
 		if err != nil {
 			return nil, err
 		}
 		key, ok := tok.(string)
-		if !ok || !allowed[key] {
+		if !ok {
 			return nil, fmt.Errorf("unexpected key %q", key)
+		}
+		if err := accept(key); err != nil {
+			return nil, err
 		}
 		if _, dup := out[key]; dup {
 			return nil, fmt.Errorf("duplicate key %q", key)
@@ -90,11 +125,6 @@ func StrictObject(data []byte, keys ...string) (map[string]json.RawMessage, erro
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("trailing data")
-	}
-	for _, k := range keys {
-		if _, ok := out[k]; !ok {
-			return nil, fmt.Errorf("missing key %q", k)
-		}
 	}
 	return out, nil
 }

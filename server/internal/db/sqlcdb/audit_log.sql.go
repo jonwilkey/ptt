@@ -10,6 +10,18 @@ import (
 	"database/sql"
 )
 
+const deleteAuditLogBefore = `-- name: DeleteAuditLogBefore :execrows
+DELETE FROM audit_log WHERE at < ?
+`
+
+func (q *Queries) DeleteAuditLogBefore(ctx context.Context, at int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteAuditLogBefore, at)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const insertAuditLog = `-- name: InsertAuditLog :exec
 INSERT INTO audit_log (at, actor_device, action, detail)
 VALUES (?, ?, ?, ?)
