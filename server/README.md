@@ -23,6 +23,9 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `internal/metrics/` | Prometheus registry |
 | `internal/admin/` | `pttd admin` client code: the status client and the terminal QR renderer |
 | `internal/adminops/` | DB-direct admin operations (bootstrap, list devices, revoke) |
+| `internal/wire/` | Strict b64u and canonical-UUID helpers shared by the parsers |
+| `internal/signed/` | Signed objects (`{payload, signer, sig}`): decode, sign, verify under `ptt-roster-v1` / `ptt-envelope-v1` |
+| `internal/roster/` | Roster payload parser and the server acceptance rules (`Publish`) |
 | `internal/auth/` | Device-token and enrollment-code generation and hashing |
 | `migrations/` | goose SQL migrations, embedded in the binary |
 
@@ -104,6 +107,20 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
   - `POST /v1/devices/{id}/revoke` (admin): idempotent, audited with the acting device.
   - `GET /v1/contacts`: people with a live non-test device and their presence
     (`ok`/`warning`/`offline`).
+  - `GET /v1/roster`: the accepted signed object as its canonical re-encoding `{payload, signer, sig}` (the payload bytes unchanged, so the signature still verifies), or `404 not_found` before the
+    first one.
+  - `PUT /v1/roster` (admin): body is the signed object. A malformed envelope is
+    `400 invalid_request`. Then, in one transaction (writers are serialised, so concurrent PUTs
+    cannot both win), the server requires: a valid `ptt-roster-v1` signature by a non-revoked,
+    non-test `signer` device under the key it holds (the signer need not be the caller); a
+    well-formed payload; the signer listed as admin in the current stored roster, or, when none
+    exists, the signer's user is an admin and the new roster lists it as admin; `version` above
+    the stored one (`409 roster_stale`); and every listed device existing, non-revoked,
+    non-test, with matching `user_id`, both keys, `admin` (= the user's flag) and the user's
+    `display_name`. Anything else is `400 roster_invalid`. Success is `204`, an audit row
+    `roster_published` (`version`, `devices`), then the `RosterNotifier` hook (a no-op until the
+    FCM sender lands). Omitting a device from a roster does not revoke it: to remove a phone the
+    app signs and PUTs a roster without the device, then calls `POST /v1/devices/{id}/revoke`.
 - `GET /metrics` (internal): Go and process collectors, `pttd_build_info{version}`,
   `pttd_active_sessions` (0 until milestone 4; deploys wait for it to be 0). No per-person labels.
 - `GET /internal/status` (internal): `{version, uptime_seconds, active_sessions, active_pages,

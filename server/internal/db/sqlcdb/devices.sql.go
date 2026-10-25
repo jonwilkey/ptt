@@ -51,6 +51,43 @@ func (q *Queries) GetActiveDeviceByTokenHash(ctx context.Context, tokenHash []by
 	return i, err
 }
 
+const getDeviceForRoster = `-- name: GetDeviceForRoster :one
+SELECT d.id, d.user_id, u.display_name, u.is_admin, d.ed25519_pub, d.x25519_pub,
+       d.revoked_at, d.is_test
+FROM devices d
+JOIN users u ON u.id = d.user_id
+WHERE d.id = ?
+`
+
+type GetDeviceForRosterRow struct {
+	ID          string
+	UserID      string
+	DisplayName string
+	IsAdmin     int64
+	Ed25519Pub  []byte
+	X25519Pub   []byte
+	RevokedAt   sql.NullInt64
+	IsTest      int64
+}
+
+// Everything the roster acceptance rules compare against, for any device (revoked and test
+// devices included, so the rules can reject them explicitly).
+func (q *Queries) GetDeviceForRoster(ctx context.Context, id string) (GetDeviceForRosterRow, error) {
+	row := q.db.QueryRowContext(ctx, getDeviceForRoster, id)
+	var i GetDeviceForRosterRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.DisplayName,
+		&i.IsAdmin,
+		&i.Ed25519Pub,
+		&i.X25519Pub,
+		&i.RevokedAt,
+		&i.IsTest,
+	)
+	return i, err
+}
+
 const getDeviceWithUser = `-- name: GetDeviceWithUser :one
 SELECT d.id, d.user_id, u.display_name, u.is_admin, d.name, d.ed25519_pub, d.x25519_pub
 FROM devices d

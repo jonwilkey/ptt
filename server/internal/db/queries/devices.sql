@@ -53,3 +53,12 @@ FROM devices d
 JOIN users u ON u.id = d.user_id
 WHERE d.revoked_at IS NULL AND d.is_test = 0
 ORDER BY u.display_name, u.id, d.id;
+
+-- Everything the roster acceptance rules compare against, for any device (revoked and test
+-- devices included, so the rules can reject them explicitly).
+-- name: GetDeviceForRoster :one
+SELECT d.id, d.user_id, u.display_name, u.is_admin, d.ed25519_pub, d.x25519_pub,
+       d.revoked_at, d.is_test
+FROM devices d
+JOIN users u ON u.id = d.user_id
+WHERE d.id = ?;

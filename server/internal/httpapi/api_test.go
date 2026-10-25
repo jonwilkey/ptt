@@ -138,7 +138,12 @@ func (d enrolled) field(k string) string {
 
 func (e *testEnv) enroll(code, mac string) enrolled {
 	e.t.Helper()
-	body := enrollBody(code, mac)
+	return e.enrollWith(enrollBody(code, mac))
+}
+
+// enrollWith enrolls using body, which a test may have customised (for example with real keys).
+func (e *testEnv) enrollWith(body map[string]any) enrolled {
+	e.t.Helper()
 	// Each enrollment comes from its own address, so the per-IP limit never gets in the way.
 	e.ips++
 	rec := e.call(http.MethodPost, "/v1/enroll", "", body, "X-Forwarded-For", "198.51.100."+strconv.Itoa(e.ips))

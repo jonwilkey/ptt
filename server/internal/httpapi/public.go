@@ -50,6 +50,8 @@ type PublicOptions struct {
 	DB *sql.DB
 	// Now is the clock for expiry, rate limits and presence; defaults to time.Now.
 	Now func() time.Time
+	// RosterNotifier is called after each accepted roster; defaults to a no-op.
+	RosterNotifier RosterNotifier
 }
 
 // NewPublic returns the public API handler.
@@ -78,7 +80,7 @@ func NewPublic(opts PublicOptions) http.Handler {
 	r.Head("/healthz", health)
 
 	if opts.DB != nil {
-		newAPI(opts.DB, logger, opts.Now).routes(r)
+		newAPI(opts.DB, logger, opts.Now, opts.RosterNotifier).routes(r)
 	}
 	return r
 }
