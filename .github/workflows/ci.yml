@@ -340,7 +340,11 @@ jobs:
           "$GITHUB_WORKSPACE/.github/scripts/tofu-plan.sh" "$RUNNER_TEMP/prod.tfplan"
 
       - name: Summarize plan
-        if: steps.plan.outputs.exitcode == '0' || steps.plan.outputs.exitcode == '2'
+        # outcome first: when tofu plan is skipped (no infra/tofu changes) its exitcode output is
+        # null, and GitHub's loose == treats null == '0' as true.
+        if: >-
+          steps.plan.outcome == 'success' &&
+          (steps.plan.outputs.exitcode == '0' || steps.plan.outputs.exitcode == '2')
         working-directory: infra/tofu/prod
         run: |
           "$GITHUB_WORKSPACE/.github/scripts/tofu-plan-summary.sh" "$RUNNER_TEMP/prod.tfplan" > "$RUNNER_TEMP/summary.txt"
