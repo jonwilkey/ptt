@@ -6,13 +6,13 @@ package adminops
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jonwilkey/ptt/server/internal/auth"
+	"github.com/jonwilkey/ptt/server/internal/db"
 	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 )
 
@@ -37,44 +37,11 @@ type Device struct {
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 }
 
-// withTx runs f in a transaction, committing only if f succeeds.
-func withTx(ctx context.Context, db *sql.DB, f func(q *sqlcdb.Queries) error) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := f(sqlcdb.New(tx)); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
-}
-
-func audit(ctx context.Context, q *sqlcdb.Queries, now time.Time, action string, detail any) error {
-	b, err := json.Marshal(detail)
-	if err != nil {
-		return fmt.Errorf("encode audit detail: %w", err)
-	}
-	// SSH admin actions have no acting device.
-	err = q.InsertAuditLog(ctx, sqlcdb.InsertAuditLogParams{
-		At:     now.UnixMilli(),
-		Action: action,
-		Detail: sql.NullString{String: string(b), Valid: true},
-	})
-	if err != nil {
-		return fmt.Errorf("write audit log: %w", err)
-	}
-	return nil
-}
-
 // Bootstrap mints a 24-hour enrollment code that makes the first admin, named name, and returns
 // it. Without reset it fails with ErrAdminExists if any admin user exists. With reset it first
 // revokes every device, deletes the roster and retires outstanding codes, so the family
 // re-enrolls from scratch. The code itself is never logged; only its public ID is.
-func Bootstrap(ctx context.Context, db *sql.DB, name string, reset bool, now time.Time) (code string, err error) {
+func Bootstrap(ctx context.Context, d *sql.DB, name string, reset bool, now time.Time) (code string, err error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", errors.New("name must not be empty")
@@ -85,7 +52,7 @@ func Bootstrap(ctx context.Context, db *sql.DB, name string, reset bool, now tim
 	}
 
 	nowMs := now.UnixMilli()
-	err = withTx(ctx, db, func(q *sqlcdb.Queries) error {
+	err = db.InTx(ctx, d, func(q *sqlcdb.Queries) error {
 		var retired int64
 		if reset {
 			revoked, err := q.RevokeAllDevices(ctx, sql.NullInt64{Int64: nowMs, Valid: true})
@@ -99,7 +66,7 @@ func Bootstrap(ctx context.Context, db *sql.DB, name string, reset bool, now tim
 			if retired, err = q.ExpireOutstandingEnrollmentCodes(ctx, nowMs); err != nil {
 				return fmt.Errorf("retire enrollment codes: %w", err)
 			}
-			if err := audit(ctx, q, now, "bootstrap_reset", map[string]any{"revoked_devices": revoked}); err != nil {
+			if err := db.Audit(ctx, q, now, "", "bootstrap_reset", map[string]any{"revoked_devices": revoked}); err != nil {
 				return err
 			}
 		} else {
@@ -126,7 +93,7 @@ func Bootstrap(ctx context.Context, db *sql.DB, name string, reset bool, now tim
 		if err != nil {
 			return fmt.Errorf("insert enrollment code: %w", err)
 		}
-		return audit(ctx, q, now, "bootstrap", map[string]any{
+		return db.Audit(ctx, q, now, "", "bootstrap", map[string]any{
 			"display_name":  name,
 			"code_id":       auth.CodeID(hash),
 			"reset":         reset,
@@ -140,8 +107,8 @@ func Bootstrap(ctx context.Context, db *sql.DB, name string, reset bool, now tim
 }
 
 // ListDevices returns every device, revoked ones included, grouped by person.
-func ListDevices(ctx context.Context, db *sql.DB) ([]Device, error) {
-	rows, err := sqlcdb.New(db).ListDevicesWithUsers(ctx)
+func ListDevices(ctx context.Context, d *sql.DB) ([]Device, error) {
+	rows, err := sqlcdb.New(d).ListDevicesWithUsers(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
 	}
@@ -169,10 +136,17 @@ func millis(n sql.NullInt64) *time.Time {
 	return &t
 }
 
-// Revoke revokes one device. It returns ErrUnknownDevice for an ID that matches nothing, and
-// changed=false (with no audit entry) when the device was already revoked.
-func Revoke(ctx context.Context, db *sql.DB, deviceID string, now time.Time) (changed bool, err error) {
-	err = withTx(ctx, db, func(q *sqlcdb.Queries) error {
+// Revoke revokes one device on behalf of the SSH operator. It returns ErrUnknownDevice for an ID
+// that matches nothing, and changed=false (with no audit entry) when the device was already
+// revoked.
+func Revoke(ctx context.Context, d *sql.DB, deviceID string, now time.Time) (changed bool, err error) {
+	return RevokeAs(ctx, d, deviceID, "", now)
+}
+
+// RevokeAs is Revoke on behalf of the admin device actor, which the audit entry records. An
+// empty actor means the SSH operator.
+func RevokeAs(ctx context.Context, d *sql.DB, deviceID, actor string, now time.Time) (changed bool, err error) {
+	err = db.InTx(ctx, d, func(q *sqlcdb.Queries) error {
 		n, err := q.DeviceExists(ctx, deviceID)
 		if err != nil {
 			return fmt.Errorf("look up device: %w", err)
@@ -191,7 +165,16 @@ func Revoke(ctx context.Context, db *sql.DB, deviceID string, now time.Time) (ch
 			return nil
 		}
 		changed = true
-		return audit(ctx, q, now, "device_revoked", map[string]any{"device_id": deviceID})
+		// The revoked device's unredeemed invitations must not outlive its authority.
+		expired, err := q.ExpireEnrollmentCodesCreatedBy(ctx, sqlcdb.ExpireEnrollmentCodesCreatedByParams{
+			Now:      now.UnixMilli(),
+			DeviceID: sql.NullString{String: deviceID, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("expire enrollment codes: %w", err)
+		}
+		return db.Audit(ctx, q, now, actor, "device_revoked",
+			map[string]any{"device_id": deviceID, "expired_codes": expired})
 	})
 	return changed, err
 }

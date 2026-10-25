@@ -13,3 +13,17 @@ WHERE used_at IS NULL AND expires_at > sqlc.arg(now);
 -- name: ExpireOutstandingSSHEnrollmentCodes :execrows
 UPDATE enrollment_codes SET expires_at = sqlc.arg(now)
 WHERE created_by_device IS NULL AND used_at IS NULL AND expires_at > sqlc.arg(now);
+
+-- name: GetEnrollmentCode :one
+SELECT * FROM enrollment_codes WHERE code_hash = ?;
+
+-- Redeem a code. The conditions repeat the validity check so that, whatever else ran in the
+-- transaction, a used or expired code can never be consumed.
+-- name: RedeemEnrollmentCode :execrows
+UPDATE enrollment_codes SET used_at = sqlc.arg(now), device_id = sqlc.arg(device_id), enroll_mac = sqlc.arg(enroll_mac)
+WHERE code_hash = sqlc.arg(code_hash) AND used_at IS NULL AND expires_at > sqlc.arg(now);
+
+-- Expire the unredeemed codes a device minted, when that device is revoked.
+-- name: ExpireEnrollmentCodesCreatedBy :execrows
+UPDATE enrollment_codes SET expires_at = sqlc.arg(now)
+WHERE created_by_device = sqlc.arg(device_id) AND used_at IS NULL AND expires_at > sqlc.arg(now);

@@ -21,7 +21,9 @@ const (
 	CodeBytes = 16
 )
 
-var b64 = base64.RawURLEncoding
+// b64 is strict (protocol section 1): it rejects padding, the standard alphabet and non-zero
+// trailing bits, so every secret has exactly one accepted spelling.
+var b64 = base64.RawURLEncoding.Strict()
 
 // NewToken returns a fresh device token (43 characters) and the hash the server stores.
 func NewToken() (token string, hash []byte, err error) {

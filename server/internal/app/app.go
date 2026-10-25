@@ -68,6 +68,8 @@ func (a *App) PublicHandler() http.Handler {
 	return httpapi.NewPublic(httpapi.PublicOptions{
 		Logger: a.logger,
 		Health: a.Health,
+		DB:     a.db,
+		Now:    time.Now,
 	})
 }
 

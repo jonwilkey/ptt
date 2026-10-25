@@ -80,6 +80,8 @@
 
 	# WebSocket upgrades (/v1/ws) pass through; X-Forwarded-For carries the client address.
 	handle {
+		# pttd's enroll rate limit trusts the first X-Forwarded-For entry; do not set
+		# trusted_proxies without revisiting clientIP.
 		reverse_proxy pttd:8080
 	}
 }

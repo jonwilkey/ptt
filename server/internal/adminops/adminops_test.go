@@ -262,7 +262,7 @@ func TestRevoke(t *testing.T) {
 	if err != nil || changed {
 		t.Fatalf("second Revoke = %v, %v", changed, err)
 	}
-	if n := count(t, d, `SELECT COUNT(*) FROM audit_log WHERE action = 'device_revoked' AND actor_device IS NULL AND detail = '{"device_id":"d2"}'`); n != 1 {
+	if n := count(t, d, `SELECT COUNT(*) FROM audit_log WHERE action = 'device_revoked' AND actor_device IS NULL AND detail = '{"device_id":"d2","expired_codes":0}'`); n != 1 {
 		t.Errorf("device_revoked audit rows = %d, want 1", n)
 	}
 	if n := count(t, d, `SELECT revoked_at FROM devices WHERE id = 'd2'`); n != int(testNow.UnixMilli()) {

@@ -18,7 +18,8 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `internal/db/` | SQLite open + pragmas, goose migrator, pre-migration snapshots |
 | `internal/db/queries/` | sqlc query sources |
 | `internal/db/sqlcdb/` | sqlc output (generated, committed; never edit) |
-| `internal/httpapi/` | Public router (`/healthz`), internal router (`/metrics`, `/internal/status`), middleware |
+| `internal/httpapi/` | Public router (`/healthz` and the `/v1` enrollment/device API), internal router (`/metrics`, `/internal/status`), middleware, bearer auth |
+| `internal/ratelimit/` | In-memory sliding-window rate limiter |
 | `internal/metrics/` | Prometheus registry |
 | `internal/admin/` | `pttd admin` client code: the status client and the terminal QR renderer |
 | `internal/adminops/` | DB-direct admin operations (bootstrap, list devices, revoke) |
@@ -82,6 +83,27 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
   `schema_outdated`). It does not reveal the version. A schema newer than the binary counts as
   healthy, because migrations are expand-then-contract and a rollback must keep serving. Every
   other public path is a JSON 404 (or a JSON 405 with `Allow`).
+- `/v1` device API (wire contract: `docs/protocol.md` sections 1, 2, 5, 6). Errors are
+  `{"error": "<code>"}`; request bodies reject unknown fields.
+  - Authentication is `Authorization: Bearer <b64u token>`. Each request hashes the token and
+    looks up a non-revoked device (never cached, so revocation applies to the next call);
+    otherwise `401 unauthorized`. Admin routes need the device's user to be an admin, else
+    `403 forbidden`. `last_seen_at` is written at most once a minute per device. A failure with a
+    well-formed but unknown token writes an `auth_failure` audit row (no actor, no token), at
+    most one a minute server-wide.
+  - `POST /v1/enroll` (no auth): 5 per hour per client IP (first `X-Forwarded-For` entry, else the
+    peer; IPv6 by /64), then `429 rate_limited` with `Retry-After`. The IP is only a rate-limit
+    key and is never logged. The body is fully validated before the code is touched; the code,
+    the new user (if any) and the device are written in one transaction. Unknown, used or
+    expired code: `400 code_invalid`; existing `device_id`: `409 conflict`; `mac` present iff the
+    code was minted by an admin phone. Audits `device_enrolled`.
+  - `POST /v1/enrollment-codes` and `GET /v1/enrollment-codes/{code_id}` (admin): mint a 24 h
+    code; poll it (`pending`, `used` with the device's keys and MAC, or `expired`).
+  - `PUT /v1/devices/me`: FCM token, app version, device name and the setup `checklist` (at most
+    32 boolean items); absent fields are unchanged.
+  - `POST /v1/devices/{id}/revoke` (admin): idempotent, audited with the acting device.
+  - `GET /v1/contacts`: people with a live non-test device and their presence
+    (`ok`/`warning`/`offline`).
 - `GET /metrics` (internal): Go and process collectors, `pttd_build_info{version}`,
   `pttd_active_sessions` (0 until milestone 4; deploys wait for it to be 0). No per-person labels.
 - `GET /internal/status` (internal): `{version, uptime_seconds, active_sessions, active_pages,
