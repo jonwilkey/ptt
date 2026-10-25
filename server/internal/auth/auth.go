@@ -9,9 +9,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
+
+	"github.com/jonwilkey/ptt/server/internal/wire"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 
 // b64 is strict (protocol section 1): it rejects padding, the standard alphabet and non-zero
 // trailing bits, so every secret has exactly one accepted spelling.
-var b64 = base64.RawURLEncoding.Strict()
+var b64 = wire.B64u
 
 // NewToken returns a fresh device token (43 characters) and the hash the server stores.
 func NewToken() (token string, hash []byte, err error) {

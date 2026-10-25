@@ -481,6 +481,15 @@ own user, that their own device id is in `keys`, that `from_device` is in the ro
 any failed check. HPKE-decrypt their `keys` entry for the session key. The caller name shown
 to the user comes from the roster entry, never from the server.
 
+### Test vectors
+
+[`testdata/protocol-vectors.json`](../testdata/protocol-vectors.json) holds shared vectors for §3-§5
+and §7: signed objects (valid and tampered), roster payloads (valid and invalid), the enrollment
+MAC, QR text, HPKE-wrapped session keys, envelope payloads, and complete receiver scenarios. The
+Go server module generates the file and checks it (`go test ./internal/vectors -update`); the
+Android crypto tests assert every vector. Any change to a rule in §1-§5 or §7 must update the
+vectors. See [`testdata/README.md`](../testdata/README.md).
+
 ## 8. Page states and timers
 
 Server-side states:

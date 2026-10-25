@@ -12,6 +12,7 @@ activityCompose = "1.13.0"
 lifecycle = "2.11.0"
 hiltNavigationCompose = "1.4.0"
 kotlinxSerialization = "1.12.0"
+tink = "1.24.0"
 junit = "4.13.2"
 robolectric = "4.17"
 androidxTestExtJunit = "1.3.0"
@@ -34,6 +35,7 @@ hilt-compiler = { module = "com.google.dagger:hilt-android-compiler", version.re
 # which pulls kotlin-stdlib-common; declaring it makes the lock state complete for both resolutions.
 kotlin-stdlib-common = { module = "org.jetbrains.kotlin:kotlin-stdlib-common", version.ref = "kotlin" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+tink-android = { module = "com.google.crypto.tink:tink-android", version.ref = "tink" }
 firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
 # Never declared as a dependency: the ktlint Gradle plugin downloads this CLI itself. The entry

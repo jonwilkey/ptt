@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,9 +17,6 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/db"
 	"github.com/jonwilkey/ptt/server/internal/push"
 )
-
-// enrollPrefix starts every enrollment QR payload (docs/protocol.md section 5).
-const enrollPrefix = "pttenroll1:"
 
 // newFlagSet returns a flag set whose errors are routed through Run's usage handling.
 func newFlagSet(name string, env Env) *flag.FlagSet {
@@ -74,14 +70,10 @@ func adminBootstrap(ctx context.Context, args []string, env Env) error {
 		return fmt.Errorf("admin bootstrap: %w", err)
 	}
 
-	payload, err := json.Marshal(struct {
-		URL  string `json:"url"`
-		Code string `json:"code"`
-	}{cfg.PublicURL, code})
+	qrText, err := admin.BootstrapQRText(cfg.PublicURL, code)
 	if err != nil {
 		return err
 	}
-	qrText := enrollPrefix + base64.RawURLEncoding.EncodeToString(payload)
 
 	if *reset {
 		_, _ = fmt.Fprintln(env.Stderr, "WARNING: --reset revoked every device and deleted the roster; the whole family must enroll again.")

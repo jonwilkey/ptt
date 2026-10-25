@@ -91,3 +91,58 @@ func TestStrictMap(t *testing.T) {
 		})
 	}
 }
+
+func TestB64uRejectsLineBreaks(t *testing.T) {
+	good := B64u.EncodeToString([]byte("hello world, hello"))
+	if _, err := B64u.DecodeString(good); err != nil {
+		t.Fatalf("plain input rejected: %v", err)
+	}
+	for _, bad := range []string{good[:4] + "\n" + good[4:], good[:4] + "\r" + good[4:], good + "\n", "\r\n" + good} {
+		if _, err := B64u.DecodeString(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+		if _, ok := DecodeB64u(bad, 18); ok {
+			t.Errorf("DecodeB64u accepted %q", bad)
+		}
+	}
+}
+
+func TestStrictObjectSurrogateEscapes(t *testing.T) {
+	const bs = "\\"
+	obj := func(name string) []byte { return []byte(`{"a":"` + name + `"}`) }
+	valid := []string{
+		bs + "ud83c" + bs + "udf89",           // a proper pair
+		bs + "uD83C" + bs + "uDF89",           // upper-case hex
+		bs + bs + "ud800",                     // an escaped backslash, then text
+		bs + bs + bs + "ud83c" + bs + "udf89", // escaped backslash, then a pair
+		bs + "u0041",
+		"x" + bs + "n" + bs + "ud83c" + bs + "udf89",
+	}
+	for _, v := range valid {
+		if _, err := StrictObject(obj(v), "a"); err != nil {
+			t.Errorf("rejected %q: %v", v, err)
+		}
+	}
+	invalid := []string{
+		bs + "ud800",
+		bs + "ud800x",
+		bs + "udbff" + bs + "u0041",
+		bs + "udc00",
+		bs + "udc00x",
+		bs + "udc00" + bs + "ud800",
+		"x" + bs + "ud83c",
+		bs + "ud83c" + bs + "ud83c" + bs + "udf89",
+	}
+	for _, v := range invalid {
+		if _, err := StrictObject(obj(v), "a"); err == nil {
+			t.Errorf("accepted %q", v)
+		}
+	}
+	// In a key as well.
+	if _, err := StrictObject([]byte(`{"`+bs+`ud800":1}`), "a"); err == nil {
+		t.Error("accepted a lone surrogate in a key")
+	}
+	if _, err := StrictMap([]byte(`{"`+bs+`udc00":1}`), func(string) bool { return true }); err == nil {
+		t.Error("StrictMap accepted a lone surrogate")
+	}
+}
