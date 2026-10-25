@@ -75,8 +75,15 @@ EOF
 
   if [ "$remote_sha" != "$zero" ] &&
     git rev-parse -q --verify "$remote_sha^{commit}" >/dev/null 2>&1; then
-    range="$remote_sha..$local_sha"
-    commits=$(git rev-list "$range") || exit 1
+    if [ -n "$exclude" ]; then
+      # Existing remote ref: the commits since its old tip, minus those already on this remote's
+      # tracking refs (main's commits, after a rebase onto main).
+      range="$local_sha --not $remote_sha $exclude"
+      commits=$(git rev-list "$local_sha" --not "$remote_sha" "$exclude") || exit 1
+    else
+      range="$remote_sha..$local_sha"
+      commits=$(git rev-list "$range") || exit 1
+    fi
   elif [ -n "$exclude" ]; then
     # New remote ref, or the remote tip is unknown locally: check everything not yet on this
     # remote's tracking refs.
