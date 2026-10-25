@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -45,6 +46,10 @@ type PublicOptions struct {
 	MaxBodyBytes int64
 	// HealthTimeout bounds each health check; defaults to 3 s.
 	HealthTimeout time.Duration
+	// DB backs the /v1 API. Without it only /healthz is served.
+	DB *sql.DB
+	// Now is the clock for expiry, rate limits and presence; defaults to time.Now.
+	Now func() time.Time
 }
 
 // NewPublic returns the public API handler.
@@ -71,6 +76,10 @@ func NewPublic(opts PublicOptions) http.Handler {
 	r.Get("/healthz", health)
 	// net/http drops the body for HEAD; uptime probes often use it.
 	r.Head("/healthz", health)
+
+	if opts.DB != nil {
+		newAPI(opts.DB, logger, opts.Now).routes(r)
+	}
 	return r
 }
 

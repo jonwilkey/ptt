@@ -10,6 +10,25 @@ import (
 	"database/sql"
 )
 
+const expireEnrollmentCodesCreatedBy = `-- name: ExpireEnrollmentCodesCreatedBy :execrows
+UPDATE enrollment_codes SET expires_at = ?1
+WHERE created_by_device = ?2 AND used_at IS NULL AND expires_at > ?1
+`
+
+type ExpireEnrollmentCodesCreatedByParams struct {
+	Now      int64
+	DeviceID sql.NullString
+}
+
+// Expire the unredeemed codes a device minted, when that device is revoked.
+func (q *Queries) ExpireEnrollmentCodesCreatedBy(ctx context.Context, arg ExpireEnrollmentCodesCreatedByParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, expireEnrollmentCodesCreatedBy, arg.Now, arg.DeviceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const expireOutstandingEnrollmentCodes = `-- name: ExpireOutstandingEnrollmentCodes :execrows
 UPDATE enrollment_codes SET expires_at = MIN(expires_at, CAST(?1 AS INTEGER))
 WHERE used_at IS NULL AND expires_at > ?1
@@ -39,6 +58,28 @@ func (q *Queries) ExpireOutstandingSSHEnrollmentCodes(ctx context.Context, now i
 	return result.RowsAffected()
 }
 
+const getEnrollmentCode = `-- name: GetEnrollmentCode :one
+SELECT code_hash, display_name, make_admin, created_by_device, created_at, expires_at, used_at, user_id, device_id, enroll_mac FROM enrollment_codes WHERE code_hash = ?
+`
+
+func (q *Queries) GetEnrollmentCode(ctx context.Context, codeHash []byte) (EnrollmentCode, error) {
+	row := q.db.QueryRowContext(ctx, getEnrollmentCode, codeHash)
+	var i EnrollmentCode
+	err := row.Scan(
+		&i.CodeHash,
+		&i.DisplayName,
+		&i.MakeAdmin,
+		&i.CreatedByDevice,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.UsedAt,
+		&i.UserID,
+		&i.DeviceID,
+		&i.EnrollMac,
+	)
+	return i, err
+}
+
 const insertEnrollmentCode = `-- name: InsertEnrollmentCode :exec
 INSERT INTO enrollment_codes
   (code_hash, display_name, make_admin, created_by_device, user_id, created_at, expires_at)
@@ -66,4 +107,31 @@ func (q *Queries) InsertEnrollmentCode(ctx context.Context, arg InsertEnrollment
 		arg.ExpiresAt,
 	)
 	return err
+}
+
+const redeemEnrollmentCode = `-- name: RedeemEnrollmentCode :execrows
+UPDATE enrollment_codes SET used_at = ?1, device_id = ?2, enroll_mac = ?3
+WHERE code_hash = ?4 AND used_at IS NULL AND expires_at > ?1
+`
+
+type RedeemEnrollmentCodeParams struct {
+	Now       sql.NullInt64
+	DeviceID  sql.NullString
+	EnrollMac []byte
+	CodeHash  []byte
+}
+
+// Redeem a code. The conditions repeat the validity check so that, whatever else ran in the
+// transaction, a used or expired code can never be consumed.
+func (q *Queries) RedeemEnrollmentCode(ctx context.Context, arg RedeemEnrollmentCodeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, redeemEnrollmentCode,
+		arg.Now,
+		arg.DeviceID,
+		arg.EnrollMac,
+		arg.CodeHash,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

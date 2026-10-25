@@ -21,6 +21,150 @@ func (q *Queries) DeviceExists(ctx context.Context, id string) (int64, error) {
 	return count, err
 }
 
+const getActiveDeviceByTokenHash = `-- name: GetActiveDeviceByTokenHash :one
+SELECT d.id, d.user_id, u.is_admin, d.is_test, d.last_seen_at
+FROM devices d
+JOIN users u ON u.id = d.user_id
+WHERE d.token_hash = ? AND d.revoked_at IS NULL
+`
+
+type GetActiveDeviceByTokenHashRow struct {
+	ID         string
+	UserID     string
+	IsAdmin    int64
+	IsTest     int64
+	LastSeenAt sql.NullInt64
+}
+
+// The authentication lookup. Revoked devices never match, and the result is never cached, so a
+// revocation takes effect on the very next request.
+func (q *Queries) GetActiveDeviceByTokenHash(ctx context.Context, tokenHash []byte) (GetActiveDeviceByTokenHashRow, error) {
+	row := q.db.QueryRowContext(ctx, getActiveDeviceByTokenHash, tokenHash)
+	var i GetActiveDeviceByTokenHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.IsAdmin,
+		&i.IsTest,
+		&i.LastSeenAt,
+	)
+	return i, err
+}
+
+const getDeviceWithUser = `-- name: GetDeviceWithUser :one
+SELECT d.id, d.user_id, u.display_name, u.is_admin, d.name, d.ed25519_pub, d.x25519_pub
+FROM devices d
+JOIN users u ON u.id = d.user_id
+WHERE d.id = ?
+`
+
+type GetDeviceWithUserRow struct {
+	ID          string
+	UserID      string
+	DisplayName string
+	IsAdmin     int64
+	Name        string
+	Ed25519Pub  []byte
+	X25519Pub   []byte
+}
+
+// A redeemed code's device with its person, for the admin's enrollment poll.
+func (q *Queries) GetDeviceWithUser(ctx context.Context, id string) (GetDeviceWithUserRow, error) {
+	row := q.db.QueryRowContext(ctx, getDeviceWithUser, id)
+	var i GetDeviceWithUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.DisplayName,
+		&i.IsAdmin,
+		&i.Name,
+		&i.Ed25519Pub,
+		&i.X25519Pub,
+	)
+	return i, err
+}
+
+const insertDevice = `-- name: InsertDevice :exec
+INSERT INTO devices
+  (id, user_id, name, token_hash, fcm_token, app_version, created_at, last_seen_at, ed25519_pub, x25519_pub)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertDeviceParams struct {
+	ID         string
+	UserID     string
+	Name       string
+	TokenHash  []byte
+	FcmToken   sql.NullString
+	AppVersion sql.NullString
+	CreatedAt  int64
+	LastSeenAt sql.NullInt64
+	Ed25519Pub []byte
+	X25519Pub  []byte
+}
+
+func (q *Queries) InsertDevice(ctx context.Context, arg InsertDeviceParams) error {
+	_, err := q.db.ExecContext(ctx, insertDevice,
+		arg.ID,
+		arg.UserID,
+		arg.Name,
+		arg.TokenHash,
+		arg.FcmToken,
+		arg.AppVersion,
+		arg.CreatedAt,
+		arg.LastSeenAt,
+		arg.Ed25519Pub,
+		arg.X25519Pub,
+	)
+	return err
+}
+
+const listContactDevices = `-- name: ListContactDevices :many
+SELECT u.id AS user_id, u.display_name, u.is_admin, d.last_seen_at, d.checklist_status
+FROM devices d
+JOIN users u ON u.id = d.user_id
+WHERE d.revoked_at IS NULL AND d.is_test = 0
+ORDER BY u.display_name, u.id, d.id
+`
+
+type ListContactDevicesRow struct {
+	UserID          string
+	DisplayName     string
+	IsAdmin         int64
+	LastSeenAt      sql.NullInt64
+	ChecklistStatus sql.NullString
+}
+
+// The inputs of GET /v1/contacts: one row per visible device. Presence is derived in Go.
+func (q *Queries) ListContactDevices(ctx context.Context) ([]ListContactDevicesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listContactDevices)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListContactDevicesRow{}
+	for rows.Next() {
+		var i ListContactDevicesRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.DisplayName,
+			&i.IsAdmin,
+			&i.LastSeenAt,
+			&i.ChecklistStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDevicesWithUsers = `-- name: ListDevicesWithUsers :many
 SELECT d.id, u.display_name AS user_display_name, u.is_admin, d.name, d.app_version,
        d.last_seen_at, d.revoked_at, d.is_test
@@ -99,4 +243,47 @@ func (q *Queries) RevokeDevice(ctx context.Context, arg RevokeDeviceParams) (int
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const touchDeviceLastSeen = `-- name: TouchDeviceLastSeen :exec
+UPDATE devices SET last_seen_at = ? WHERE id = ?
+`
+
+type TouchDeviceLastSeenParams struct {
+	LastSeenAt sql.NullInt64
+	ID         string
+}
+
+func (q *Queries) TouchDeviceLastSeen(ctx context.Context, arg TouchDeviceLastSeenParams) error {
+	_, err := q.db.ExecContext(ctx, touchDeviceLastSeen, arg.LastSeenAt, arg.ID)
+	return err
+}
+
+const updateDeviceSelf = `-- name: UpdateDeviceSelf :exec
+UPDATE devices SET
+  fcm_token        = COALESCE(?1, fcm_token),
+  app_version      = COALESCE(?2, app_version),
+  name             = COALESCE(?3, name),
+  checklist_status = COALESCE(?4, checklist_status)
+WHERE id = ?5
+`
+
+type UpdateDeviceSelfParams struct {
+	FcmToken        sql.NullString
+	AppVersion      sql.NullString
+	Name            sql.NullString
+	ChecklistStatus sql.NullString
+	ID              string
+}
+
+// Absent (NULL) fields keep their current value.
+func (q *Queries) UpdateDeviceSelf(ctx context.Context, arg UpdateDeviceSelfParams) error {
+	_, err := q.db.ExecContext(ctx, updateDeviceSelf,
+		arg.FcmToken,
+		arg.AppVersion,
+		arg.Name,
+		arg.ChecklistStatus,
+		arg.ID,
+	)
+	return err
 }

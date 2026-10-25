@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +79,16 @@ func TestCodeID(t *testing.T) {
 func TestEqual(t *testing.T) {
 	if !Equal([]byte{1, 2}, []byte{1, 2}) || Equal([]byte{1, 2}, []byte{1, 3}) || Equal([]byte{1}, []byte{1, 2}) {
 		t.Error("Equal gave a wrong answer")
+	}
+}
+
+func TestDecodingIsStrict(t *testing.T) {
+	// 32 bytes encode to 43 characters whose last one carries 4 spare bits; a non-zero value
+	// there is a second spelling of the same bytes and must be rejected.
+	if _, err := HashToken(strings.Repeat("A", 42) + "B"); err == nil {
+		t.Error("non-canonical trailing bits accepted")
+	}
+	if _, err := HashToken(strings.Repeat("A", 43)); err != nil {
+		t.Errorf("canonical token rejected: %v", err)
 	}
 }
