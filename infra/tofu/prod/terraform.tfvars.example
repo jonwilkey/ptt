@@ -19,8 +19,9 @@ zone_name = "example.com"
 record_name = "ptt.example.com"
 
 # Admin accounts created at first boot. Each gets passwordless sudo and key-only SSH (over
-# Tailscale). Public keys only, in OpenSSH one-line format. Used only when the instance is
-# created; Ansible manages users afterwards.
+# Tailscale). name is the Linux login (ssh <name>@ptt-prod): lower-case, not root. Public keys
+# only, in OpenSSH one-line format. Used only when the instance is created; Ansible manages users
+# afterwards.
 admin_users = [
   {
     name            = "admin1"

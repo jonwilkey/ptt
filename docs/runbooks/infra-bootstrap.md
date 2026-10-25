@@ -17,6 +17,15 @@ commit them):
 You need: OpenTofu 1.13.x, the AWS CLI v2, `dig`, `nc`, a Tailscale admin login, admin access to
 the GitHub repository, and admin access to the AWS account that hosts `<your-domain>`.
 
+Step 10 also needs the Tailscale client on the machine you run this from, logged in as one of the
+admins in `group:ptt-admins` (step 5). On Debian or Ubuntu (including WSL2 with systemd):
+
+```sh
+sudo apt install -y bind9-dnsutils netcat-openbsd   # dig and nc
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up                                   # open the printed URL and log in
+```
+
 ## 1. Vultr account and API keys
 
 Two API users, so the key exposed to PR jobs can do as little as possible.
@@ -109,7 +118,7 @@ admins can read); see [ADR 0002](../adr/0002-kms-for-opentofu-state-encryption.m
 
 In the Tailscale admin console, **Access controls**, add the tags and rules below to the tailnet
 policy file (merge with what is already there; replace the two emails with the admins' Tailscale
-logins):
+login names):
 
 ```jsonc
 {
@@ -128,6 +137,13 @@ logins):
   ],
 }
 ```
+
+A login name must match exactly, and it is not always an email: with GitHub sign-in it is
+`<username>@github`. Check yours with
+`tailscale status --json | jq -r '.User[(.Self.UserID|tostring)].LoginName'`, or under **Users**
+in the console. A mismatch fails silently: the server is missing from `tailscale status` in
+step 10, and the console's **Access controls > Preview rules** shows no access to
+`tag:ptt-server`.
 
 If the policy still contains the default allow-all rule (`"src": ["*"], "dst": ["*:*"]`), remove
 it, or these restrictions have no effect. Save; the console rejects invalid policies.
