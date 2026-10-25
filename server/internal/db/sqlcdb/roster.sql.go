@@ -17,3 +17,53 @@ func (q *Queries) DeleteRoster(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, deleteRoster)
 	return err
 }
+
+const getRoster = `-- name: GetRoster :one
+SELECT id, version, signed_roster, signer_device, updated_at FROM roster WHERE id = 1
+`
+
+func (q *Queries) GetRoster(ctx context.Context) (Roster, error) {
+	row := q.db.QueryRowContext(ctx, getRoster)
+	var i Roster
+	err := row.Scan(
+		&i.ID,
+		&i.Version,
+		&i.SignedRoster,
+		&i.SignerDevice,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertRoster = `-- name: UpsertRoster :execrows
+INSERT INTO roster (id, version, signed_roster, signer_device, updated_at)
+VALUES (1, ?, ?, ?, ?)
+ON CONFLICT (id) DO UPDATE SET
+  version       = excluded.version,
+  signed_roster = excluded.signed_roster,
+  signer_device = excluded.signer_device,
+  updated_at    = excluded.updated_at
+WHERE excluded.version > roster.version
+`
+
+type UpsertRosterParams struct {
+	Version      int64
+	SignedRoster []byte
+	SignerDevice string
+	UpdatedAt    int64
+}
+
+// The version guard makes a lost race (or a stale version) change no rows; callers treat zero
+// rows affected as roster_stale.
+func (q *Queries) UpsertRoster(ctx context.Context, arg UpsertRosterParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, upsertRoster,
+		arg.Version,
+		arg.SignedRoster,
+		arg.SignerDevice,
+		arg.UpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}

@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,19 +9,20 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
-	"github.com/google/uuid"
+	"github.com/jonwilkey/ptt/server/internal/wire"
 )
 
 // b64u is the strict unpadded base64url of docs/protocol.md section 1.
-var b64u = base64.RawURLEncoding.Strict()
+var b64u = wire.B64u
 
 // decodeBody reads the request's JSON object into v. Unknown fields, trailing data, an empty
 // body and a JSON null are 400 invalid_request. encoding/json matches field names
 // case-insensitively and lets a duplicate key overwrite an earlier one; both are accepted on
-// purpose, since this is the only parser of these bodies (nothing signs or re-reads them). It writes the error response and returns false on failure.
+// purpose for these request bodies, since nothing signs them and no other parser reads them.
+// Signed payloads (the roster, later the page envelope) are different: they must be checked
+// with wire.StrictObject because phones parse them case-sensitively. It writes the error
+// response and returns false on failure.
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -53,28 +53,14 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // validUUID reports whether s is a canonical lowercase UUID (36 characters).
-func validUUID(s string) bool {
-	u, err := uuid.Parse(s)
-	return err == nil && len(s) == 36 && u.String() == s
-}
+func validUUID(s string) bool { return wire.ValidUUID(s) }
 
 // decodeB64u strictly decodes s and requires exactly n bytes.
-func decodeB64u(s string, n int) ([]byte, bool) {
-	raw, err := b64u.DecodeString(s)
-	if err != nil || len(raw) != n {
-		return nil, false
-	}
-	return raw, true
-}
+func decodeB64u(s string, n int) ([]byte, bool) { return wire.DecodeB64u(s, n) }
 
 // validText reports whether s is 1 to maxRunes characters of valid UTF-8 with no control
 // characters and some non-space content.
-func validText(s string, maxRunes int) bool {
-	if !utf8.ValidString(s) || utf8.RuneCountInString(s) > maxRunes || strings.TrimSpace(s) == "" {
-		return false
-	}
-	return !strings.ContainsFunc(s, unicode.IsControl)
-}
+func validText(s string, maxRunes int) bool { return wire.ValidText(s, maxRunes) }
 
 // clientIP returns the address to rate-limit a request by: the first X-Forwarded-For entry,
 // which Caddy sets (every peer is Caddy), else the connection's peer. IPv6 addresses are

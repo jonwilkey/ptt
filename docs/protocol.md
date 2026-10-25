@@ -107,6 +107,10 @@ is opaque bytes and whose `sig` is computed over those bytes:
   these **exact bytes**; there is no canonical-JSON step.
 - `sig` = `Ed25519_sign(signer's secret key, ctx || 0x00 || payload bytes)`, where `ctx` is the
   ASCII context string and `0x00` is a single separator byte.
+- A payload's JSON must use exactly the documented field names, case-sensitively, with no
+  duplicate keys, no `null` values and every required field present. Every parser of a payload
+  (server or phone) rejects anything else, as it does invalid UTF-8 (a lenient parser could otherwise read a different value than
+  the strict one the other side uses).
 - A verifier checks the signature over the received bytes **before** parsing `payload`. Parsing a
   tampered or malformed `payload` is a `roster_invalid` (roster) or a dropped message (envelope),
   not a parse crash.
@@ -144,20 +148,27 @@ Payload object (the JSON that is b64u'd into a signed object's `payload`), signe
 
 - `format` — currently `1`; bump only for a payload-shape change.
 - `version` — monotonic; a phone accepts a roster only if it is higher than the one it holds.
-- `devices` — sorted by `id`; `id` is unique within a roster.
+- `devices` — sorted by `id`; `id` is unique within a roster. At least one entry must have
+  `admin: true`: a roster with no admin is rejected (by the server with `roster_invalid`, and by
+  a phone), since nobody could ever sign the next one.
+- `display_name` and `device_name` are 1 to 64 characters of valid UTF-8 with no control
+  characters and some non-space content.
 - `display_name` — the **person**; `device_name` — the **phone**. `admin` mirrors the user's
   `is_admin`.
 
 **A phone accepts a roster only if** (in order):
 
 1. the signature verifies under `ptt-roster-v1`;
-2. the `signer` is an **admin** device in the phone's *current* roster — at enrollment, one of the
+2. the payload parses under §3's strict rules and is well-formed per §4 (format 1, devices sorted
+   and unique, valid names and keys, at least one `admin`);
+3. the `signer` is an **admin** device in the phone's *current* roster — at enrollment, one of the
    QR's admin keys; for the bootstrap phone, its own key;
-3. `version` is higher than the current one.
+4. `version` is higher than the current one.
 
 **The server accepts `PUT /v1/roster` only if**:
 
 - the signature verifies under `ptt-roster-v1`;
+- the payload is well-formed (§3, §4);
 - the `signer` is a non-revoked admin device in the server's current roster. If no roster exists
   yet, the signer's user is an admin **and** the roster lists the signer as an admin;
 - `version` is higher than the current one (else `roster_stale`);

@@ -34,11 +34,16 @@ type api struct {
 	logger *slog.Logger
 	now    func() time.Time
 
+	notifier RosterNotifier
+
 	enrollLimiter   *ratelimit.Limiter
 	authFailLimiter *ratelimit.Limiter
 }
 
-func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time) *api {
+func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time, notifier RosterNotifier) *api {
+	if notifier == nil {
+		notifier = NopRosterNotifier{}
+	}
 	if now == nil {
 		now = time.Now
 	}
@@ -47,6 +52,7 @@ func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time) *api {
 		q:               sqlcdb.New(db),
 		logger:          logger,
 		now:             now,
+		notifier:        notifier,
 		enrollLimiter:   ratelimit.New(enrollLimit, enrollWindow, now),
 		authFailLimiter: ratelimit.New(1, authFailAuditWindow, now),
 	}
@@ -61,12 +67,14 @@ func (a *api) routes(r chi.Router) {
 		r.Use(a.authenticate)
 		r.Put("/v1/devices/me", a.updateSelf)
 		r.Get("/v1/contacts", a.contacts)
+		r.Get("/v1/roster", a.getRoster)
 
 		r.Group(func(r chi.Router) {
 			r.Use(requireAdmin)
 			r.Post("/v1/enrollment-codes", a.createEnrollmentCode)
 			r.Get("/v1/enrollment-codes/{code_id}", a.getEnrollmentCode)
 			r.Post("/v1/devices/{id}/revoke", a.revokeDevice)
+			r.Put("/v1/roster", a.putRoster)
 		})
 	})
 }
