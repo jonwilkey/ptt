@@ -62,3 +62,20 @@ SELECT d.id, d.user_id, u.display_name, u.is_admin, d.ed25519_pub, d.x25519_pub,
 FROM devices d
 JOIN users u ON u.id = d.user_id
 WHERE d.id = ?;
+
+-- Push targets for broadcasts: live, non-test devices that registered an FCM token.
+-- name: ListPushTargets :many
+SELECT id, fcm_token
+FROM devices
+WHERE revoked_at IS NULL AND is_test = 0 AND fcm_token IS NOT NULL AND fcm_token <> ''
+ORDER BY id;
+
+-- name: GetDevicePushInfo :one
+SELECT id, fcm_token, revoked_at
+FROM devices
+WHERE id = ?;
+
+-- Clears a token FCM reported as unregistered. The token comparison keeps a token the phone
+-- registered while the push was in flight.
+-- name: ClearFCMToken :exec
+UPDATE devices SET fcm_token = NULL WHERE id = ? AND fcm_token = ?;

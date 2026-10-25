@@ -443,3 +443,48 @@ func TestAdminDevicesAndRevoke(t *testing.T) {
 		t.Errorf("json = %+v", got)
 	}
 }
+
+func TestAdminTestPush(t *testing.T) {
+	vars := adminVars(t)
+	sqlExec(t, vars, `INSERT INTO users (id, display_name, is_admin, created_at) VALUES ('u1', 'Alex', 1, 1)`)
+	sqlExec(t, vars, `INSERT INTO devices (id, user_id, name, token_hash, created_at, fcm_token) VALUES ('dev-ok', 'u1', 'Pixel', randomblob(32), 1, 'secret-token-value')`)
+	sqlExec(t, vars, `INSERT INTO devices (id, user_id, name, token_hash, created_at) VALUES ('dev-notok', 'u1', 'Old', randomblob(32), 1)`)
+	sqlExec(t, vars, `INSERT INTO devices (id, user_id, name, token_hash, created_at, fcm_token, revoked_at) VALUES ('dev-gone', 'u1', 'Gone', randomblob(32), 1, 'tok', 5)`)
+
+	// FCM not configured: a clear error, not a silent success.
+	if r := run(t, vars, "admin", "test-push", "dev-ok"); r.code != 1 || !strings.Contains(r.stderr, "FCM is not configured") || strings.Count(r.stderr, "not configured") != 1 {
+		t.Fatalf("disabled = %+v", r)
+	}
+
+	vars[config.EnvFCMFake] = "true"
+	r := run(t, vars, "admin", "test-push", "dev-ok")
+	if r.code != 0 || !strings.Contains(r.stdout, "would send to device dev-ok: type=test priority=high ttl=15m0s") {
+		t.Fatalf("fake = %+v", r)
+	}
+	if strings.Contains(r.stdout+r.stderr, "secret-token-value") {
+		t.Errorf("token leaked: %+v", r)
+	}
+
+	for id, want := range map[string]string{
+		"nope":      "no such device",
+		"dev-notok": "no FCM token",
+		"dev-gone":  "revoked",
+	} {
+		if r := run(t, vars, "admin", "test-push", id); r.code != 1 || !strings.Contains(r.stderr, want) {
+			t.Errorf("%s = %+v, want %q", id, r, want)
+		}
+	}
+	if r := run(t, vars, "admin", "test-push"); r.code != 2 {
+		t.Errorf("no args = %+v", r)
+	}
+
+	// Fake and real credentials together are a configuration error.
+	cred := filepath.Join(t.TempDir(), "sa.json")
+	if err := os.WriteFile(cred, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vars[config.EnvFCMCredentials+"_FILE"] = cred
+	if r := run(t, vars, "admin", "test-push", "dev-ok"); r.code != 1 || !strings.Contains(r.stderr, "both set") {
+		t.Errorf("both = %+v", r)
+	}
+}

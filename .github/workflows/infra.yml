@@ -280,12 +280,18 @@ jobs:
         if: steps.deployed.outputs.image != ''
         run: .github/scripts/wait-no-sessions.sh
 
+      # The app role decrypts app_secrets on this runner (community.sops).
+      - name: Install sops
+        run: .github/scripts/install-sops.sh
+
       # Without pttd_image, the app role keeps the image already deployed (PTTD_IMAGE in
       # /opt/ptt/.env); releases change it only through server-release.
       - name: Configure the host (site.yml)
         working-directory: infra/ansible
         env:
           GHCR_TOKEN: ${{ github.token }}
+          # Empty (and unused) while app_secrets is empty. Only this step can see it.
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: ansible-playbook -i inventory/prod.yml site.yml -u deploy -e "@${RUNNER_TEMP}/site-vars.yml"
 
       # Nothing is served before the first release.

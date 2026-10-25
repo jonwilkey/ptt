@@ -16,6 +16,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/app"
 	"github.com/jonwilkey/ptt/server/internal/config"
 	"github.com/jonwilkey/ptt/server/internal/db"
+	"github.com/jonwilkey/ptt/server/internal/push"
 )
 
 const usage = `Usage: pttd <command> [arguments]
@@ -29,6 +30,8 @@ Commands:
                            Print a QR to enroll the first admin; --reset first revokes every device
   admin devices [--json]   List devices and their people
   admin revoke <device-id> Revoke one device
+  admin test-push <device-id>
+                           Send a "test" push to one device (prints it instead in fake mode)
   version                  Print the version
 
 Configuration is read from PTTD_* environment variables; see server/README.md.
@@ -131,7 +134,11 @@ func serve(ctx context.Context, args []string, env Env) error {
 			return err
 		}
 		logger := newLogger(env.Stderr, cfg.LogLevel)
-		if err := app.Serve(ctx, cfg, logger, env.Version); err != nil {
+		sender, fake, _, err := push.FromEnv(ctx, env.Lookup, logger)
+		if err != nil {
+			return err
+		}
+		if err := app.Serve(ctx, cfg, logger, env.Version, app.WithSender(sender, fake)); err != nil {
 			logger.Error("pttd exited", slog.String("error", err.Error()))
 			return loggedError{err}
 		}
@@ -239,7 +246,7 @@ func printMigrationStatus(ctx context.Context, w io.Writer, m *db.Migrator) erro
 
 func adminCmd(ctx context.Context, args []string, env Env) error {
 	if len(args) == 0 {
-		return usageErr("admin needs a subcommand: status, bootstrap, devices, revoke")
+		return usageErr("admin needs a subcommand: status, bootstrap, devices, revoke, test-push")
 	}
 	switch args[0] {
 	case "status":
@@ -250,6 +257,8 @@ func adminCmd(ctx context.Context, args []string, env Env) error {
 		return adminDevices(ctx, args[1:], env)
 	case "revoke":
 		return adminRevoke(ctx, args[1:], env)
+	case "test-push":
+		return adminTestPush(ctx, args[1:], env)
 	default:
 		return usageErr("unknown admin subcommand %q", args[0])
 	}

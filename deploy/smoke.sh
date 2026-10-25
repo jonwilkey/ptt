@@ -15,7 +15,7 @@
 #   --http-port <port>         Port of the plain-HTTP listener (default 80)
 #
 # Checks: /healthz is 200 {"status":"ok"} over HTTPS with HSTS; TLS 1.3 works and TLS 1.2 is
-# refused; unknown paths are a JSON 404; /metrics and /internal/status are not reachable;
+# refused; unknown paths are a JSON 404; /metrics, /internal/status and /internal/fake-fcm are not reachable;
 # http:// redirects to https://. Exits non-zero if any check fails, naming each failure.
 #
 # Needs bash 4.4+, curl, and jq. Used by CI against a local compose stack and after production
@@ -163,7 +163,7 @@ case "$rc" in
 esac
 
 # 4. Unknown paths are a JSON 404, and 5. the internal endpoints are not exposed.
-for path in /smoke-test-no-such-path /metrics /internal/status; do
+for path in /smoke-test-no-such-path /metrics /internal/status /internal/fake-fcm; do
 	name="path$(printf '%s' "$path" | tr -c 'a-zA-Z0-9' '_')"
 	code="$(request "$name" "${https[@]}" "$base_url$path")"
 	ctype="$(header "$name" content-type)"

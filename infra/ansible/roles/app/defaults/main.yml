@@ -22,7 +22,13 @@ app_deploy_src_dir: "{{ playbook_dir }}/../../deploy"
 # sops-encrypted files decrypted into {{ app_dir }}/secrets/. Each entry:
 #   {src: <path relative to app_secrets_src_dir>, dest: <file name>}
 # Text files only (the content passes through Ansible as a string).
+# An entry whose dest is app_fcm_secret_dest (the Firebase service-account key) also makes
+# the role write PTTD_FCM_CREDENTIALS_FILE to the compose .env; without one pttd runs with
+# FCM disabled. Example:
+#   app_secrets:
+#     - {src: fcm-service-account.sops.json, dest: fcm-service-account.json}
 app_secrets: []
+app_fcm_secret_dest: fcm-service-account.json
 app_secrets_src_dir: "{{ playbook_dir }}/../secrets"
 
 app_ghcr_registry: ghcr.io

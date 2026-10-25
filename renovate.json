@@ -12,14 +12,20 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "CLI tool versions in workflow env blocks, each annotated with a '# renovate: datasource=... depName=... [extractVersion=...]' comment on the line above.",
-      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "description": "CLI tool versions in workflow env blocks and in .github/scripts shell defaults (VAR=\"${VAR:-version}\"), each annotated with a '# renovate: datasource=... depName=... [extractVersion=...]' comment on the line above.",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/", "/^\\.github/scripts/[^/]+\\.sh$/"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*[A-Z0-9_]+: [\"']?(?<currentValue>[^\\s\"']+)"
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*[A-Z0-9_]+: [\"']?(?<currentValue>[^\\s\"']+)",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n[A-Z0-9_]+=\"\\$\\{[A-Z0-9_]+:-(?<currentValue>[^}\"\\s]+)\\}\""
       ]
     }
   ],
   "packageRules": [
+    {
+      "description": "sops is pinned with a sha256 next to its version in .github/scripts/install-sops.sh; the ci Ansible job fails until the hash is updated, so a reviewer must copy the new linux.amd64 hash from the release's checksums file.",
+      "matchPackageNames": ["getsops/sops"],
+      "automerge": false
+    },
     {
       "description": "GitHub Actions, Go modules, and Dockerfile base images: auto-merge patch and minor updates (and digest pins/refreshes) when CI passes.",
       "matchManagers": ["github-actions", "gomod", "dockerfile"],

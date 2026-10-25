@@ -16,6 +16,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 	"github.com/jonwilkey/ptt/server/internal/httpapi"
 	"github.com/jonwilkey/ptt/server/internal/metrics"
+	"github.com/jonwilkey/ptt/server/internal/push"
 )
 
 // ShutdownTimeout is how long in-flight requests get to finish after SIGTERM. Docker's default
@@ -30,19 +31,40 @@ type App struct {
 	migrator *db.Migrator
 	queries  *sqlcdb.Queries
 	started  time.Time
+	sender   push.Sender
+	fake     *push.Fake
+	notifier *push.RosterNotifier
+}
+
+// Option customizes an App.
+type Option func(*App)
+
+// WithSender sets the FCM sender. fake is non-nil only for the fake sender, whose recorded
+// messages are then served on the internal listener. Without this option FCM is disabled.
+func WithSender(s push.Sender, fake *push.Fake) Option {
+	return func(a *App) { a.sender, a.fake = s, fake }
 }
 
 // New returns an App over an open, migrated database.
-func New(version string, logger *slog.Logger, sqlDB *sql.DB, migrator *db.Migrator) *App {
-	return &App{
+func New(version string, logger *slog.Logger, sqlDB *sql.DB, migrator *db.Migrator, opts ...Option) *App {
+	a := &App{
 		version:  version,
 		logger:   logger,
 		db:       sqlDB,
 		migrator: migrator,
 		queries:  sqlcdb.New(sqlDB),
 		started:  time.Now(),
+		sender:   push.Disabled{},
 	}
+	for _, o := range opts {
+		o(a)
+	}
+	a.notifier = push.NewRosterNotifier(sqlDB, a.sender, logger)
+	return a
 }
+
+// Close lets in-flight background pushes finish until ctx ends, then cancels them.
+func (a *App) Close(ctx context.Context) { a.notifier.Close(ctx) }
 
 // activeSessions is the number of open talk sessions. Sessions arrive with the WebSocket relay
 // in milestone 4; until then there are none, which is what the deploy workflow waits for.
@@ -70,6 +92,8 @@ func (a *App) PublicHandler() http.Handler {
 		Health: a.Health,
 		DB:     a.db,
 		Now:    time.Now,
+
+		RosterNotifier: a.notifier,
 	})
 }
 
@@ -88,12 +112,20 @@ func (a *App) InternalHandler() http.Handler {
 		},
 		ActivePages:         a.queries.CountActivePages,
 		BinarySchemaVersion: a.migrator.LatestVersion(),
+		FakeFCM:             fakeHandler(a.fake),
 	})
+}
+
+func fakeHandler(f *push.Fake) http.Handler {
+	if f == nil {
+		return nil
+	}
+	return f.Handler()
 }
 
 // Serve opens and migrates the database, then serves the public and internal listeners until
 // ctx is cancelled, at which point it drains in-flight requests for up to ShutdownTimeout.
-func Serve(ctx context.Context, cfg config.Config, logger *slog.Logger, version string) error {
+func Serve(ctx context.Context, cfg config.Config, logger *slog.Logger, version string, opts ...Option) error {
 	logger.Info("starting pttd", slog.String("version", version))
 
 	sqlDB, err := db.Open(ctx, cfg.DBPath)
@@ -122,16 +154,16 @@ func Serve(ctx context.Context, cfg config.Config, logger *slog.Logger, version 
 			slog.Int64("schema_version", current), slog.Int64("binary_schema_version", latest))
 	}
 
-	a := New(version, logger, sqlDB, migrator)
+	a := New(version, logger, sqlDB, migrator, opts...)
 	servers := []*http.Server{
 		httpapi.NewServer(cfg.ListenAddr, a.PublicHandler(), logger),
 		httpapi.NewServer(cfg.InternalAddr, a.InternalHandler(), logger),
 	}
-	return run(ctx, logger, servers)
+	return run(ctx, logger, servers, a.Close)
 }
 
 // run binds every server before serving any, so a port conflict fails startup cleanly.
-func run(ctx context.Context, logger *slog.Logger, servers []*http.Server) error {
+func run(ctx context.Context, logger *slog.Logger, servers []*http.Server, onDrain func(context.Context)) error {
 	var lc net.ListenConfig
 	listeners := make([]net.Listener, 0, len(servers))
 	for _, s := range servers {
@@ -173,6 +205,9 @@ func run(ctx context.Context, logger *slog.Logger, servers []*http.Server) error
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			errs = append(errs, fmt.Errorf("shutdown %s: %w", s.Addr, err))
 		}
+	}
+	if onDrain != nil {
+		onDrain(shutdownCtx)
 	}
 	if err := errors.Join(errs...); err != nil {
 		return errors.Join(serveErr, err)

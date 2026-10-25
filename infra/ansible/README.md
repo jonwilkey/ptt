@@ -30,7 +30,9 @@ The `snapshot` and `monitoring` roles arrive in later milestones.
   ```
 
 - For `app_secrets`: `sops` on the controller and an age key that can decrypt
-  `infra/secrets/` (`SOPS_AGE_KEY_FILE`, or sops' default key location).
+  `infra/secrets/` (`SOPS_AGE_KEY_FILE` or `SOPS_AGE_KEY`, or sops' default key location). CI
+  installs a pinned sops and passes the `SOPS_AGE_KEY` environment secret
+  (docs/runbooks/github-setup.md).
 
 Run every command from `infra/ansible/` so `ansible.cfg` is picked up.
 
@@ -52,7 +54,7 @@ variables as an extra-vars file: the `infra` workflow from the `production` secr
 | `pttd_image` | `deploy.yml`; optional for `site.yml` | `<registry>/<name>@sha256:<64 hex>`; anything not pinned by digest is rejected. `deploy.yml` requires it. `site.yml` without it keeps the `PTTD_IMAGE` already in `/opt/ptt/.env`; on a host with no release yet it writes the files and starts nothing. |
 | `GHCR_TOKEN` (environment variable) | `app`, optional | Token with `read:packages` used to log in to ghcr.io for the pull and log out afterwards (CI: the job's `GITHUB_TOKEN`). Read from the controller's environment, never `-e`, so it stays off command lines. Not needed when the image is already on the host. |
 | `tailscale_auth_key` | `tailscale`, optional | Pre-authorized key tagged `tag:ptt-server`; only used if the node is logged out. |
-| `app_secrets` | `app` | List of `{src, dest}`: sops files in `infra/secrets/` decrypted to `/opt/ptt/secrets/<dest>`. Empty until milestone 2. |
+| `app_secrets` | `app` | List of `{src, dest}`: sops files in `infra/secrets/` decrypted to `/opt/ptt/secrets/<dest>`. Empty until the Firebase key exists; an entry with `dest: fcm-service-account.json` also sets `PTTD_FCM_CREDENTIALS_FILE` in `/opt/ptt/.env` ([firebase-setup.md](../../docs/runbooks/firebase-setup.md)). |
 
 Each role asserts its required variables before changing anything.
 

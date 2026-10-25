@@ -16,7 +16,7 @@ type RosterNotifier interface {
 	RosterPublished(ctx context.Context, version int64)
 }
 
-// NopRosterNotifier does nothing; it stands in until the FCM sender exists.
+// NopRosterNotifier does nothing; it is the default when no notifier is configured.
 type NopRosterNotifier struct{}
 
 // RosterPublished implements RosterNotifier.

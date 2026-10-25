@@ -14,6 +14,7 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `cmd/pttd/` | `main`: signal handling and exit code only |
 | `internal/cli/` | Subcommand parsing and dispatch |
 | `internal/app/` | Wiring: opens the DB, migrates, runs both listeners, graceful shutdown |
+| `internal/push/` | FCM sender (Firebase Admin SDK), fake and disabled senders, and the roster push |
 | `internal/config/` | `PTTD_*` environment variables and the `<NAME>_FILE` secret helper |
 | `internal/db/` | SQLite open + pragmas, goose migrator, pre-migration snapshots |
 | `internal/db/queries/` | sqlc query sources |
@@ -54,9 +55,14 @@ The image is built only in CI: `docker buildx build --platform linux/amd64 --bui
 | `PTTD_SNAPSHOT_DIR` | `/data/snapshots` | Pre-migration snapshots |
 | `PTTD_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `PTTD_PUBLIC_URL` | unset | The address phones reach the server at, e.g. `https://ptt.example.com` (absolute `https` URL, no path or query; `http` only for `localhost`/`127.0.0.1`). Optional; `pttd admin bootstrap` requires it, to put it in the enrollment QR |
+| `PTTD_FCM_CREDENTIALS_FILE` | unset | Path of the Firebase service-account JSON; selects the real FCM sender (a secret file, see below; empty counts as unset) |
+| `PTTD_FCM_FAKE` | `false` | `true` records pushes in memory and serves them at `GET`/`DELETE /internal/fake-fcm` on the internal listener (CI only). Setting it together with credentials is an error |
 
-Invalid values stop `pttd` at startup with an error naming the variable. Secrets (none yet; the
-FCM key arrives in milestone 2) are never set directly: `<NAME>_FILE` names a file, mounted
+With neither FCM variable set, pttd starts with pushes disabled: it logs one warning and every
+send fails permanently.
+
+Invalid values stop `pttd` at startup with an error naming the variable. Secrets (the FCM
+service-account key) are never set directly: `<NAME>_FILE` names a file, mounted
 read-only, whose contents (minus trailing newlines) are the secret. Setting `<NAME>` itself is an
 error.
 
@@ -75,6 +81,7 @@ pattern, status, duration).
 | `pttd admin bootstrap [--reset] <name>` | Mint a 24 h single-use enrollment code that makes `<name>` an admin and print it as `pttenroll1:` text plus a terminal QR. Opens the database directly. Refuses if an admin user already exists; `--reset` first revokes every device, deletes the roster and retires outstanding codes (the whole family must re-enroll). Needs `PTTD_PUBLIC_URL`. The QR is drawn for a dark-background terminal (light modules are the filled blocks) |
 | `pttd admin devices [--json]` | List every device with its person, admin flag, name, app version, last seen and revocation time |
 | `pttd admin revoke <device-id>` | Revoke one device (revoking twice is a no-op). Audit-logged |
+| `pttd admin test-push <device-id>` | Send the `test` push (high priority, 15 min TTL) to one device's FCM token. Errors for an unknown or revoked device, a device with no token, or FCM not configured; in fake mode prints the message instead of sending |
 | `pttd version` | Print the version (set with `-ldflags "-X main.version=..."`) |
 
 Inside the container: `docker compose exec pttd /pttd admin status`. The `bootstrap`, `devices` and `revoke` commands write to the database, so run them as the container user with `PTTD_PUBLIC_URL` set (compose does this).

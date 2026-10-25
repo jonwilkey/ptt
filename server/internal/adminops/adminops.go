@@ -25,6 +25,12 @@ var ErrAdminExists = errors.New("an admin user already exists; use --reset to re
 // ErrUnknownDevice is returned by Revoke for an ID that matches no device.
 var ErrUnknownDevice = errors.New("no such device")
 
+// Errors returned by PushToken.
+var (
+	ErrDeviceRevoked = errors.New("device is revoked")
+	ErrNoFCMToken    = errors.New("device has no FCM token registered yet")
+)
+
 // Device is one row of `pttd admin devices`.
 type Device struct {
 	ID         string     `json:"id"`
@@ -177,4 +183,21 @@ func RevokeAs(ctx context.Context, d *sql.DB, deviceID, actor string, now time.T
 			map[string]any{"device_id": deviceID, "expired_codes": expired})
 	})
 	return changed, err
+}
+
+// PushToken returns the FCM token of a live device, for `pttd admin test-push`. It returns
+// ErrUnknownDevice, ErrDeviceRevoked or ErrNoFCMToken when no push can go to the device.
+func PushToken(ctx context.Context, d *sql.DB, deviceID string) (string, error) {
+	row, err := sqlcdb.New(d).GetDevicePushInfo(ctx, deviceID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", fmt.Errorf("%w: %s", ErrUnknownDevice, deviceID)
+	case err != nil:
+		return "", fmt.Errorf("look up device: %w", err)
+	case row.RevokedAt.Valid:
+		return "", fmt.Errorf("%w: %s", ErrDeviceRevoked, deviceID)
+	case !row.FcmToken.Valid || row.FcmToken.String == "":
+		return "", fmt.Errorf("%w: %s", ErrNoFCMToken, deviceID)
+	}
+	return row.FcmToken.String, nil
 }

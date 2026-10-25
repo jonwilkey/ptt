@@ -78,6 +78,7 @@ Environment secrets are readable only by jobs that passed the approval gate.
 | `DEPLOY_SSH_KEY` | `production` secret | `server-release` deploy, `infra` ansible | Section 5 (private half) |
 | `PTT_DOMAIN` | `production` secret | `server-release` deploy (Ansible `ptt_domain`, `/healthz`, smoke test), `infra` ansible (`/healthz`, smoke test) | The server's name, the same value as `TOFU_RECORD_NAME` |
 | `ANSIBLE_SITE_VARS` | `production` secret | `infra` ansible | The full YAML content of `infra/ansible/inventory/group_vars/prod/site.yml` (section 6) |
+| `SOPS_AGE_KEY` | `production` secret, **optional until `app_secrets` is non-empty** | `server-release` deploy, `infra` ansible (only the `ansible-playbook` step) | The CI age identity (section 6, "The CI age key") |
 
 Repository **variables** (**Settings > Secrets and variables > Actions > Variables**):
 
@@ -140,6 +141,34 @@ of the job.
 
 Whenever you change your local `site.yml`, update the secret in the same sitting, or the next
 `infra` run puts the old values back (for example, a removed admin key).
+
+### The CI age key (`SOPS_AGE_KEY`)
+
+The Ansible `app` role decrypts the sops-encrypted files in `app_secrets` (the FCM key, see
+[firebase-setup.md](firebase-setup.md)) on the runner, so CI needs its own age identity. Both
+workflows install a pinned, checksum-verified `sops` and pass `SOPS_AGE_KEY` to the
+`ansible-playbook` step only. While `app_secrets` is empty nothing is decrypted and the secret
+may stay unset.
+
+1. On your workstation, create a dedicated key (not one of the admins' keys):
+
+   ```sh
+   age-keygen -o ci-age.key        # prints "Public key: age1..."
+   ```
+
+2. Save the whole file in the shared password-manager vault. Its `age1...` public key is a
+   **recipient**: every file in `infra/secrets/` must be encrypted to both admins' keys **and**
+   this one (the `--age a,b,c` list in [firebase-setup.md](firebase-setup.md)). Re-encrypt
+   existing files after adding it: `sops updatekeys <file>` (or `sops rotate` with the new
+   `--add-age`).
+3. **Settings > Environments > production > Environment secrets**: add `SOPS_AGE_KEY` with the
+   full contents of `ci-age.key` (the `# created` / `# public key` comment lines and the
+   `AGE-SECRET-KEY-...` line). It is an environment secret, so only jobs past the approval gate
+   can read it.
+4. Delete `ci-age.key` from the workstation.
+
+To rotate it, generate a new key, re-encrypt every secret with the new recipient list, replace
+the environment secret, and merge.
 
 ## 7. GHCR package
 

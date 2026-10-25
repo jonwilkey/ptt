@@ -9,5 +9,10 @@
 
 # sops-encrypted files (relative to infra/secrets/) decrypted into
 # /opt/ptt/secrets/<dest>. Each entry: {src: <file in infra/secrets>, dest: <name>}.
-# The FCM service-account key is added in milestone 2.
+# The FCM service-account key is added once it exists (docs/runbooks/firebase-setup.md):
+#
+#   app_secrets:
+#     - {src: fcm-service-account.sops.json, dest: fcm-service-account.json}
+#
+# The dest name makes the app role set PTTD_FCM_CREDENTIALS_FILE for pttd.
 app_secrets: []

@@ -107,6 +107,7 @@ jobs:
           docker run -d --name pttd \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
             -v pttd-ci-data:/data \
+            -e PTTD_FCM_FAKE=true \
             -p 127.0.0.1:8080:8080 -p 127.0.0.1:9090:9090 \
             pttd:ci
           for _ in $(seq 30); do
@@ -119,6 +120,7 @@ jobs:
           echo
           curl -fsS http://127.0.0.1:9090/metrics | grep '^pttd_active_sessions 0$'
           docker exec pttd /pttd admin status
+          test "$(curl -fsS http://127.0.0.1:9090/internal/fake-fcm)" = "[]"
           docker stop pttd
           test "$(docker inspect --format '{{.State.ExitCode}}' pttd)" = "0"
 
@@ -427,6 +429,14 @@ jobs:
           echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
       - name: Install collections
         run: ansible-galaxy collection install -r requirements.yml
+      # The deploy workflows use this same script; running it here makes a sops version bump
+      # without a matching hash fail on its own PR.
+      - name: Install sops (pinned, checksum-verified)
+        working-directory: ${{ github.workspace }}
+        run: .github/scripts/install-sops.sh
+      # A separate step: the script's $GITHUB_PATH entry only applies to later steps.
+      - name: sops runs
+        run: sops --version
       - name: Syntax check
         run: |
           ansible-playbook -i inventory/prod.yml --syntax-check site.yml
