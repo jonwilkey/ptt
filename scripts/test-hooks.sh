@@ -353,6 +353,28 @@ expect_fail "pre-push to a URL checks everything reachable" \
   'mirror.txt:1: matched term "Zorblax"' git push -q "$other" mirrored
 git checkout -q main
 
+# A rebase onto main re-pushes main's commits on an existing branch. Those already on the
+# remote (here a squash merge GitHub made under a denylisted name) are skipped; new ones are not.
+git checkout -q -b rebased
+echo "rebased work" >rebased.txt
+git add rebased.txt
+git commit -q -m "docs: rebased work" >/dev/null 2>&1
+git push -q origin rebased >/dev/null 2>&1
+git checkout -q main
+git -c user.name="Ann Zorblax" commit -q --allow-empty --no-verify -m "docs: merged on GitHub"
+git push -q --no-verify origin main
+git checkout -q rebased
+git rebase -q main
+expect_pass "pre-push skips commits already on the remote when updating a branch" \
+  git push -q --force origin rebased
+echo "late zorblax" >late.txt
+git add late.txt
+git commit -q --no-verify -m "docs: late"
+expect_fail "pre-push still checks new commits when updating a branch" \
+  'late.txt:1: matched term "Zorblax"' git push -q origin rebased
+git reset -q --hard HEAD~1
+git checkout -q main
+
 # --- setup-hooks.sh: existing hooks are backed up, never overwritten ---------------------------
 repo2="$tmp/repo2"
 git init -q "$repo2"
