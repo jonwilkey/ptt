@@ -19,6 +19,9 @@ type ActivePage struct {
 	CreatedAt    int64
 	DeliveredAt  sql.NullInt64
 	PushAttempts int64
+	Recipients   sql.NullString
+	AnsweredBy   sql.NullString
+	AnsweredAt   sql.NullInt64
 }
 
 type AuditLog struct {

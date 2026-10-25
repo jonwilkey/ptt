@@ -27,3 +27,8 @@ WHERE code_hash = sqlc.arg(code_hash) AND used_at IS NULL AND expires_at > sqlc.
 -- name: ExpireEnrollmentCodesCreatedBy :execrows
 UPDATE enrollment_codes SET expires_at = sqlc.arg(now)
 WHERE created_by_device = sqlc.arg(device_id) AND used_at IS NULL AND expires_at > sqlc.arg(now);
+
+-- Nightly cleanup: a code goes 24 h after it expired or 24 h after it was used, whichever
+-- applies. The cutoff is now - 24 h.
+-- name: DeleteStaleEnrollmentCodes :execrows
+DELETE FROM enrollment_codes WHERE expires_at < ? OR used_at < ?;

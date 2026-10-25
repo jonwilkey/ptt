@@ -53,7 +53,7 @@ Every error is an HTTP status plus a JSON body of exactly one field:
 | `roster_invalid` | 400 | Roster signature, format, or content rejected |
 | `roster_stale` | 409 | Roster version is not higher than the current one |
 | `already_answered` | 409 | `answer` on a page another device already answered |
-| `page_ended` | 410 | Any action on a page that has ended (except `cancel` → `204`) |
+| `page_ended` | 410 | Any action on a page that has ended (except `cancel` → `204`), or `delivered` on a page another device answered |
 | `rate_limited` | 429 | Too many requests; `Retry-After` header in seconds |
 
 `code_invalid` deliberately gives no oracle: the server does not distinguish unknown, used, and
@@ -403,7 +403,21 @@ roster_stale` otherwise.
   {"id","state":"ended"}` and it is tombstoned; no `page_state` push is sent.
 - Paging your own user is allowed (Test alert).
 
-### `POST /v1/pages/{id}/delivered` · `/acknowledge` · `/answer`
+### `POST /v1/pages/{id}/delivered`
+
+Only a device listed in the envelope's `keys` may call it (any other caller → `403 forbidden`).
+→ `200`
+
+```json
+{ "state": "ringing" }
+```
+
+`state` is `ringing`, `acknowledged` or `answered`; repeats return the current state again.
+`answered` is returned only to the device that answered. If another device answered, or the page
+has ended, → `410 page_ended`. Unknown `id` with no tombstone → `404 not_found`. The first call
+sets the delivered flag. The phone's use of the state is in §9.
+
+### `POST /v1/pages/{id}/acknowledge` · `/answer`
 
 Only a device listed in the envelope's `keys` may call these; any other caller → `403
 forbidden`. Repeats are idempotent (`204`). `answer` after another
@@ -456,7 +470,8 @@ Payload object signed with context `ptt-envelope-v1` by the **sender** device:
 `invalid_request` unless the envelope's `signer` and the payload's `from_device` both equal the
 caller's device id, `page_id`, `session_id`, `to_user`, and `level` equal the request's `id`,
 `session_id`, `to`, and `level`, `keys` is non-empty, and every device id in `keys` is a device
-of `to`. Entries for revoked devices are ignored, not pushed; the server pushes to the
+of `to`. The sender and every device in `keys` must agree on whether they are test devices (a
+page never crosses the test/real boundary). Entries for revoked devices are ignored, not pushed; the server pushes to the
 non-revoked devices in `keys`, and if none remain the page ends as `failed`.
 
 **Receivers:** verify the signature with `from_device`'s Ed25519 key from their own verified
@@ -494,12 +509,12 @@ In milestone 2, FCM is the only channel to the sender; the WebSocket arrives in 
 
 | Transition | Pushes |
 | --- | --- |
-| `delivered` | `page_state` `delivered` to the sender |
+| `delivered` | `page_state` `delivered` to the sender, if the page is still `ringing` |
 | `acknowledge` | `page_ack` to the other recipient devices; `page_state` `acknowledged` to the sender |
 | `answer` | `page_answered` to the sender; `page_cancel` `answered_elsewhere` to the other recipient devices |
 | sender cancel | `page_cancel` `cancelled` to the recipient devices |
 | answerer End | `page_state` `ended` to the sender |
-| no delivery in 30 s | re-push the `page` to the recipient devices; `page_state` `not_delivered` to the sender |
+| no delivery in 30 s | re-push the `page` to the recipient devices; `page_state` `not_delivered` to the sender (if the server was down past both deadlines, one re-push covers both) |
 | missed | `page_cancel` `missed` to the recipient devices; `page_state` `missed` to the sender |
 | all pushes failed | `page_state` `failed` to the sender |
 
@@ -533,9 +548,12 @@ fields listed below. Field names never use FCM reserved keys (`from`, `message_t
 - **FCM time-to-live:** a `page` push is 15 min when `level` is `normal`, 24 h when `urgent`;
   every other message is 15 min, except `roster`, which is 24 h.
 - **`delivered` before alerting:** the receiver posts `POST /v1/pages/{id}/delivered` *before*
-  it starts alerting and silently drops the page if that returns `410 page_ended` (a stale or
-  replayed push). If `delivered` fails for network reasons, it alerts anyway and retries the
-  post via its outbox.
+  it starts alerting, and acts on the returned `state`: `ringing` → alert as usual;
+  `acknowledged` → another device already acknowledged, so post the notification silently (the
+  page is still answerable); `answered` (this device answered it) → show the answered page, do
+  not ring. `410 page_ended` (the page ended or another device answered; also a stale or
+  replayed push) → drop the page silently. If `delivered` fails for network reasons, it alerts
+  anyway and retries the post via its outbox.
 
 ## 10. Admin CLI
 

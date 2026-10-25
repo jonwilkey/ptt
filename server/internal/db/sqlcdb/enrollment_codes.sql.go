@@ -10,6 +10,25 @@ import (
 	"database/sql"
 )
 
+const deleteStaleEnrollmentCodes = `-- name: DeleteStaleEnrollmentCodes :execrows
+DELETE FROM enrollment_codes WHERE expires_at < ? OR used_at < ?
+`
+
+type DeleteStaleEnrollmentCodesParams struct {
+	ExpiresAt int64
+	UsedAt    sql.NullInt64
+}
+
+// Nightly cleanup: a code goes 24 h after it expired or 24 h after it was used, whichever
+// applies. The cutoff is now - 24 h.
+func (q *Queries) DeleteStaleEnrollmentCodes(ctx context.Context, arg DeleteStaleEnrollmentCodesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteStaleEnrollmentCodes, arg.ExpiresAt, arg.UsedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const expireEnrollmentCodesCreatedBy = `-- name: ExpireEnrollmentCodesCreatedBy :execrows
 UPDATE enrollment_codes SET expires_at = ?1
 WHERE created_by_device = ?2 AND used_at IS NULL AND expires_at > ?1

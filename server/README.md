@@ -27,6 +27,9 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `internal/wire/` | Strict b64u and canonical-UUID helpers shared by the parsers |
 | `internal/signed/` | Signed objects (`{payload, signer, sig}`): decode, sign, verify under `ptt-roster-v1` / `ptt-envelope-v1` |
 | `internal/roster/` | Roster payload parser and the server acceptance rules (`Publish`) |
+| `internal/pages/` | The page lifecycle: strict envelope parser, `Create` and the delivered/acknowledge/answer/cancel transitions, the DB-driven scheduler (re-push, missed, answered expiry), and the bounded async FCM fan-out |
+| `internal/cleanup/` | The nightly retention sweep |
+| `internal/clock/` | Injectable clock (and a deterministic fake) for the scheduler and the cleanup |
 | `internal/auth/` | Device-token and enrollment-code generation and hashing |
 | `migrations/` | goose SQL migrations, embedded in the binary |
 
@@ -94,7 +97,7 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
   healthy, because migrations are expand-then-contract and a rollback must keep serving. Every
   other public path is a JSON 404 (or a JSON 405 with `Allow`).
 - `/v1` device API (wire contract: `docs/protocol.md` sections 1, 2, 5, 6). Errors are
-  `{"error": "<code>"}`; request bodies reject unknown fields.
+  `{"error": "<code>"}`; request bodies reject unknown fields, and top-level field names must match exactly (case-sensitive, no repeats), as protocol section 3 requires.
   - Authentication is `Authorization: Bearer <b64u token>`. Each request hashes the token and
     looks up a non-revoked device (never cached, so revocation applies to the next call);
     otherwise `401 unauthorized`. Admin routes need the device's user to be an admin, else
@@ -128,8 +131,50 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
     `roster_published` (`version`, `devices`), then the `RosterNotifier` hook (a no-op until the
     FCM sender lands). Omitting a device from a roster does not revoke it: to remove a phone the
     app signs and PUTs a roster without the device, then calls `POST /v1/devices/{id}/revoke`.
+  - Pages (wire contract: `docs/protocol.md` sections 6 to 9; code in `internal/pages`):
+    - `POST /v1/pages`: 30 per minute per device (`429` with `Retry-After`); idempotent retries
+      and retries of ended pages do not count. The envelope payload is parsed strictly
+      (exact keys, `keys` an object of canonical device ids to 80-byte b64u values). The
+      signature is not verified (receivers do that); the server requires `signer` ==
+      `from_device` == the caller, the envelope's page id, session, addressee and level to match
+      the request, every key to be a device of the addressee with the same `is_test` as the sender (a page never crosses the test/real boundary), and the page push to fit FCM's
+      4096 bytes (all else `400 invalid_request`). `201 ringing`; same id and same body `200`
+      with the current state; same id after it ended `200 ended` (never re-pushed); same id,
+      different body `409 conflict`. If every addressed device is revoked the page is
+      tombstoned at once (`201 ended`, no push).
+    - `POST /v1/pages/{id}/delivered`: `200 {"state":"ringing"|"acknowledged"|"answered"}` (the
+      phone alerts only on `ringing`); `410 page_ended` if the page ended or another device
+      answered it. The sender hears `page_state delivered` only if the page is still ringing.
+    - `POST /v1/pages/{id}/acknowledge|answer|cancel`: `204`; `403` for a device that
+      may not call it, `404` for an unknown id, `410 page_ended` for a tombstoned one (but
+      `cancel` on a tombstone is `204`); a second device's `answer` is `409 already_answered`
+      (the first answer wins atomically, in one write transaction).
+    - Every transition's pushes go out after commit on background goroutines (at most 16 sends
+      in flight, 1 minute per transition), so a slow FCM never delays a response. An
+      unregistered token is cleared (only if it is still the stored one). If every initial push
+      fails permanently, or nobody has a token, the page ends as `failed` and the sender gets
+      `page_state failed`; a transient failure leaves it ringing for the re-push.
+    - Timers are derived from the `active_pages` row and the clock, not stored: an undelivered
+      page is pushed again (and `page_state not_delivered` sent) 30 s and 2 min after creation;
+      a normal page unanswered after 15 min is `missed`; an answered page ends 15 min after the
+      answer; urgent pages never time out. The scheduler wakes on the next deadline or every
+      second at most, first pass at startup, so a restart while a page rings carries on. If a
+      page's end is already due (a long outage) it is ended without re-ringing it first; if both
+      re-push deadlines passed, one re-push covers both. A re-push re-reads the page and does
+      nothing unless it is still ringing and undelivered; if it reaches nobody the page fails.
+      The rate-limit budget is spent only by requests that pass validation.
+    - An ended page's row is deleted in the same transaction that writes its tombstone (id and
+      expiry only, 24 h). Nothing about pages is logged, labelled or audited.
+  - Nightly cleanup (at startup, then every 24 h; logs counts only): deletes expired page
+    tombstones, enrollment codes more than 24 h past their `expires_at` or `used_at` (so an
+    admin can still see `used`/`expired` for a day, then `GET /v1/enrollment-codes/{code_id}` is
+    `404`), and `audit_log` rows older than 90 days.
 - `GET /metrics` (internal): Go and process collectors, `pttd_build_info{version}`,
-  `pttd_active_sessions` (0 until milestone 4; deploys wait for it to be 0). No per-person labels.
+  `pttd_active_sessions` (0 until milestone 4; deploys wait for it to be 0), and page
+  aggregates: `pttd_page_delivery_seconds` and `pttd_page_answer_seconds` (histograms, creation
+  to first `delivered` / to the answer), `pttd_pages_ended_total{reason}` (`cancelled`, `ended`,
+  `missed`, `failed`, `expired`) and `pttd_fcm_send_errors_total{kind}` (`unregistered`,
+  `permanent`, `transient`). No per-person labels.
 - `GET /internal/status` (internal): `{version, uptime_seconds, active_sessions, active_pages,
   db_ok, schema_version, binary_schema_version}`.
 

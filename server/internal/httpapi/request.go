@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strings"
 
 	"github.com/jonwilkey/ptt/server/internal/wire"
@@ -17,12 +18,13 @@ import (
 var b64u = wire.B64u
 
 // decodeBody reads the request's JSON object into v. Unknown fields, trailing data, an empty
-// body and a JSON null are 400 invalid_request. encoding/json matches field names
-// case-insensitively and lets a duplicate key overwrite an earlier one; both are accepted on
-// purpose for these request bodies, since nothing signs them and no other parser reads them.
-// Signed payloads (the roster, later the page envelope) are different: they must be checked
-// with wire.StrictObject because phones parse them case-sensitively. It writes the error
-// response and returns false on failure.
+// body and a JSON null are 400 invalid_request. Top-level field names must match v's json tags
+// exactly (case-sensitively, unlike encoding/json) and may not repeat, as docs/protocol.md
+// section 3 requires of every parser; optional fields may be absent. Nested objects are decoded
+// by encoding/json (leniently), since only the top level is unsigned input the server alone
+// reads. Signed payloads (the roster, the page envelope) are checked separately with
+// wire.StrictObject because phones parse them. It writes the error response and returns false
+// on failure.
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -32,6 +34,10 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 		} else {
 			writeError(w, http.StatusBadRequest, "invalid_request")
 		}
+		return false
+	}
+	if !exactTopLevelKeys(body, v) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
 		return false
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -48,6 +54,51 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return false
+	}
+	return true
+}
+
+// exactTopLevelKeys reports whether body's top-level object (if it is one; other documents are
+// left to the decoder to reject) uses only field names from v's json tags, exactly, and each
+// at most once.
+func exactTopLevelKeys(body []byte, v any) bool {
+	t := reflect.TypeOf(v)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return true
+	}
+	allowed := map[string]bool{}
+	for f := range t.Fields() {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "-" || !f.IsExported() {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		allowed[name] = true
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return true
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return true // malformed: the decoder reports it
+		}
+		key, _ := tok.(string)
+		if !allowed[key] || seen[key] {
+			return false
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return true
+		}
 	}
 	return true
 }

@@ -7,6 +7,7 @@ package sqlcdb
 
 import (
 	"context"
+	"database/sql"
 )
 
 const countActivePages = `-- name: CountActivePages :one
@@ -18,4 +19,221 @@ func (q *Queries) CountActivePages(ctx context.Context) (int64, error) {
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const deleteActivePage = `-- name: DeleteActivePage :execrows
+DELETE FROM active_pages WHERE id = ?
+`
+
+func (q *Queries) DeleteActivePage(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteActivePage, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteExpiredPageTombstones = `-- name: DeleteExpiredPageTombstones :execrows
+DELETE FROM page_tombstones WHERE expires_at <= ?
+`
+
+func (q *Queries) DeleteExpiredPageTombstones(ctx context.Context, expiresAt int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteExpiredPageTombstones, expiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const getActivePage = `-- name: GetActivePage :one
+SELECT id, session_id, from_device, to_user, level, envelope, state, created_at, delivered_at,
+       push_attempts, recipients, answered_by, answered_at
+FROM active_pages
+WHERE id = ?
+`
+
+func (q *Queries) GetActivePage(ctx context.Context, id string) (ActivePage, error) {
+	row := q.db.QueryRowContext(ctx, getActivePage, id)
+	var i ActivePage
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.FromDevice,
+		&i.ToUser,
+		&i.Level,
+		&i.Envelope,
+		&i.State,
+		&i.CreatedAt,
+		&i.DeliveredAt,
+		&i.PushAttempts,
+		&i.Recipients,
+		&i.AnsweredBy,
+		&i.AnsweredAt,
+	)
+	return i, err
+}
+
+const insertActivePage = `-- name: InsertActivePage :exec
+INSERT INTO active_pages
+  (id, session_id, from_device, to_user, level, envelope, state, created_at, push_attempts, recipients)
+VALUES (?, ?, ?, ?, ?, ?, 'ringing', ?, 1, ?)
+`
+
+type InsertActivePageParams struct {
+	ID         string
+	SessionID  string
+	FromDevice string
+	ToUser     string
+	Level      string
+	Envelope   []byte
+	CreatedAt  int64
+	Recipients sql.NullString
+}
+
+func (q *Queries) InsertActivePage(ctx context.Context, arg InsertActivePageParams) error {
+	_, err := q.db.ExecContext(ctx, insertActivePage,
+		arg.ID,
+		arg.SessionID,
+		arg.FromDevice,
+		arg.ToUser,
+		arg.Level,
+		arg.Envelope,
+		arg.CreatedAt,
+		arg.Recipients,
+	)
+	return err
+}
+
+const insertPageTombstone = `-- name: InsertPageTombstone :exec
+INSERT OR IGNORE INTO page_tombstones (id, expires_at) VALUES (?, ?)
+`
+
+type InsertPageTombstoneParams struct {
+	ID        string
+	ExpiresAt int64
+}
+
+func (q *Queries) InsertPageTombstone(ctx context.Context, arg InsertPageTombstoneParams) error {
+	_, err := q.db.ExecContext(ctx, insertPageTombstone, arg.ID, arg.ExpiresAt)
+	return err
+}
+
+const listPageTimers = `-- name: ListPageTimers :many
+SELECT id, level, state, created_at, delivered_at, push_attempts, answered_at
+FROM active_pages
+`
+
+type ListPageTimersRow struct {
+	ID           string
+	Level        string
+	State        string
+	CreatedAt    int64
+	DeliveredAt  sql.NullInt64
+	PushAttempts int64
+	AnsweredAt   sql.NullInt64
+}
+
+// The scheduler's input: the few columns every timer is derived from.
+func (q *Queries) ListPageTimers(ctx context.Context) ([]ListPageTimersRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPageTimers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPageTimersRow{}
+	for rows.Next() {
+		var i ListPageTimersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Level,
+			&i.State,
+			&i.CreatedAt,
+			&i.DeliveredAt,
+			&i.PushAttempts,
+			&i.AnsweredAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markPageAcknowledged = `-- name: MarkPageAcknowledged :execrows
+UPDATE active_pages SET state = 'acknowledged' WHERE id = ? AND state = 'ringing'
+`
+
+func (q *Queries) MarkPageAcknowledged(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markPageAcknowledged, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markPageAnswered = `-- name: MarkPageAnswered :execrows
+UPDATE active_pages SET state = 'answered', answered_by = ?, answered_at = ?
+WHERE id = ? AND state IN ('ringing', 'acknowledged')
+`
+
+type MarkPageAnsweredParams struct {
+	AnsweredBy sql.NullString
+	AnsweredAt sql.NullInt64
+	ID         string
+}
+
+func (q *Queries) MarkPageAnswered(ctx context.Context, arg MarkPageAnsweredParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markPageAnswered, arg.AnsweredBy, arg.AnsweredAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markPageDelivered = `-- name: MarkPageDelivered :execrows
+UPDATE active_pages SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL
+`
+
+type MarkPageDeliveredParams struct {
+	DeliveredAt sql.NullInt64
+	ID          string
+}
+
+func (q *Queries) MarkPageDelivered(ctx context.Context, arg MarkPageDeliveredParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markPageDelivered, arg.DeliveredAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const pageTombstoneExists = `-- name: PageTombstoneExists :one
+SELECT COUNT(*) FROM page_tombstones WHERE id = ?
+`
+
+func (q *Queries) PageTombstoneExists(ctx context.Context, id string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, pageTombstoneExists, id)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const setPagePushAttempts = `-- name: SetPagePushAttempts :exec
+UPDATE active_pages SET push_attempts = ? WHERE id = ?
+`
+
+type SetPagePushAttemptsParams struct {
+	PushAttempts int64
+	ID           string
+}
+
+func (q *Queries) SetPagePushAttempts(ctx context.Context, arg SetPagePushAttemptsParams) error {
+	_, err := q.db.ExecContext(ctx, setPagePushAttempts, arg.PushAttempts, arg.ID)
+	return err
 }
