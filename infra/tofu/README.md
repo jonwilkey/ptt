@@ -40,11 +40,13 @@ Commit only the `.example` files and the `.terraform.lock.hcl` lock files.
 - **State encryption.** `prod` encrypts state and saved plans with `aes_gcm`, keyed by the KMS
   alias `alias/ptt-tofu-state`, `enforced = true`, no fallback. Losing access to that key means
   losing access to prod state; the key has `prevent_destroy` and a 30-day deletion window.
-- **Least privilege.** `ptt-tofu-plan` (only OIDC subjects `repo:<owner>/<repo>:pull_request`
-  and `repo:<owner>/<repo>:ref:refs/heads/main`; fork PRs never receive a token) can read prod
-  state, write only the lock object, use the KMS key (`GenerateDataKey`/`Decrypt`, encryption
-  context `stack = prod` only), and read the hosted zone. `ptt-tofu-apply` (only
-  jobs in the `production` environment) can additionally write prod state and change only the A
+- **Least privilege.** Both roles match GitHub's immutable OIDC subjects,
+  `repo:<owner>@<owner-id>/<repo>@<repo-id>:...`
+  ([ADR 0006](../../docs/adr/0006-immutable-oidc-subject-claims.md)). `ptt-tofu-plan` (only
+  subjects `...:pull_request` and `...:ref:refs/heads/main`; fork PRs never receive a token) can
+  read prod state, write only the lock object, use the KMS key (`GenerateDataKey`/`Decrypt`,
+  encryption context `stack = prod` only), and read the hosted zone. `ptt-tofu-apply` (only
+  subject `...:environment:production`) can additionally write prod state and change only the A
   and AAAA records of the one server name (`route53:ChangeResourceRecordSetsNormalizedRecordNames`
   and `...RecordTypes` conditions). Neither role can read the bootstrap state or touch anything
   else in the account.
