@@ -20,7 +20,9 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `internal/db/sqlcdb/` | sqlc output (generated, committed; never edit) |
 | `internal/httpapi/` | Public router (`/healthz`), internal router (`/metrics`, `/internal/status`), middleware |
 | `internal/metrics/` | Prometheus registry |
-| `internal/admin/` | `pttd admin` client code |
+| `internal/admin/` | `pttd admin` client code: the status client and the terminal QR renderer |
+| `internal/adminops/` | DB-direct admin operations (bootstrap, list devices, revoke) |
+| `internal/auth/` | Device-token and enrollment-code generation and hashing |
 | `migrations/` | goose SQL migrations, embedded in the binary |
 
 ## Make targets
@@ -47,6 +49,7 @@ The image is built only in CI: `docker buildx build --platform linux/amd64 --bui
 | `PTTD_DB_PATH` | `/data/pttd.db` | SQLite database (WAL mode; `-wal` and `-shm` files sit beside it) |
 | `PTTD_SNAPSHOT_DIR` | `/data/snapshots` | Pre-migration snapshots |
 | `PTTD_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+| `PTTD_PUBLIC_URL` | unset | The address phones reach the server at, e.g. `https://ptt.example.com` (absolute `https` URL, no path or query; `http` only for `localhost`/`127.0.0.1`). Optional; `pttd admin bootstrap` requires it, to put it in the enrollment QR |
 
 Invalid values stop `pttd` at startup with an error naming the variable. Secrets (none yet; the
 FCM key arrives in milestone 2) are never set directly: `<NAME>_FILE` names a file, mounted
@@ -65,9 +68,12 @@ pattern, status, duration).
 | `pttd healthcheck` | Exit 0 if `GET /healthz` on the local public listener returns 200 (the image's `HEALTHCHECK`) |
 | `pttd migrate up\|down\|status` | Manage the schema of `PTTD_DB_PATH`; `up` and `down` (one step) snapshot first; `status` and `down` refuse to create a missing database |
 | `pttd admin status [--json]` | Summary from the running server's `/internal/status` |
+| `pttd admin bootstrap [--reset] <name>` | Mint a 24 h single-use enrollment code that makes `<name>` an admin and print it as `pttenroll1:` text plus a terminal QR. Opens the database directly. Refuses if an admin user already exists; `--reset` first revokes every device, deletes the roster and retires outstanding codes (the whole family must re-enroll). Needs `PTTD_PUBLIC_URL`. The QR is drawn for a dark-background terminal (light modules are the filled blocks) |
+| `pttd admin devices [--json]` | List every device with its person, admin flag, name, app version, last seen and revocation time |
+| `pttd admin revoke <device-id>` | Revoke one device (revoking twice is a no-op). Audit-logged |
 | `pttd version` | Print the version (set with `-ldflags "-X main.version=..."`) |
 
-Inside the container: `docker compose exec pttd /pttd admin status`.
+Inside the container: `docker compose exec pttd /pttd admin status`. The `bootstrap`, `devices` and `revoke` commands write to the database, so run them as the container user with `PTTD_PUBLIC_URL` set (compose does this).
 
 ## Endpoints
 

@@ -533,7 +533,7 @@ API):
 
 ```
 pttd admin bootstrap <name>            # refuses if an admin user already exists; prints the QR text and the QR
-pttd admin bootstrap --reset <name>    # revokes every device, deletes the roster, creates a NEW admin user <name>, then prints its QR like bootstrap
+pttd admin bootstrap --reset <name>    # revokes every device, deletes the roster, expires outstanding codes, mints a new admin bootstrap code for <name> and prints its QR like bootstrap (the new admin user is created when that phone enrolls; old users stay but, with their devices revoked, drop out of contacts)
 pttd admin devices                     # list devices and users
 pttd admin revoke <device id>          # revoke one device
 pttd admin test-push <device id>       # send the `test` FCM message to one device

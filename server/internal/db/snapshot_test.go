@@ -75,10 +75,8 @@ func TestMigrateUpSnapshotsExistingDatabaseWithPendingMigrations(t *testing.T) {
 		t.Fatalf("MigrateUp: %v", err)
 	}
 
-	wantName := "pre-migrate-20261024T150405.000Z-v1.db"
-	if oldVersion != 1 {
-		t.Fatalf("test assumes the embedded migrations end at version 1, got %d; update wantName", oldVersion)
-	}
+	// The snapshot is named for the version it was taken at: the last embedded migration.
+	wantName := fmt.Sprintf("pre-migrate-20261024T150405.000Z-v%d.db", oldVersion)
 	if snap != filepath.Join(snapDir, wantName) {
 		t.Fatalf("snapshot = %q, want %q", snap, filepath.Join(snapDir, wantName))
 	}

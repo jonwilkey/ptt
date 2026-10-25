@@ -25,6 +25,10 @@ Commands:
   healthcheck              Exit 0 if the local server's /healthz returns 200 (container HEALTHCHECK)
   migrate up|down|status   Manage the schema of PTTD_DB_PATH (down rolls back one migration)
   admin status [--json]    Summarize the running server via its internal listener
+  admin bootstrap [--reset] <name>
+                           Print a QR to enroll the first admin; --reset first revokes every device
+  admin devices [--json]   List devices and their people
+  admin revoke <device-id> Revoke one device
   version                  Print the version
 
 Configuration is read from PTTD_* environment variables; see server/README.md.
@@ -235,11 +239,17 @@ func printMigrationStatus(ctx context.Context, w io.Writer, m *db.Migrator) erro
 
 func adminCmd(ctx context.Context, args []string, env Env) error {
 	if len(args) == 0 {
-		return usageErr("admin needs a subcommand: status")
+		return usageErr("admin needs a subcommand: status, bootstrap, devices, revoke")
 	}
 	switch args[0] {
 	case "status":
 		return adminStatus(ctx, args[1:], env)
+	case "bootstrap":
+		return adminBootstrap(ctx, args[1:], env)
+	case "devices":
+		return adminDevices(ctx, args[1:], env)
+	case "revoke":
+		return adminRevoke(ctx, args[1:], env)
 	default:
 		return usageErr("unknown admin subcommand %q", args[0])
 	}
