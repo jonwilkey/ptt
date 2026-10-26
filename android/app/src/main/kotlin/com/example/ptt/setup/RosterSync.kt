@@ -51,6 +51,43 @@ sealed interface SyncResult {
     data object Removed : SyncResult
 }
 
+/** What an admin edit decides for the roster it was shown. */
+sealed interface RosterEdit {
+    /** Publish [roster] (built from the roster the edit was given, as version+1). */
+    class Next(val roster: Roster) : RosterEdit
+
+    /** Do not sign anything; [reason] is a stable tag the caller maps to a message. */
+    class Refuse(val reason: String) : RosterEdit
+}
+
+sealed interface PublishResult {
+    /** The server accepted the roster and it is now stored, exactly as a synced roster would be. */
+    class Published(val roster: Roster) : PublishResult
+
+    /** The edit refused to sign. */
+    class Refused(val reason: String) : PublishResult
+
+    /** The server says `roster_stale` (after one sync and one re-sign when returned from [RosterSync.publishEdit]). */
+    data object Stale : PublishResult
+
+    /** The server rejected the roster (400, or any other final answer). */
+    data object ServerRejected : PublishResult
+
+    /** The roster the server accepted failed local verification (not stored). */
+    data object LocallyRejected : PublishResult
+
+    /** No roster is held yet, or this device is not an admin in it. */
+    data object NotAdmin : PublishResult
+
+    /** Network failure, 5xx or 429: nothing was published (or the outcome is unknown); try again. */
+    data object Unavailable : PublishResult
+
+    /** Not enrolled, or a 401: the start-up routing decides what happens next. Nothing is wiped here. */
+    data object NotEnrolled : PublishResult
+
+    data object KeysUnavailable : PublishResult
+}
+
 /**
  * Fetches `GET /v1/roster`, verifies it with [RosterVerifier] and stores it (docs/protocol.md
  * sections 4 and 5), and, for the bootstrap phone, signs and publishes roster version 1. Safe to
@@ -81,6 +118,93 @@ class RosterSync(
         val self = self() ?: return@withLock failureFor()
         if (isBootstrapPending(self)) publish(self) else SyncResult.NoChange
     }
+
+    /** The verified roster this phone holds, or null. A plain read: it does not wait for a running sync. */
+    suspend fun heldRoster(): Roster? = currentRoster()
+
+    /** The held roster, but only if this device is listed in it as an admin (what [publishEdit] requires). */
+    suspend fun heldAdminRoster(): Roster? {
+        val id = tokens.deviceId() ?: return null
+        return currentRoster()?.takeIf { it.find(id)?.admin == true }
+    }
+
+    /**
+     * Publishes a roster that this admin signs, under the same lock as [sync], so an admin publish never
+     * interleaves with a sync or another publish. [edit] sees the roster held at that moment and decides
+     * what to sign. The signed roster is `PUT /v1/roster`; only on 204 is it run through
+     * [RosterVerifier] against the current roster and stored (the same path as a synced roster).
+     *
+     * On `409 roster_stale` the newer roster is fetched and verified (still under the lock) and [edit]
+     * runs again against it, once; a second `roster_stale` returns [PublishResult.Stale]. Nothing is
+     * ever wiped here: a 401 only reports [PublishResult.NotEnrolled].
+     */
+    suspend fun publishEdit(edit: suspend (Roster) -> RosterEdit): PublishResult = lock.withLock {
+        val self = self() ?: return@withLock failurePublish()
+        var result = publishOnce(self, edit)
+        if (result === PublishResult.Stale) {
+            // The phone is behind the server: catch up, then re-evaluate the edit against the new roster.
+            result = when (fetch(self, allowBootstrap = false)) {
+                SyncResult.Removed, SyncResult.NotEnrolled -> PublishResult.NotEnrolled
+                SyncResult.Unavailable -> PublishResult.Unavailable
+                SyncResult.KeysUnavailable -> PublishResult.KeysUnavailable
+                is SyncResult.Rejected -> PublishResult.LocallyRejected
+                else -> publishOnce(self, edit)
+            }
+        }
+        result
+    }
+
+    private suspend fun failurePublish(): PublishResult =
+        if (tokens.deviceId() == null) PublishResult.NotEnrolled else PublishResult.KeysUnavailable
+
+    @Suppress("ReturnCount", "CyclomaticComplexMethod")
+    private suspend fun publishOnce(self: Self, edit: suspend (Roster) -> RosterEdit): PublishResult {
+        val current = currentRoster()
+        if (current == null || current.find(self.identity.deviceId)?.admin != true) return PublishResult.NotAdmin
+        val next = when (val decision = edit(current)) {
+            is RosterEdit.Refuse -> return PublishResult.Refused(decision.reason)
+            is RosterEdit.Next -> decision.roster
+        }
+        val signed = try {
+            RosterEditor.sign(next, self.identity.deviceId, self.keys)
+        } catch (_: ProtocolException) {
+            log("admin roster could not be signed")
+            return PublishResult.Refused(REASON_UNSIGNABLE)
+        }
+        val wire = signed.toWire()
+        return when (val put = api.putRoster(wire)) {
+            is ApiResult.Success -> storePublished(self, current, signed, wire)
+
+            is ApiResult.Final -> when {
+                put.status == STATUS_CONFLICT && put.code == CODE_ROSTER_STALE -> PublishResult.Stale
+
+                put.isUnauthorized -> PublishResult.NotEnrolled
+
+                else -> {
+                    log("admin roster refused: status ${put.status}")
+                    PublishResult.ServerRejected
+                }
+            }
+
+            is ApiResult.Retryable -> PublishResult.Unavailable
+
+            is ApiResult.NotEnrolled -> PublishResult.NotEnrolled
+        }
+    }
+
+    private suspend fun storePublished(self: Self, current: Roster, signed: SignedObject, wire: String): PublishResult =
+        when (val decision = RosterVerifier.accept(current, emptyList(), self.identity, signed)) {
+            is RosterDecision.Accepted -> {
+                store(self, decision.roster, wire, signed)
+                refreshContacts()
+                PublishResult.Published(decision.roster)
+            }
+
+            is RosterDecision.Rejected -> {
+                log("own admin roster rejected: ${decision.reason}")
+                PublishResult.LocallyRejected
+            }
+        }
 
     private suspend fun failureFor(): SyncResult =
         if (tokens.deviceId() == null) SyncResult.NotEnrolled else SyncResult.KeysUnavailable
@@ -244,5 +368,7 @@ class RosterSync(
         const val TAG = "RosterSync"
         const val STATUS_NOT_FOUND = 404
         const val STATUS_CONFLICT = 409
+        const val CODE_ROSTER_STALE = "roster_stale"
+        const val REASON_UNSIGNABLE = "unsignable"
     }
 }

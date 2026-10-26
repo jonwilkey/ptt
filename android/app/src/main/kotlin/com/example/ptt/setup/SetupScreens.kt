@@ -1,17 +1,22 @@
 package com.example.ptt.setup
 
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -37,7 +42,7 @@ private const val POLL_INTERVAL_MS = 5_000L
 
 /** Top-level screen for the current [route]. */
 @Composable
-fun SetupApp(viewModel: SetupViewModel) {
+fun SetupApp(viewModel: SetupViewModel, onSecureScreen: (Boolean) -> Unit = {}) {
     val route by viewModel.route.collectAsState()
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -45,7 +50,7 @@ fun SetupApp(viewModel: SetupViewModel) {
                 null -> Centered { Text(stringResource(R.string.loading)) }
                 is Route.Enroll -> EnrollmentScreen(viewModel, r.explain)
                 Route.Waiting -> WaitingScreen(viewModel)
-                Route.Home -> HomeScreen(viewModel)
+                Route.Home -> HomeHost(viewModel, onSecureScreen)
             }
         }
     }
@@ -120,25 +125,86 @@ private fun WaitingScreen(viewModel: SetupViewModel) {
             }
         }
     }
+    var confirmStartOver by remember { mutableStateOf(false) }
     Centered {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(stringResource(R.string.waiting_title), style = MaterialTheme.typography.headlineSmall)
             Button(onClick = { viewModel.syncNow() }) { Text(stringResource(R.string.waiting_retry)) }
+            TextButton(onClick = { confirmStartOver = true }) { Text(stringResource(R.string.waiting_start_over)) }
         }
+    }
+    if (confirmStartOver) {
+        AlertDialog(
+            onDismissRequest = { confirmStartOver = false },
+            title = { Text(stringResource(R.string.waiting_start_over_title)) },
+            text = { Text(stringResource(R.string.waiting_start_over_text)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmStartOver = false
+                    viewModel.startOver()
+                }) { Text(stringResource(R.string.waiting_start_over_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmStartOver = false }) { Text(stringResource(R.string.devices_cancel)) }
+            }
+        )
+    }
+}
+
+private enum class HomePage { HOME, SETUP, ADD_DEVICE, DEVICES }
+
+/**
+ * Home and the screens reachable from it. The current page is saved across recreation (it is only an
+ * enum, nothing secret), so a rotation keeps the Add-device screen and its still-pending enrollment. The admin
+ * pages need this phone to be an admin in the verified roster, and they are never shown over the lock
+ * screen (the activity does not opt in to that).
+ */
+@Composable
+private fun HomeHost(viewModel: SetupViewModel, onSecureScreen: (Boolean) -> Unit) {
+    val info by remember { viewModel.home }.collectAsState(initial = null)
+    var page by rememberSaveable { mutableStateOf(HomePage.HOME) }
+    val isAdmin = info?.isAdmin == true
+    val adminPage = page == HomePage.ADD_DEVICE || page == HomePage.DEVICES
+    // Admin status can be lost while an admin page is open (a synced roster); drop back to Home. Until the
+    // home info has loaded (right after a recreation) the saved page is left alone.
+    LaunchedEffect(isAdmin, adminPage, info) {
+        if (info != null && !isAdmin && adminPage) page = HomePage.HOME
+    }
+    BackHandler(enabled = page != HomePage.HOME) { page = HomePage.HOME }
+    when (page) {
+        HomePage.HOME -> HomeScreen(viewModel, info) { page = it }
+
+        HomePage.SETUP -> ChecklistScreen(viewModel) { page = HomePage.HOME }
+
+        HomePage.ADD_DEVICE ->
+            if (isAdmin) AddDeviceScreen(onSecureScreen) { page = HomePage.HOME }
+
+        HomePage.DEVICES ->
+            if (isAdmin) DevicesScreen { page = HomePage.HOME }
     }
 }
 
 @Composable
-private fun HomeScreen(viewModel: SetupViewModel) {
-    val info by remember { viewModel.home }.collectAsState(initial = null)
+private fun HomeScreen(viewModel: SetupViewModel, info: HomeInfo?, open: (HomePage) -> Unit) {
+    val checklist by viewModel.checklistState.collectAsState()
     Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(stringResource(R.string.home_title), style = MaterialTheme.typography.headlineMedium)
         info?.let {
             Text(it.profile.displayName, style = MaterialTheme.typography.titleLarge)
             Text(it.profile.deviceName)
-            if (it.profile.admin) Text(stringResource(R.string.home_admin_badge))
+            if (it.isAdmin) Text(stringResource(R.string.home_admin_badge))
             it.serverUrl?.let { url -> Text(stringResource(R.string.home_server, url)) }
             it.rosterVersion?.let { v -> Text(stringResource(R.string.home_roster_version, v)) }
+        }
+        // Material's Badge is the error colour (red); the button text also says it, so colour is not the only signal.
+        BadgedBox(badge = { if (checklist.hasFailures) Badge { Text("!") } }) {
+            Button(onClick = { open(HomePage.SETUP) }) {
+                Text(stringResource(if (checklist.hasFailures) R.string.home_setup_attention else R.string.home_setup))
+            }
+        }
+        if (info?.isAdmin == true) {
+            Button(onClick = { open(HomePage.ADD_DEVICE) }) { Text(stringResource(R.string.home_add_device)) }
+            Button(onClick = { open(HomePage.DEVICES) }) { Text(stringResource(R.string.home_devices)) }
         }
     }
 }

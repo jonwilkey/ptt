@@ -2,9 +2,10 @@
 
 The family push-to-talk Android app (Kotlin, Gradle), distributed as a signed, sideloaded APK.
 
-This is the project skeleton (an empty "Not set up yet" screen, the build, static analysis, and CI)
-plus the network, database and outbox layers; there is no enrollment UI yet. Enrollment and paging
-(milestone 2) come next; the widget, live talk, and clip fallback follow in milestones 3-5.
+This is the project skeleton (the build, static analysis, and CI) plus the network, database and
+outbox layers, enrollment and roster sync, the admin tools (add a device with a QR, remove a device)
+and the setup checklist. Paging (milestone 2) comes next; the widget, live talk, and clip fallback
+follow in milestones 3-5.
 `version.txt` holds the app version that release-please bumps (tags `android-vX.Y.Z`). Release
 signing is not configured yet (milestone 6), so release builds stay unsigned.
 
@@ -19,6 +20,7 @@ signing is not configured yet (milestone 6), so release builds stay unsigned.
 | `app/src/main/kotlin/com/example/ptt/net/` | REST client (`PttApi`, OkHttp, TLS 1.3 only), auth interceptor, `DeviceTokenStore` (token encrypted by an Android Keystore AES-GCM key) |
 | `app/src/main/kotlin/com/example/ptt/data/` | Room database (`contacts`, `roster`, `outbox`, `active_page`), repositories, DataStore settings |
 | `app/src/main/kotlin/com/example/ptt/outbox/` | `Outbox` (persisted retries with backoff) and `OutboxWorker` (expedited WorkManager retry path) |
+| `app/src/main/kotlin/com/example/ptt/setup/` | Enrollment, roster sync, routing, registration, the admin tools (`AddDeviceFlow`, `DeviceRevoker`; the QR is rendered with zxing core) and the setup checklist (`SetupChecklist`, `SystemProbe`) |
 | `app/src/main/kotlin/com/example/ptt/di/` | Hilt wiring for the packages above |
 | `app/schemas/` | Room schema JSON, exported by KSP and checked in; commit the new `N.json` with every `@Database` version bump |
 | `buildSrc/` | `AppVersion` (parses `version.txt`, computes `versionCode`) and `DependencyFloors` (security version floors), with unit tests |
@@ -138,6 +140,10 @@ else. `syncRobolectricDeps` copies it to `app/build/robolectric-deps`, and the t
 anything itself. When Robolectric or `robolectric.properties` `sdk=` changes, update
 `robolectricAndroidAll36` in the version catalog to the version Robolectric then requests
 (its first offline failure names the missing file).
+
+`FullScreenProbeTest` runs at `@Config(sdk = [33, 34])` to cover both sides of the Android 14
+split, so the API 33 and 34 jars are resolved the same way in `robolectricAndroidAll33` and
+`robolectricAndroidAll34` (one configuration cannot hold two versions of the same module).
 
 Renovate groups Gradle updates monthly (`renovate.json`). Dependency verification metadata and
 lock files are not refreshed by the hosted Renovate app, so run the commands above on its PR

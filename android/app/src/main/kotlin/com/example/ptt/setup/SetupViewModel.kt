@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.ptt.data.DeviceProfile
 import com.example.ptt.data.RosterRepository
 import com.example.ptt.data.SettingsRepository
+import com.example.ptt.net.DeviceTokenStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -18,17 +19,24 @@ import kotlinx.coroutines.launch
 
 data class EnrollUiState(val busy: Boolean = false, val error: EnrollError? = null, val scanFailed: Boolean = false)
 
-data class HomeInfo(val profile: DeviceProfile, val serverUrl: String?, val rosterVersion: Long?)
+/** [isAdmin] comes from the verified roster (this device listed as an admin), not from the enrollment profile. */
+data class HomeInfo(val profile: DeviceProfile, val serverUrl: String?, val rosterVersion: Long?, val isAdmin: Boolean)
 
+// Hilt injects one collaborator per concern the home flow coordinates.
+@Suppress("LongParameterList")
 @HiltViewModel
 class SetupViewModel @Inject constructor(
     private val startup: AppStartup,
     private val enroller: EnrollmentController,
     private val rosterSync: RosterSync,
     private val registration: DeviceRegistration,
+    private val checklist: SetupChecklist,
+    private val revoker: DeviceRevoker,
     settings: SettingsRepository,
-    rosters: RosterRepository
+    rosters: RosterRepository,
+    private val tokens: DeviceTokenStore
 ) : ViewModel() {
+
     private val _route = MutableStateFlow<Route?>(null)
 
     /** Null until the first routing decision. */
@@ -38,7 +46,25 @@ class SetupViewModel @Inject constructor(
     val enrollState: StateFlow<EnrollUiState> = _enrollState
 
     val home: Flow<HomeInfo?> = combine(settings.profileFlow, settings.serverUrlFlow, rosters.roster) { p, url, r ->
-        p?.let { HomeInfo(it, url, r?.version) }
+        p?.let {
+            HomeInfo(
+                it,
+                url,
+                r?.version,
+                r.toRoster()?.let { roster -> RosterView(roster, tokens.deviceId()).isAdmin } == true
+            )
+        }
+    }
+
+    /** The latest setup checklist; the Home screen badges it red when anything failed. */
+    val checklistState: StateFlow<ChecklistState> = checklist.state
+
+    /** Re-checks the setup checklist (every app start and resume) and reports it to the server if it changed. */
+    fun refreshChecklist() {
+        launchSafely {
+            checklist.refresh()
+            registration.sync()
+        }
     }
 
     /** App start and each time the activity comes back: route, then sync in the background. */
@@ -46,8 +72,11 @@ class SetupViewModel @Inject constructor(
         launchSafely {
             _route.value = startup.resolve()
             if (_route.value !is Route.Enroll) {
+                checklist.refresh()
                 syncNow()
                 registration.sync()
+                // A removal whose revoke never reached the server (an app restart) is finished now.
+                revoker.retryPending()
             }
         }
     }
@@ -58,6 +87,11 @@ class SetupViewModel @Inject constructor(
             rosterSync.sync()
             _route.value = startup.resolve()
         }
+    }
+
+    /** The Waiting screen's way out: forget everything local and go back to enrollment. */
+    fun startOver() {
+        launchSafely { _route.value = startup.startOver() }
     }
 
     /** Runs [block] so that no exception can crash the app; only the exception class is logged. */

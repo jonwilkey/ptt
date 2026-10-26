@@ -30,6 +30,19 @@ class AppStartup(
 ) {
     suspend fun resolve(): Route = wiper.lock.withLock { resolveLocked() }
 
+    /**
+     * The recovery path for a phone stuck waiting for a roster (for example its admin gave up on the
+     * enrollment): wipes all local state under the same lock as [resolve] and routes to a plain
+     * enrollment screen. The server-side device record is left for an admin to revoke. If a roster was
+     * accepted after the screen showed Waiting, the phone is no longer stuck: nothing is wiped and the
+     * normal route is returned.
+     */
+    suspend fun startOver(): Route = wiper.lock.withLock {
+        if (rosters.current() != null) return@withLock resolveLocked()
+        wiper.wipeAll()
+        Route.Enroll(explain = false)
+    }
+
     @Suppress("ReturnCount")
     private suspend fun resolveLocked(): Route {
         if (settings.needsReenrollment()) {

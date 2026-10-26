@@ -20,6 +20,20 @@ import dagger.hilt.android.AndroidEntryPoint
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    /** The route wants FLAG_SECURE (loading, enrollment). */
+    private var routeSecure = true
+
+    /** A screen that shows an enrollment QR wants FLAG_SECURE (Settings > Add device). */
+    private var screenSecure = false
+
+    private fun applySecureFlag() {
+        if (routeSecure || screenSecure) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -30,11 +44,8 @@ class MainActivity : ComponentActivity() {
             // already on from onCreate, so the first frame is covered; it is cleared once the route is known
             // and is not the enrollment screen.
             LaunchedEffect(route) {
-                if (route != null && route !is Route.Enroll) {
-                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                } else {
-                    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                }
+                routeSecure = route == null || route is Route.Enroll
+                applySecureFlag()
             }
             // Route (and sync) each time the app returns to the foreground, not just once per activity: a 401
             // or the re-enroll flag set while Home was showing must be acted on.
@@ -42,7 +53,10 @@ class MainActivity : ComponentActivity() {
                 viewModel.onStart()
                 onStopOrDispose { }
             }
-            SetupApp(viewModel)
+            SetupApp(viewModel, onSecureScreen = {
+                screenSecure = it
+                applySecureFlag()
+            })
         }
     }
 }

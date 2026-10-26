@@ -109,10 +109,21 @@ val robolectricAndroidAll by configurations.creating {
     isCanBeResolved = true
 }
 
+// The same module at other API levels needs its own configurations: one configuration would pick only the
+// highest version.
+val robolectricAndroidAll33 by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+val robolectricAndroidAll34 by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
 val robolectricDepsDir = layout.buildDirectory.dir("robolectric-deps")
 
 val syncRobolectricDeps by tasks.registering(Sync::class) {
-    from(robolectricAndroidAll)
+    from(robolectricAndroidAll, robolectricAndroidAll33, robolectricAndroidAll34)
     into(robolectricDepsDir)
 }
 
@@ -160,6 +171,8 @@ dependencies {
     implementation(libs.androidx.hilt.work)
     ksp(libs.androidx.hilt.compiler)
     implementation(libs.tink.android)
+    // Renders the add-device enrollment QR (core only: no Android or camera code).
+    implementation(libs.zxing.core)
     // Google code scanner: no camera permission; the scanner UI is delivered by Play services.
     implementation(libs.play.services.code.scanner)
     // See gradle/libs.versions.toml: keeps dependency locking consistent with AGP's second resolution.
@@ -175,6 +188,8 @@ dependencies {
     testImplementation(libs.androidx.work.testing)
     testImplementation(libs.robolectric)
     robolectricAndroidAll(libs.robolectric.android.all.api36)
+    robolectricAndroidAll33(libs.robolectric.android.all.api33)
+    robolectricAndroidAll34(libs.robolectric.android.all.api34)
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(platform(libs.androidx.compose.bom))
     testImplementation(libs.androidx.compose.ui.test.junit4)

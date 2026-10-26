@@ -11,14 +11,15 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Keeps the server's record of this device (`PUT /v1/devices/me`) current: app version, device
- * name and FCM token. Only values that changed since the last successful registration (the
- * enrollment request counts as one) are sent. The `checklist` field belongs to a later PR.
+ * name, FCM token and setup checklist. Only values that changed since the last successful
+ * registration (the enrollment request counts as one) are sent.
  */
 class DeviceRegistration(
     private val api: PttApi,
     private val settings: SettingsRepository,
     private val fcm: FcmTokenSource,
-    private val appVersion: String
+    private val appVersion: String,
+    private val checklist: ChecklistSource = ChecklistSource { emptyMap() }
 ) {
     private val lock = Mutex()
 
@@ -31,27 +32,25 @@ class DeviceRegistration(
         val last = settings.lastRegistration()
         val token = knownToken ?: fcm.token()
         val hash = token?.let { hashOf(it) }
-        val versionChanged = last?.appVersion != appVersion
-        val nameChanged = last?.deviceName != profile.deviceName
-        val tokenChanged = token != null && hash != last?.fcmTokenHash
-        if (!versionChanged && !nameChanged && !tokenChanged) return@withLock true
+        val currentChecklist = checklist.serverMap()
         val request = UpdateDeviceRequest(
-            fcmToken = if (tokenChanged) token else null,
-            appVersion = if (versionChanged) appVersion else null,
-            deviceName = if (nameChanged) profile.deviceName else null
+            fcmToken = token.takeIf { it != null && hash != last?.fcmTokenHash },
+            appVersion = appVersion.takeIf { it != last?.appVersion },
+            deviceName = profile.deviceName.takeIf { it != last?.deviceName },
+            checklist = currentChecklist.takeIf { it != (last?.checklist ?: emptyMap<String, Boolean>()) }
         )
+        if (request.isEmpty()) return@withLock true
         val ok = api.updateDevice(request) is ApiResult.Success
         if (ok) {
             settings.setLastRegistration(
-                RegistrationValues(
-                    appVersion,
-                    profile.deviceName,
-                    hash ?: last?.fcmTokenHash
-                )
+                RegistrationValues(appVersion, profile.deviceName, hash ?: last?.fcmTokenHash, currentChecklist)
             )
         }
         ok
     }
+
+    private fun UpdateDeviceRequest.isEmpty() =
+        fcmToken == null && appVersion == null && deviceName == null && checklist == null
 
     /** For `FirebaseMessagingService.onNewToken` (PR 11). */
     suspend fun onNewToken(token: String): Boolean = sync(token)
