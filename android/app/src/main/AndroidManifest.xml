@@ -6,6 +6,10 @@
     <!-- WorkManager runs expedited work as a short data-sync foreground service on Android 10 and 11. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- AlertService (incoming-page ringing): a sideloaded app may use specialUse; see its subtype below. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Setup checklist (docs/spec.md, "Permissions and setup checklist"): each is explained and checked there. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -61,6 +65,38 @@
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
+
+        <!-- FCM data messages (push.FcmService). Never started while Firebase is unconfigured. -->
+        <service
+            android:name=".push.FcmService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Rings while a page is unanswered (alert.AlertService). -->
+        <service
+            android:name=".alert.AlertService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Rings and vibrates for an incoming family page until it is answered, acknowledged or cancelled" />
+        </service>
+
+        <!-- The Acknowledged action on the incoming-page notification. -->
+        <receiver
+            android:name=".alert.AlertActionReceiver"
+            android:exported="false" />
+
+        <!-- Placeholder talk screen: shows over the lock screen so notification and full-screen intents work. -->
+        <activity
+            android:name=".talk.TalkActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
 
         <activity
             android:name=".MainActivity"

@@ -7,6 +7,7 @@ import android.provider.Settings
 import androidx.annotation.StringRes
 import androidx.core.net.toUri
 import com.example.ptt.R
+import com.example.ptt.alert.AlertChannels
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +23,9 @@ enum class ChecklistItem(val wireKey: String?, @StringRes val title: Int, @Strin
     MICROPHONE("microphone", R.string.check_microphone, R.string.check_microphone_why),
     FULL_SCREEN("full_screen", R.string.check_full_screen, R.string.check_full_screen_why),
     DND_ACCESS("dnd_access", R.string.check_dnd, R.string.check_dnd_why),
+
+    /** Not reported to the server: it is derived from the DND grant and the channel the app owns. */
+    URGENT_CHANNEL(null, R.string.check_urgent_channel, R.string.check_urgent_channel_why),
     BATTERY("battery", R.string.check_battery, R.string.check_battery_why),
     OEM_BACKGROUND(null, R.string.check_oem, R.string.check_oem_why),
     INSTALL_PACKAGES("install_packages", R.string.check_install, R.string.check_install_why),
@@ -71,7 +75,11 @@ fun interface ChecklistSource {
  * Evaluates the checklist on demand ([refresh]) and exposes the latest result as [state] (the widget badge
  * of milestone 3 collects it). Call [refresh] on every app start and resume.
  */
-class SetupChecklist(private val probe: SystemProbe) : ChecklistSource {
+class SetupChecklist(
+    private val probe: SystemProbe,
+    /** Run when Do Not Disturb access is seen granted: (re)creates the channels so bypass-DND can take hold. */
+    private val onDndAccess: () -> Unit = {}
+) : ChecklistSource {
     private val _state = MutableStateFlow(evaluate())
     val state: StateFlow<ChecklistState> = _state
 
@@ -80,6 +88,7 @@ class SetupChecklist(private val probe: SystemProbe) : ChecklistSource {
 
     fun evaluate(): ChecklistState {
         val oem = OemSettings.forManufacturer(probe.manufacturer)
+        if (probe.dndAccess() == true) onDndAccess()
         return ChecklistState(
             listOf(
                 ChecklistRow(
@@ -90,6 +99,7 @@ class SetupChecklist(private val probe: SystemProbe) : ChecklistSource {
                 ChecklistRow(ChecklistItem.MICROPHONE, status(probe.microphone())),
                 ChecklistRow(ChecklistItem.FULL_SCREEN, status(probe.fullScreenIntent())),
                 ChecklistRow(ChecklistItem.DND_ACCESS, status(probe.dndAccess())),
+                ChecklistRow(ChecklistItem.URGENT_CHANNEL, status(probe.urgentChannelBypassesDnd())),
                 ChecklistRow(ChecklistItem.BATTERY, status(probe.ignoringBatteryOptimizations())),
                 ChecklistRow(
                     ChecklistItem.OEM_BACKGROUND,
@@ -171,6 +181,10 @@ object ChecklistLinks {
             }
 
         ChecklistItem.DND_ACCESS -> Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+
+        ChecklistItem.URGENT_CHANNEL -> Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            .putExtra(Settings.EXTRA_CHANNEL_ID, AlertChannels.PAGE_URGENT)
 
         ChecklistItem.BATTERY ->
             Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, "package:$packageName".toUri())
