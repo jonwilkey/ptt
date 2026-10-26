@@ -57,7 +57,8 @@ data class EnrollRequest(
     val x25519: String,
     /** Absent for bootstrap codes. */
     val mac: String? = null,
-    @SerialName("fcm_token") val fcmToken: String,
+    /** Absent when Firebase is unavailable on this build. */
+    @SerialName("fcm_token") val fcmToken: String? = null,
     @SerialName("app_version") val appVersion: String
 ) {
     override fun toString() = "EnrollRequest(deviceId=$deviceId, code=<redacted>, mac=<redacted>, fcmToken=<redacted>)"

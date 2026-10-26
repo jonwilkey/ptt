@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="paste_qr_label">Pasted QR text (debug)</string>
+    <string name="paste_qr_button">Enroll from pasted text</string>
+</resources>
