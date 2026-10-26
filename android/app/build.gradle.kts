@@ -87,6 +87,11 @@ kotlin {
     }
 }
 
+// Room writes its schema JSON here (checked in), so migrations can be reviewed and tested.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 ktlint {
     version.set(libs.versions.ktlint.get())
     android.set(true)
@@ -145,6 +150,15 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.okhttp)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.androidx.hilt.work)
+    ksp(libs.androidx.hilt.compiler)
     implementation(libs.tink.android)
     // See gradle/libs.versions.toml: keeps dependency locking consistent with AGP's second resolution.
     runtimeOnly(libs.kotlin.stdlib.common)
@@ -154,6 +168,9 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.androidx.work.testing)
     testImplementation(libs.robolectric)
     robolectricAndroidAll(libs.robolectric.android.all.api36)
     testImplementation(libs.androidx.test.ext.junit)

@@ -2,11 +2,11 @@
 
 The family push-to-talk Android app (Kotlin, Gradle), distributed as a signed, sideloaded APK.
 
-This is the project skeleton: an empty "Not set up yet" screen, the build, static analysis, and
-CI. Enrollment and paging (milestone 2) come next; the widget, live talk, and clip fallback
-follow in milestones 3-5. `version.txt` holds the app version that release-please bumps (tags
-`android-vX.Y.Z`). Release signing is not configured yet (milestone 6), so release builds stay
-unsigned.
+This is the project skeleton (an empty "Not set up yet" screen, the build, static analysis, and CI)
+plus the network, database and outbox layers; there is no enrollment UI yet. Enrollment and paging
+(milestone 2) come next; the widget, live talk, and clip fallback follow in milestones 3-5.
+`version.txt` holds the app version that release-please bumps (tags `android-vX.Y.Z`). Release
+signing is not configured yet (milestone 6), so release builds stay unsigned.
 
 ## Layout
 
@@ -16,6 +16,11 @@ unsigned.
 | `app/src/main/kotlin/com/example/ptt/` | Packages named as in the spec (`push`, `setup`, ...), created as needed |
 | `app/src/debug/res/xml/` | Debug network security config (adds cleartext to `10.0.2.2` and `localhost`) |
 | `app/src/main/kotlin/com/example/ptt/crypto/` | Protocol crypto: Tink device keys (Android Keystore), strict JSON/b64u, signed objects, roster, enrollment, page envelopes |
+| `app/src/main/kotlin/com/example/ptt/net/` | REST client (`PttApi`, OkHttp, TLS 1.3 only), auth interceptor, `DeviceTokenStore` (token encrypted by an Android Keystore AES-GCM key) |
+| `app/src/main/kotlin/com/example/ptt/data/` | Room database (`contacts`, `roster`, `outbox`, `active_page`), repositories, DataStore settings |
+| `app/src/main/kotlin/com/example/ptt/outbox/` | `Outbox` (persisted retries with backoff) and `OutboxWorker` (expedited WorkManager retry path) |
+| `app/src/main/kotlin/com/example/ptt/di/` | Hilt wiring for the packages above |
+| `app/schemas/` | Room schema JSON, exported by KSP and checked in; commit the new `N.json` with every `@Database` version bump |
 | `buildSrc/` | `AppVersion` (parses `version.txt`, computes `versionCode`) and `DependencyFloors` (security version floors), with unit tests |
 | `gradle/libs.versions.toml` | Version catalog: every dependency and plugin version lives here |
 | `config/detekt/detekt.yml` | detekt deviations from the defaults |
