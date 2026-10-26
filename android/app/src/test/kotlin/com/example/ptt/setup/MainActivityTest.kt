@@ -14,7 +14,13 @@ class MainActivityTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun showsPlaceholder() {
-        composeRule.onNodeWithText("Not set up yet").assertExists()
+    fun anUnenrolledPhoneShowsTheEnrollmentScreen() {
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTextCount("Scan QR code") > 0
+        }
+        composeRule.onNodeWithText("Scan QR code").assertExists()
     }
+
+    private fun androidx.compose.ui.test.junit4.AndroidComposeTestRule<*, *>.onAllNodesWithTextCount(text: String) =
+        onAllNodes(androidx.compose.ui.test.hasText(text)).fetchSemanticsNodes().size
 }

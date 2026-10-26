@@ -20,7 +20,14 @@ class InMemoryDeviceKeyStore(
 ) : DeviceKeyStore {
     private var stored: KeysetPair? = null
 
+    /** When set, [create] fails with it (a Keystore that cannot protect new keys). */
+    var failCreate: DeviceKeysUnavailable? = null
+
+    /** The next this-many [load] calls fail, as a transient Keystore error would. */
+    var failLoadTimes = 0
+
     override fun create(): KeysetPair {
+        failCreate?.let { throw it }
         check(stored == null) { "device keys already exist" }
         return KeysetPair(
             presetSigning ?: generate(TinkKeys.ed25519Parameters),
@@ -28,7 +35,13 @@ class InMemoryDeviceKeyStore(
         ).also { stored = it }
     }
 
-    override fun load(): KeysetPair = stored ?: throw DeviceKeysUnavailable("no keysets")
+    override fun load(): KeysetPair {
+        if (failLoadTimes > 0) {
+            failLoadTimes--
+            throw DeviceKeysUnavailable("transient")
+        }
+        return stored ?: throw DeviceKeysUnavailable("no keysets")
+    }
 
     override fun wipe() {
         stored = null

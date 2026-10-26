@@ -1,7 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Family PTT</string>
-    <string name="not_set_up_yet">Not set up yet</string>
     <string name="outbox_channel_name">Sending</string>
     <string name="outbox_notification_title">Sending pending pages</string>
+    <string name="enroll_title">Set up this phone</string>
+    <string name="enroll_explain_removed">This phone was removed from the family, or its keys were lost. Set it up again with a new QR code.</string>
+    <string name="enroll_intro">Ask an admin for an enrollment QR code, name this phone, then scan the code.</string>
+    <string name="device_name_label">Phone name</string>
+    <string name="scan_qr_button">Scan QR code</string>
+    <string name="enrolling">Setting up\u2026</string>
+    <string name="error_invalid_qr">That is not a valid enrollment QR code.</string>
+    <string name="error_invalid_name">Enter a phone name of 1 to 64 characters.</string>
+    <string name="error_code_invalid">This code is expired or was already used. Ask for a new QR code.</string>
+    <string name="error_rate_limited">Too many attempts. Try again later.</string>
+    <string name="error_network">Could not reach the server. Check the connection and try again.</string>
+    <string name="error_not_admin">The server did not make this phone an admin, so it cannot start the family.</string>
+    <string name="error_keys">This phone could not store its secure keys.</string>
+    <string name="error_other">Setup failed. Ask for a new QR code and try again.</string>
+    <string name="error_scan">The QR scanner could not be started.</string>
+    <string name="waiting_title">Waiting for an admin to approve this phone</string>
+    <string name="waiting_retry">Check now</string>
+    <string name="home_title">Family PTT</string>
+    <string name="home_admin_badge">Admin</string>
+    <string name="home_server">Server: %1$s</string>
+    <string name="home_roster_version">Roster version: %1$d</string>
+    <string name="loading">Loading\u2026</string>
 </resources>

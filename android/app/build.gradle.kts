@@ -160,6 +160,8 @@ dependencies {
     implementation(libs.androidx.hilt.work)
     ksp(libs.androidx.hilt.compiler)
     implementation(libs.tink.android)
+    // Google code scanner: no camera permission; the scanner UI is delivered by Play services.
+    implementation(libs.play.services.code.scanner)
     // See gradle/libs.versions.toml: keeps dependency locking consistent with AGP's second resolution.
     runtimeOnly(libs.kotlin.stdlib.common)
     implementation(platform(libs.firebase.bom))
