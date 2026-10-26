@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">Family PTT</string>
     <string name="not_set_up_yet">Not set up yet</string>
+    <string name="outbox_channel_name">Sending</string>
+    <string name="outbox_notification_title">Sending pending pages</string>
 </resources>

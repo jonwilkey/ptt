@@ -8,6 +8,12 @@ style:
     # Matches .editorconfig / ktlint android style.
     maxLineLength: 120
 complexity:
+  TooManyFunctions:
+    # PttApi has one function per REST endpoint, its implementation overrides them all, and Hilt modules
+    # are lists of providers.
+    thresholdInInterfaces: 15
+    ignoreOverridden: true
+    excludes: ["**/di/**", "**/test/**"]
   LongMethod:
     # @Composable functions describe a UI tree and run long; the default threshold is 60 lines.
     threshold: 80
