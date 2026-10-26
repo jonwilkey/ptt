@@ -123,6 +123,7 @@ class SetupChecklistTest {
         var microphone: Boolean? = true,
         var fullScreen: Boolean? = true,
         var dnd: Boolean? = true,
+        var urgentChannel: Boolean? = true,
         var battery: Boolean? = true,
         var install: Boolean? = true
     ) : SystemProbe {
@@ -134,6 +135,52 @@ class SetupChecklistTest {
         override fun dndAccess() = dnd
         override fun ignoringBatteryOptimizations() = battery
         override fun canInstallPackages() = install
+        override fun urgentChannelBypassesDnd() = urgentChannel
+    }
+
+    @Test
+    fun theUrgentChannelRowIsRedUntilTheChannelReallyBypassesDnd() {
+        val probe = FakeProbe(urgentChannel = false)
+        assertEquals(RowStatus.FAIL, status(ChecklistItem.URGENT_CHANNEL, probe))
+        probe.urgentChannel = true
+        assertEquals(RowStatus.PASS, status(ChecklistItem.URGENT_CHANNEL, probe))
+        probe.urgentChannel = null
+        assertEquals(RowStatus.UNKNOWN, status(ChecklistItem.URGENT_CHANNEL, probe))
+        // A failing row raises the badge but is never reported as a key of its own.
+        assertTrue(SetupChecklist(FakeProbe(urgentChannel = false)).evaluate().hasFailures)
+        assertFalse(SetupChecklist(FakeProbe(urgentChannel = false)).serverMap().keys.any { it.contains("urgent") })
+    }
+
+    @Test
+    fun theRealProbeReadsTheUrgentChannelsBypassFlag() {
+        notifications.deleteNotificationChannel("page_urgent")
+        assertEquals(null, probe().urgentChannelBypassesDnd())
+        com.example.ptt.alert.AlertChannels.create(app)
+        assertEquals(true, probe().urgentChannelBypassesDnd())
+        // What Android does when the flag was dropped at creation: the stored channel no longer bypasses.
+        notifications.getNotificationChannel("page_urgent").setBypassDnd(false)
+        assertEquals(false, probe().urgentChannelBypassesDnd())
+    }
+
+    @Test
+    fun seeingDndAccessRecreatesTheChannelsAndNotSeeingItDoesNot() {
+        var calls = 0
+        // Building a checklist evaluates it once.
+        SetupChecklist(FakeProbe(dnd = false), onDndAccess = { calls++ })
+        SetupChecklist(FakeProbe(dnd = null), onDndAccess = { calls++ })
+        assertEquals(0, calls)
+        val checklist = SetupChecklist(FakeProbe(dnd = true), onDndAccess = { calls++ })
+        assertEquals(1, calls)
+        checklist.refresh()
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun theUrgentChannelRowLinksToThatChannelsSettings() {
+        val intent = ChecklistLinks.intentFor(ChecklistItem.URGENT_CHANNEL, "com.example.ptt")
+        assertEquals(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS, intent.action)
+        assertEquals("page_urgent", intent.getStringExtra(Settings.EXTRA_CHANNEL_ID))
+        assertEquals("com.example.ptt", intent.getStringExtra(Settings.EXTRA_APP_PACKAGE))
     }
 
     @Test
@@ -191,7 +238,7 @@ class SetupChecklistTest {
             state.serverMap().keys
         )
         assertTrue(state.serverMap().values.all { it })
-        assertEquals(9, state.rows.size)
+        assertEquals(10, state.rows.size)
         assertEquals(RowStatus.INFO, state.rows.first { it.item == ChecklistItem.FOREGROUND_SERVICES }.status)
     }
 

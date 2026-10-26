@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import com.example.ptt.alert.AlertChannels
 
 /**
  * Reads the Android settings the setup checklist reports. Every function returns null when the state
@@ -43,6 +44,12 @@ interface SystemProbe {
     fun ignoringBatteryOptimizations(): Boolean?
 
     fun canInstallPackages(): Boolean?
+
+    /**
+     * The urgent-page channel is set to bypass Do Not Disturb, which Android only keeps if it was set while this
+     * app held Do Not Disturb access. Null if the channel does not exist yet.
+     */
+    fun urgentChannelBypassesDnd(): Boolean?
 }
 
 /** [SystemProbe] backed by the real system services. */
@@ -88,6 +95,9 @@ class AndroidSystemProbe(private val context: Context) : SystemProbe {
     }
 
     override fun canInstallPackages(): Boolean? = read { context.packageManager.canRequestPackageInstalls() }
+
+    override fun urgentChannelBypassesDnd(): Boolean? =
+        read { notifications?.getNotificationChannel(AlertChannels.PAGE_URGENT)?.canBypassDnd() }
 
     private fun granted(permission: String): Boolean? =
         read { context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED }

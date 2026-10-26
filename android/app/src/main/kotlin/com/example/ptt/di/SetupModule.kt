@@ -2,6 +2,7 @@ package com.example.ptt.di
 
 import android.content.Context
 import com.example.ptt.BuildConfig
+import com.example.ptt.alert.AlertChannels
 import com.example.ptt.crypto.AndroidDeviceKeyStore
 import com.example.ptt.crypto.DeviceKeyStore
 import com.example.ptt.data.ActivePageRepository
@@ -77,7 +78,8 @@ object SetupModule {
 
     @Provides
     @Singleton
-    fun setupChecklist(probe: SystemProbe) = SetupChecklist(probe)
+    fun setupChecklist(probe: SystemProbe, @ApplicationContext context: Context) =
+        SetupChecklist(probe, onDndAccess = { AlertChannels.create(context) })
 
     @Provides
     @Singleton

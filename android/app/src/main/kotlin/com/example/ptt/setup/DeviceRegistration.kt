@@ -52,7 +52,7 @@ class DeviceRegistration(
     private fun UpdateDeviceRequest.isEmpty() =
         fcmToken == null && appVersion == null && deviceName == null && checklist == null
 
-    /** For `FirebaseMessagingService.onNewToken` (PR 11). */
+    /** For `FirebaseMessagingService.onNewToken` (`push.FcmService`). */
     suspend fun onNewToken(token: String): Boolean = sync(token)
 
     companion object {
