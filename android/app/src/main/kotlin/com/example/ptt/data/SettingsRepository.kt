@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.example.ptt.crypto.B64u
 import com.example.ptt.crypto.TrustedAdmin
 import com.example.ptt.net.EnrollmentState
@@ -20,7 +21,13 @@ data class DeviceProfile(val userId: String, val displayName: String, val admin:
  * What the last successful registration (`PUT /v1/devices/me`, or the enrollment itself) told the
  * server. The FCM token is kept only as a SHA-256 hash: it is just compared, never sent from here.
  */
-data class RegistrationValues(val appVersion: String, val deviceName: String, val fcmTokenHash: String?)
+data class RegistrationValues(
+    val appVersion: String,
+    val deviceName: String,
+    val fcmTokenHash: String?,
+    /** The setup checklist as last sent (snake_case key to pass/fail); empty when none was sent. */
+    val checklist: Map<String, Boolean> = emptyMap()
+)
 
 /**
  * Non-secret settings in DataStore: where the server is, whether this device is enrolled or has to
@@ -76,7 +83,7 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
         val prefs = store.data.first()
         val version = prefs[REG_APP_VERSION] ?: return null
         val name = prefs[REG_DEVICE_NAME] ?: return null
-        return RegistrationValues(version, name, prefs[REG_FCM_HASH])
+        return RegistrationValues(version, name, prefs[REG_FCM_HASH], decodeChecklist(prefs[REG_CHECKLIST]))
     }
 
     suspend fun setLastRegistration(values: RegistrationValues) {
@@ -84,6 +91,34 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
             it[REG_APP_VERSION] = values.appVersion
             it[REG_DEVICE_NAME] = values.deviceName
             if (values.fcmTokenHash == null) it.remove(REG_FCM_HASH) else it[REG_FCM_HASH] = values.fcmTokenHash
+            it[REG_CHECKLIST] = encodeChecklist(values.checklist)
+        }
+    }
+
+    /**
+     * Ids of devices that were removed from the signed roster but whose `POST /v1/devices/{id}/revoke`
+     * has not succeeded yet (docs/protocol.md section 6). Device ids only, nothing secret.
+     */
+    val pendingRevocationsFlow: Flow<Set<String>> = store.data.map { it[PENDING_REVOCATIONS].orEmpty() }
+
+    suspend fun pendingRevocations(): Set<String> = store.data.first()[PENDING_REVOCATIONS].orEmpty()
+
+    suspend fun addPendingRevocation(deviceId: String) {
+        store.edit { it[PENDING_REVOCATIONS] = it[PENDING_REVOCATIONS].orEmpty() + deviceId }
+    }
+
+    suspend fun removePendingRevocation(deviceId: String) {
+        store.edit { it[PENDING_REVOCATIONS] = it[PENDING_REVOCATIONS].orEmpty() - deviceId }
+    }
+
+    private fun encodeChecklist(map: Map<String, Boolean>): String =
+        map.toSortedMap().entries.joinToString(ANCHOR_SEPARATOR) { "${it.key}=${if (it.value) "1" else "0"}" }
+
+    private fun decodeChecklist(raw: String?): Map<String, Boolean> {
+        if (raw.isNullOrEmpty()) return emptyMap()
+        return raw.split(ANCHOR_SEPARATOR).associate { entry ->
+            val (key, value) = entry.split("=")
+            key to (value == "1")
         }
     }
 
@@ -127,6 +162,8 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
             }
             it.remove(IS_ADMIN)
             it.remove(REG_FCM_HASH)
+            it.remove(REG_CHECKLIST)
+            it.remove(PENDING_REVOCATIONS)
         }
     }
 
@@ -150,6 +187,8 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
         val REG_APP_VERSION = stringPreferencesKey("reg_app_version")
         val REG_DEVICE_NAME = stringPreferencesKey("reg_device_name")
         val REG_FCM_HASH = stringPreferencesKey("reg_fcm_hash")
+        val REG_CHECKLIST = stringPreferencesKey("reg_checklist")
+        val PENDING_REVOCATIONS = stringSetPreferencesKey("pending_revocations")
         const val ANCHOR_SEPARATOR = ","
         const val ID_KEY_SEPARATOR = ":"
         val NORMAL_VIBRATE = booleanPreferencesKey("alert_normal_vibrate")

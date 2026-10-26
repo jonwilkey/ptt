@@ -29,41 +29,49 @@ class OkHttpPttApi(
     override suspend fun enroll(serverUrl: String, request: EnrollRequest): ApiResult<EnrollResponse> {
         val base = serverUrl.toHttpUrlOrNull() ?: return ApiResult.Final(0, "invalid_server_url")
         val body = jsonBody(EnrollRequest.serializer(), request)
-        return call(base, "POST", "v1/enroll", body, authenticated = false) { decode(EnrollResponse.serializer(), it) }
+        return call(base, "POST", listOf("v1", "enroll"), body, authenticated = false) {
+            decode(EnrollResponse.serializer(), it)
+        }
     }
 
-    override suspend fun createEnrollmentCode(request: CreateEnrollmentCodeRequest) =
-        enrolledCall("POST", "v1/enrollment-codes", jsonBody(CreateEnrollmentCodeRequest.serializer(), request)) {
-            decode(CreateEnrollmentCodeResponse.serializer(), it)
+    override suspend fun createEnrollmentCode(request: CreateEnrollmentCodeRequest) = enrolledCall(
+        "POST",
+        listOf("v1", "enrollment-codes"),
+        jsonBody(CreateEnrollmentCodeRequest.serializer(), request)
+    ) {
+        decode(CreateEnrollmentCodeResponse.serializer(), it)
+    }
+
+    override suspend fun getEnrollmentCode(codeId: String) =
+        enrolledCall("GET", listOf("v1", "enrollment-codes", codeId), null) {
+            decode(EnrollmentCodeStatusResponse.serializer(), it)
         }
 
-    override suspend fun getEnrollmentCode(codeId: String) = enrolledCall("GET", "v1/enrollment-codes/$codeId", null) {
-        decode(EnrollmentCodeStatusResponse.serializer(), it)
-    }
-
     override suspend fun updateDevice(request: UpdateDeviceRequest) =
-        enrolledCall("PUT", "v1/devices/me", jsonBody(UpdateDeviceRequest.serializer(), request)) { }
+        enrolledCall("PUT", listOf("v1", "devices", "me"), jsonBody(UpdateDeviceRequest.serializer(), request)) { }
 
     override suspend fun revokeDevice(deviceId: String) =
-        enrolledCall("POST", "v1/devices/$deviceId/revoke", EMPTY_BODY) { }
+        enrolledCall("POST", listOf("v1", "devices", deviceId, "revoke"), EMPTY_BODY) { }
 
     override suspend fun getContacts() =
-        enrolledCall("GET", "v1/contacts", null) { decode(ContactsResponse.serializer(), it) }
+        enrolledCall("GET", listOf("v1", "contacts"), null) { decode(ContactsResponse.serializer(), it) }
 
-    override suspend fun getRoster() = enrolledCall("GET", "v1/roster", null) {
+    override suspend fun getRoster() = enrolledCall("GET", listOf("v1", "roster"), null) {
         RosterResponse(it, decode(SignedObjectDto.serializer(), it))
     }
 
     override suspend fun putRoster(signedObjectJson: String) =
-        enrolledCall("PUT", "v1/roster", signedObjectJson.toRequestBody(JSON)) { }
+        enrolledCall("PUT", listOf("v1", "roster"), signedObjectJson.toRequestBody(JSON)) { }
 
     override suspend fun createPage(request: CreatePageRequest) =
-        enrolledCall("POST", "v1/pages", jsonBody(CreatePageRequest.serializer(), request)) {
+        enrolledCall("POST", listOf("v1", "pages"), jsonBody(CreatePageRequest.serializer(), request)) {
             decode(CreatePageResponse.serializer(), it)
         }
 
     override suspend fun delivered(pageId: String) =
-        enrolledCall("POST", "v1/pages/$pageId/delivered", EMPTY_BODY) { decode(DeliveredResponse.serializer(), it) }
+        enrolledCall("POST", listOf("v1", "pages", pageId, "delivered"), EMPTY_BODY) {
+            decode(DeliveredResponse.serializer(), it)
+        }
 
     override suspend fun acknowledge(pageId: String) = pageAction(pageId, "acknowledge")
 
@@ -72,11 +80,11 @@ class OkHttpPttApi(
     override suspend fun cancel(pageId: String) = pageAction(pageId, "cancel")
 
     private suspend fun pageAction(pageId: String, action: String) =
-        enrolledCall("POST", "v1/pages/$pageId/$action", EMPTY_BODY) { }
+        enrolledCall("POST", listOf("v1", "pages", pageId, action), EMPTY_BODY) { }
 
     private suspend fun <T> enrolledCall(
         method: String,
-        path: String,
+        segments: List<String>,
         body: RequestBody?,
         parse: (String) -> T
     ): ApiResult<T> {
@@ -85,7 +93,7 @@ class OkHttpPttApi(
         return when {
             needsReenrollment -> ApiResult.NotEnrolled(NotEnrolledReason.NEEDS_REENROLLMENT)
             base == null -> ApiResult.NotEnrolled(NotEnrolledReason.NOT_ENROLLED)
-            else -> call(base, method, path, body, authenticated = true, parse)
+            else -> call(base, method, segments, body, authenticated = true, parse)
         }
     }
 
@@ -93,12 +101,12 @@ class OkHttpPttApi(
     private suspend fun <T> call(
         base: HttpUrl,
         method: String,
-        path: String,
+        segments: List<String>,
         body: RequestBody?,
         authenticated: Boolean,
         parse: (String) -> T
     ): ApiResult<T> {
-        val url = base.newBuilder().addPathSegments(path).build()
+        val url = base.newBuilder().apply { segments.forEach { addPathSegment(it) } }.build()
         val request = Request.Builder().url(url).method(method, body).header("Accept", "application/json").build()
         return try {
             // `use` is outside withContext so the response is closed even if we are cancelled in between.

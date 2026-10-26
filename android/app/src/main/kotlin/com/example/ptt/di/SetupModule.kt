@@ -12,13 +12,20 @@ import com.example.ptt.data.SettingsRepository
 import com.example.ptt.net.DeviceTokenStore
 import com.example.ptt.net.PttApi
 import com.example.ptt.outbox.Outbox
+import com.example.ptt.setup.AddDeviceFlow
+import com.example.ptt.setup.AndroidSystemProbe
 import com.example.ptt.setup.AppStartup
+import com.example.ptt.setup.DeviceLockState
 import com.example.ptt.setup.DeviceRegistration
+import com.example.ptt.setup.DeviceRevoker
 import com.example.ptt.setup.EnrollmentController
 import com.example.ptt.setup.FcmTokenSource
 import com.example.ptt.setup.FirebaseFcmTokenSource
+import com.example.ptt.setup.KeyguardLockState
 import com.example.ptt.setup.LocalStateWiper
 import com.example.ptt.setup.RosterSync
+import com.example.ptt.setup.SetupChecklist
+import com.example.ptt.setup.SystemProbe
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -66,8 +73,40 @@ object SetupModule {
 
     @Provides
     @Singleton
-    fun deviceRegistration(api: PttApi, settings: SettingsRepository, fcm: FcmTokenSource) =
-        DeviceRegistration(api, settings, fcm, BuildConfig.VERSION_NAME)
+    fun systemProbe(@ApplicationContext context: Context): SystemProbe = AndroidSystemProbe(context)
+
+    @Provides
+    @Singleton
+    fun setupChecklist(probe: SystemProbe) = SetupChecklist(probe)
+
+    @Provides
+    @Singleton
+    fun deviceLockState(@ApplicationContext context: Context): DeviceLockState = KeyguardLockState(context)
+
+    @Provides
+    @Singleton
+    fun deviceRegistration(api: PttApi, settings: SettingsRepository, fcm: FcmTokenSource, checklist: SetupChecklist) =
+        DeviceRegistration(api, settings, fcm, BuildConfig.VERSION_NAME, checklist)
+
+    @Provides
+    fun addDeviceFlow(
+        api: PttApi,
+        rosterSync: RosterSync,
+        settings: SettingsRepository,
+        lock: DeviceLockState,
+        clock: Clock
+    ) = AddDeviceFlow(api, rosterSync, settings::serverUrl, lock, clock)
+
+    @Provides
+    @Singleton
+    fun deviceRevoker(
+        api: PttApi,
+        rosterSync: RosterSync,
+        settings: SettingsRepository,
+        tokens: DeviceTokenStore,
+        lock: DeviceLockState,
+        clock: Clock
+    ) = DeviceRevoker(api, rosterSync, settings, tokens, lock, clock)
 
     @Provides
     @Singleton

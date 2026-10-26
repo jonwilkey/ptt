@@ -110,7 +110,8 @@ class SetupFixture(tmp: File, tokenStoreFails: Boolean = false) {
     val logs = mutableListOf<String>()
     val sync = RosterSync(api, rosters, contacts, settings, tokens, keyStore, clock) { logs += it }
     val startup = AppStartup(settings, tokens, keyStore, rosters, wiper)
-    val registration get() = DeviceRegistration(api, settings, fcm, appVersion)
+    var checklistMap: Map<String, Boolean> = emptyMap()
+    val registration get() = DeviceRegistration(api, settings, fcm, appVersion) { checklistMap }
     val controller get() = EnrollmentController(
         api, keyStore, tokens, settings, wiper, sync, fcm,
         appVersion = appVersion,

@@ -173,6 +173,13 @@ class PttApiTest {
     }
 
     @Test
+    fun aServerSuppliedIdIsOneEncodedPathSegment() = runBlocking {
+        reply(200, """{"status":"pending"}""")
+        api.getEnrollmentCode("a/../b?x")
+        assertEquals("/v1/enrollment-codes/a%2F..%2Fb%3Fx", take().url.encodedPath)
+    }
+
+    @Test
     fun getEnrollmentCodePendingHasNoDevice() = runBlocking {
         reply(200, """{"status":"pending"}""")
         assertNull((api.getEnrollmentCode("c") as ApiResult.Success).body.device)
