@@ -17,6 +17,7 @@ import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.SettingsRepository
 import com.example.ptt.net.DeviceTokenStore
 import com.example.ptt.outbox.Outbox
+import com.example.ptt.push.PageEvent
 import com.example.ptt.push.PushDispatcher
 import com.example.ptt.push.RosterSyncScheduler
 import com.example.ptt.push.RosterSyncWorker
@@ -30,6 +31,7 @@ import dagger.hilt.components.SingletonComponent
 import java.time.Clock
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
@@ -114,4 +116,8 @@ object AlertModule {
         scheduler,
         clock
     )
+
+    /** What the talk screen listens to for a page ending. */
+    @Provides
+    fun pageEvents(dispatcher: PushDispatcher): SharedFlow<PageEvent> = dispatcher.events
 }

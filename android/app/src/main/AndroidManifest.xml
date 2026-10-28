@@ -90,12 +90,18 @@
             android:name=".alert.AlertActionReceiver"
             android:exported="false" />
 
-        <!-- Placeholder talk screen: shows over the lock screen so notification and full-screen intents work. -->
+        <!--
+            Placeholder talk screen: shows over the lock screen so notification and full-screen intents work.
+            Its own task affinity keeps MainActivity out of that task (Back and End return to the lock screen),
+            and it stays out of Recents.
+        -->
         <activity
             android:name=".talk.TalkActivity"
+            android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
             android:showWhenLocked="true"
+            android:taskAffinity="com.example.ptt.talk"
             android:turnScreenOn="true" />
 
         <activity

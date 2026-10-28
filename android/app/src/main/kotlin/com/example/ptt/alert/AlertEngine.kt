@@ -2,14 +2,19 @@ package com.example.ptt.alert
 
 import android.util.Log
 import com.example.ptt.data.ActivePageRepository
+import com.example.ptt.data.OutboxKind
+import com.example.ptt.data.PageRole
 import com.example.ptt.outbox.Outbox
 import com.example.ptt.outbox.OutboxAction
+import com.example.ptt.outbox.OutboxOutcome
 import com.example.ptt.push.SessionKeys
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -61,6 +66,26 @@ class AlertEngine(
         devices.volume.restoreLeftover()
         // Likewise an ongoing page notification of a dead process: nothing here knows that page.
         notices.dropLeftovers()
+        // For the life of the app, not of a screen: a final refusal of this phone's answer leaves nothing to keep.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            outbox.outcomes.filter { it.kind == OutboxKind.ANSWER && it.result is OutboxOutcome.Result.Rejected }
+                .collect { answerRefused(it.pageId) }
+        }
+    }
+
+    /**
+     * The server refused this phone's `answer` for good (409 answered elsewhere, 410 ended, ...): forget the
+     * receiver row and session key of that page. This also removes an `answered` row that [answer] wrote after
+     * a `page_cancel` had already deleted it. Only if the page cancelled while no `answer` was being refused
+     * (the answer still queued, offline) can such a row stay, until the next page replaces it.
+     */
+    private suspend fun answerRefused(pageId: String) {
+        sessionKeys.clear(pageId)
+        guarded("answer refused") {
+            if (activePage.current()?.let { it.pageId == pageId && it.role == PageRole.RECEIVER } == true) {
+                activePage.end(pageId)
+            }
+        }
     }
 
     /** True while some page is ringing: the foreground service has a reason to run. */
@@ -152,12 +177,25 @@ class AlertEngine(
         true
     }
 
-    /** This phone answers: stop everything, remove the notification, tell the server. */
+    /**
+     * This phone answers: stop everything, remove the notification, tell the server, and make sure the
+     * active-page row is this page's, in state `answered` (created from the engine's page if there is none,
+     * replacing another page's row). Idempotent: a page whose row already says `answered` is not sent again.
+     * A page nobody here knows is still sent: the server decides, and its 409 and 410 are final.
+     */
     suspend fun answer(pageId: String) {
-        end(pageId)
+        val page = end(pageId)
         notices.clear(pageId)
+        val row = guardedOrNull("answer state read") { activePage.current() }?.takeIf { it.pageId == pageId }
+        if (row?.state == STATE_ANSWERED && row.role == PageRole.RECEIVER) return
         guarded("answer") { outbox.enqueue(OutboxAction.Answer(pageId)) }
-        guarded("answer state") { activePage.updateState(pageId, STATE_ANSWERED) }
+        guarded("answer state") {
+            if (row != null) {
+                activePage.updateState(pageId, STATE_ANSWERED)
+            } else if (page != null) {
+                activePage.start(pageId, PageRole.RECEIVER, page.sessionId, page.fromUserId, page.level, STATE_ANSWERED)
+            }
+        }
     }
 
     /** Stops alerting for a page that ended (cancelled, answered elsewhere, ...) and forgets it. */
@@ -183,14 +221,17 @@ class AlertEngine(
     }
 
     private suspend fun guarded(what: String, block: suspend () -> Unit) {
-        try {
-            block()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
-            // The type only: never payloads.
-            Log.w(TAG, "$what failed: ${e.javaClass.simpleName}")
-        }
+        guardedOrNull(what, block)
+    }
+
+    private suspend fun <T> guardedOrNull(what: String, block: suspend () -> T): T? = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
+        // The type only: never payloads.
+        Log.w(TAG, "$what failed: ${e.javaClass.simpleName}")
+        null
     }
 
     /** True the first time a page is marked missed. Remembers the last few, which is all a duplicate needs. */
