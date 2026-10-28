@@ -17,13 +17,14 @@ out of production, and with it every push notification.
 
 Until the second admin has an age key, files under `infra/secrets/` are encrypted to the one
 existing admin key and the CI key (`SOPS_AGE_KEY`). When the second admin's key exists, every
-file is re-encrypted to all three with
-`sops updatekeys` (or `sops -r -i --add-age <key> <file>`), and this ADR is marked superseded.
+file is re-encrypted to all three with `sops -r -i --add-age <key> <file>`, and this ADR is marked
+superseded.
 
 ## Consequences
 
 - Only one admin can decrypt or edit the secrets locally. If that admin's key is lost, the
   secrets can still be recovered from CI's key in the shared vault, or rotated: the FCM key can be
-  reissued in the Firebase console.
+  reissued in the Google Cloud console
+  (IAM > Service Accounts > Keys).
 - Deploys are unaffected: CI decrypts with its own key.
 - Follow-up: the second admin generates an age key and the files are re-encrypted, as above.

@@ -159,8 +159,8 @@ secret.
 2. Save the whole file in the shared password-manager vault. Its `age1...` public key is a
    **recipient**: every file in `infra/secrets/` must be encrypted to both admins' keys **and**
    this one (the `--age a,b,c` list in [firebase-setup.md](firebase-setup.md)). Re-encrypt
-   existing files after adding it: `sops updatekeys <file>` (or `sops rotate` with the new
-   `--add-age`).
+   existing files after adding it: `sops -r -i --add-age <key> <file>` (`sops updatekeys` would
+   need a `.sops.yaml`, and none is committed).
 3. **Settings > Environments > production > Environment secrets**: add `SOPS_AGE_KEY` with the
    full contents of `ci-age.key` (the `# created` / `# public key` comment lines and the
    `AGE-SECRET-KEY-...` line). It is an environment secret, so only jobs past the approval gate
