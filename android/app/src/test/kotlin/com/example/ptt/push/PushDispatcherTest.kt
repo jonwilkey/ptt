@@ -65,6 +65,7 @@ class PushDispatcherTest {
     private val notices = FakeNotices()
     private val service = FakeServiceControl()
     private val sessionKeys = SessionKeys()
+    private val selfPages = SelfPages()
     private var rosterSyncs = 0
     private lateinit var engine: AlertEngine
     private lateinit var outbox: Outbox
@@ -97,7 +98,8 @@ class PushDispatcherTest {
         clock: Clock = f.clock,
         useOutbox: Outbox = outbox,
         useEngine: AlertEngine = engine,
-        useActivePage: ActivePageRepository = f.activePage
+        useActivePage: ActivePageRepository = f.activePage,
+        useSelfPages: SelfPages = selfPages
     ) = PushDispatcher(
         f.sync,
         f.tokens,
@@ -109,7 +111,8 @@ class PushDispatcherTest {
         sessionKeys,
         { rosterSyncs++ },
         clock,
-        timeoutMs
+        timeoutMs,
+        useSelfPages
     )
 
     private fun build(level: String = "normal", pageId: String = UUID.randomUUID().toString()): BuiltEnvelope =
@@ -476,14 +479,19 @@ class PushDispatcherTest {
         val events = mutableListOf<PageEvent>()
         val d = dispatcher()
         val job = launch(Dispatchers.Unconfined) { d.events.toList(events) }
-        for (state in listOf("delivered", "acknowledged", "not_delivered")) {
+        // The row only moves forward: a late not_delivered does not take it back from acknowledged.
+        for ((state, row) in listOf(
+            "delivered" to "delivered",
+            "acknowledged" to "acknowledged",
+            "not_delivered" to "acknowledged"
+        )) {
             d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-2", "state" to state))
-            assertEquals(state, f.activePage.current()?.state)
+            assertEquals(state, row, f.activePage.current()?.state)
         }
         assertTrue(notices.events.isEmpty())
         d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-2", "state" to "bogus"))
         d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-2"))
-        assertEquals("not_delivered", f.activePage.current()?.state)
+        assertEquals("acknowledged", f.activePage.current()?.state)
         for (state in listOf("failed", "missed", "ended")) {
             senderRow("sent-2")
             d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-2", "state" to state))
@@ -647,5 +655,89 @@ class PushDispatcherTest {
             d.dispatch(mapOf("type" to type))
         }
         assertTrue(notices.events.isEmpty())
+    }
+
+    // --- a page to this phone's own user (the setup Test alert) ---
+
+    @Test
+    fun aTestPageToYourselfRingsWithTheReceiverRowAndTheSenderPushesChangeNothing() = runBlocking {
+        val keys = DeviceKeys.load(f.keyStore)
+        val built = PageEnvelopes.build(
+            roster,
+            selfId,
+            keys,
+            USER,
+            UUID.randomUUID().toString(),
+            UUID.randomUUID().toString(),
+            "urgent",
+            ISSUED_AT
+        )
+        val id = built.payload.pageId
+        // What PageSender stored when it sent the page; it holds no session key for a page to its own user.
+        f.activePage.start(id, PageRole.SENDER, built.payload.sessionId, USER, "urgent", "sending")
+        serveDelivered(built)
+        val events = mutableListOf<PageEvent>()
+        val d = dispatcher()
+        val job = launch(Dispatchers.Unconfined) { d.events.toList(events) }
+        d.dispatch(pagePush(built).plus("from_user" to USER))
+        val ringing = listOf("incoming:$id:urgent:alerting=true:elsewhere=false")
+        assertEquals(ringing, notices.events)
+        assertEquals(PageRole.RECEIVER, f.activePage.current()?.role)
+        assertEquals("ringing", f.activePage.current()?.state)
+        assertTrue(service.running)
+        // The sender-side pushes about the same page.
+        for (state in listOf("delivered", "acknowledged", "not_delivered", "missed", "failed", "ended")) {
+            d.dispatch(mapOf("type" to "page_state", "page_id" to id, "state" to state))
+        }
+        d.dispatch(mapOf("type" to "page_answered", "page_id" to id))
+        job.cancel()
+        assertEquals(ringing, notices.events)
+        assertEquals(PageRole.RECEIVER, f.activePage.current()?.role)
+        assertEquals("ringing", f.activePage.current()?.state)
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun aLateStateNeverTakesTheSendersRowBackwards() = runBlocking {
+        senderRow("sent-3")
+        val d = dispatcher()
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-3", "state" to "delivered"))
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-3", "state" to "not_delivered"))
+        assertEquals("delivered", f.activePage.current()?.state)
+        d.dispatch(mapOf("type" to "page_answered", "page_id" to "sent-3"))
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-3", "state" to "delivered"))
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-3", "state" to "acknowledged"))
+        assertEquals("answered", f.activePage.current()?.state)
+        // A repeated `answered` changes nothing either.
+        d.dispatch(mapOf("type" to "page_answered", "page_id" to "sent-3"))
+        assertEquals("answered", f.activePage.current()?.state)
+    }
+
+    @Test
+    fun senderPushesForATestPageStayQuietEvenAfterTheReceiverRowIsGone() = runBlocking {
+        val events = mutableListOf<PageEvent>()
+        val d = dispatcher()
+        val job = launch(Dispatchers.Unconfined) { d.events.toList(events) }
+        // (a) unanswered: the miss deleted the receiver row, then the sender-side `missed` arrives.
+        selfPages.add("self-missed")
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "self-missed", "state" to "missed"))
+        // (b) answered on another phone of this user: `page_cancel` deleted the row, then `page_answered`.
+        selfPages.add("self-answered")
+        d.dispatch(mapOf("type" to "page_answered", "page_id" to "self-answered"))
+        job.cancel()
+        assertTrue(notices.events.toString(), notices.events.isEmpty())
+        assertTrue(events.isEmpty())
+        assertNull(f.activePage.current())
+    }
+
+    @Test
+    fun aPageTheSenderGaveUpOnIsNotRevivedByLatePushes() = runBlocking {
+        f.activePage.start("sent-4", PageRole.SENDER, "s", ADMIN_USER, "normal", "failed")
+        val d = dispatcher()
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-4", "state" to "delivered"))
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-4", "state" to "acknowledged"))
+        d.dispatch(mapOf("type" to "page_answered", "page_id" to "sent-4"))
+        assertEquals("failed", f.activePage.current()?.state)
+        assertTrue(notices.events.toString(), notices.events.isEmpty())
     }
 }

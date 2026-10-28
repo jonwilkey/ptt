@@ -7,7 +7,6 @@ import com.example.ptt.alert.PageNotices
 import com.example.ptt.crypto.DeviceKeyStore
 import com.example.ptt.crypto.DeviceKeys
 import com.example.ptt.crypto.DeviceKeysUnavailable
-import com.example.ptt.crypto.EnvelopePayload
 import com.example.ptt.crypto.PageEnvelopes
 import com.example.ptt.crypto.PagePush
 import com.example.ptt.crypto.ProtocolException
@@ -65,8 +64,10 @@ class PushDispatcher(
     private val sessionKeys: SessionKeys,
     private val rosterScheduler: RosterSyncScheduler,
     private val clock: Clock,
-    private val deliveredTimeoutMs: Long = DELIVERED_TIMEOUT_MS
+    private val deliveredTimeoutMs: Long = DELIVERED_TIMEOUT_MS,
+    private val selfPages: SelfPages = SelfPages()
 ) {
+    private val rules = ActivePageRules(engine, sessionKeys, clock)
     private val eventFlow = MutableSharedFlow<PageEvent>(extraBufferCapacity = EVENT_BUFFER)
     val events: SharedFlow<PageEvent> = eventFlow.asSharedFlow()
 
@@ -183,40 +184,17 @@ class PushDispatcher(
 
     /**
      * The repository holds one row, so a second page cannot always be stored. It is stored when nothing is
-     * active or the row is [isReplaceable]; otherwise the earlier page keeps the row, and the new page still
-     * rings and has its own notification (its session id stays in the engine, see [AlertEngine.pageOf]).
+     * active or the row is replaceable (see [ActivePageRules]); otherwise the earlier page keeps the row, and the
+     * new page still rings and has its own notification (its session id stays in the engine, see [AlertEngine.pageOf]).
      * A failing database is logged, never allowed to stop the alert.
      */
     private suspend fun storeActive(page: IncomingPage, state: String) = guarded("store active page") {
         val current = activePage.current()
         // This page was answered while it was being delivered: the answered row must not go back to ringing.
         val answeredHere = current?.pageId == page.pageId && current.state == STATE_ANSWERED
-        if (!answeredHere && (current == null || isReplaceable(current, page))) {
+        if (!answeredHere && (current == null || rules.isReplaceable(current, page.pageId, page.urgent))) {
             activePage.start(page.pageId, PageRole.RECEIVER, page.sessionId, page.fromUserId, page.level, state)
         }
-    }
-
-    /**
-     * A row is replaceable when its page is over or can no longer be live:
-     * - the same page, or a row in state `ended`, or a sender row in a terminal state (missed, failed, ended);
-     * - an answered row untouched for longer than a session can last (an answered page is deleted by the
-     *   server 15 minutes after the answer);
-     * - a receiver row this process knows nothing of (no ringing entry, no session key): left behind by a
-     *   process death;
-     * - a ringing normal receiver row that an urgent page outranks or that is overdue (a normal page is missed
-     *   after 15 minutes).
-     */
-    private fun isReplaceable(current: ActivePageEntity, incoming: IncomingPage): Boolean {
-        val now = clock.millis()
-        val receiver = current.role == PageRole.RECEIVER
-        val over = current.pageId == incoming.pageId || current.state == STATE_ENDED ||
-            (!receiver && current.state in SENDER_TERMINAL)
-        val staleAnswered = current.state == STATE_ANSWERED && now - current.updatedAt > STALE_ANSWERED_MS
-        val orphan = receiver && !engine.knows(current.pageId) && !sessionKeys.has(current.pageId)
-        val ringingNormal = receiver && current.state != STATE_ANSWERED &&
-            current.level == EnvelopePayload.LEVEL_NORMAL
-        val outranked = ringingNormal && (incoming.urgent || now - current.createdAt > OVERDUE_NORMAL_MS)
-        return over || staleAnswered || orphan || outranked
     }
 
     private suspend fun guarded(what: String, block: suspend () -> Unit) {
@@ -251,37 +229,66 @@ class PushDispatcher(
         guarded("ack state") { activePage.updateState(pageId, STATE_ACKNOWLEDGED) }
     }
 
+    @Suppress("ReturnCount")
     private suspend fun pageAnswered(data: Map<String, String>) {
         val pageId = data[PAGE_ID] ?: return
+        if (isOwnPage(pageId)) return
+        // A page this phone already gave up on (`failed`) is not answered afterwards.
+        if (rowOf(pageId)?.state?.let(ActivePageRules::isSenderTerminal) == true) return
         val name = nameFromActivePage(pageId)
-        guarded("answered state") { activePage.updateState(pageId, STATE_ANSWERED) }
+        advanceSenderState(pageId, STATE_ANSWERED)
         notices.senderAnswered(pageId, name)
         eventFlow.tryEmit(PageEvent.Answered(pageId))
     }
 
+    @Suppress("ReturnCount")
     private suspend fun pageState(data: Map<String, String>) {
         val pageId = data[PAGE_ID] ?: return
         val state = data[STATE]?.takeIf { it in SENDER_STATES } ?: return
+        if (isOwnPage(pageId)) return
         if (state in SENDER_TERMINAL) {
             // The page is over: name it first, then remove the row so it cannot block the next page.
             if (state != STATE_ENDED) notices.senderState(pageId, state, nameFromActivePage(pageId))
             guarded("end active page") { activePage.end(pageId) }
         } else {
-            guarded("page state") { activePage.updateState(pageId, state) }
+            advanceSenderState(pageId, state)
         }
         eventFlow.tryEmit(PageEvent.State(pageId, state))
     }
 
+    /** The sender's row only ever moves forward: `page_state` is normal priority and can arrive late. */
+    private suspend fun advanceSenderState(pageId: String, state: String) = guarded("sender state") {
+        val row = rowOf(pageId)
+        if (row != null && !ActivePageRules.isSenderTerminal(row.state) &&
+            ActivePageRules.senderRank(state) > ActivePageRules.senderRank(row.state)
+        ) {
+            activePage.updateState(pageId, state)
+        }
+    }
+
+    /**
+     * A page this phone sent to its own user (the setup Test alert) is also received here, and the row then
+     * belongs to the receiver (see [storeActive]). The sender-side pushes for it (`page_state`, `page_answered`)
+     * are about the same page seen from the other end: they must neither change the receiver's row nor post a
+     * "<you> answered" notification.
+     */
+    private suspend fun isOwnReceiverPage(pageId: String): Boolean = rowOf(pageId)?.role == PageRole.RECEIVER
+
+    /** Also once the receiver row is gone: [selfPages] remembers what this phone sent to its own user. */
+    private suspend fun isOwnPage(pageId: String): Boolean = selfPages.contains(pageId) || isOwnReceiverPage(pageId)
+
+    private suspend fun rowOf(pageId: String): ActivePageEntity? = try {
+        activePage.current()?.takeIf { it.pageId == pageId }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
+        Log.w(TAG, "active page unreadable: ${e.javaClass.simpleName}")
+        null
+    }
+
     /** The name of the other person on the active page, from the verified roster. */
     private suspend fun nameFromActivePage(pageId: String): String? {
-        val row = try {
-            activePage.current()?.takeIf { it.pageId == pageId }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
-            Log.w(TAG, "active page unreadable: ${e.javaClass.simpleName}")
-            null
-        }
+        val row = rowOf(pageId)
         val roster: Roster? = if (row == null) null else rosterSync.heldRoster()
         return engine.nameOf(pageId) ?: roster?.devices?.firstOrNull { it.userId == row?.peerUserId }?.displayName
     }
@@ -296,12 +303,6 @@ class PushDispatcher(
 
         /** The `delivered` budget; alerting must start within 5 s of the push (spec, Testing). */
         const val DELIVERED_TIMEOUT_MS = 3_000L
-
-        /** A normal page is missed after 15 minutes, so a ringing normal row older than this is stale. */
-        const val OVERDUE_NORMAL_MS = 16 * 60 * 1_000L
-
-        /** An answered page is deleted by the server 15 minutes after the answer; this adds a minute of margin. */
-        const val STALE_ANSWERED_MS = 16 * 60 * 1_000L
         private const val EVENT_BUFFER = 16
         private const val TYPE = "type"
         private const val PAGE_ID = "page_id"

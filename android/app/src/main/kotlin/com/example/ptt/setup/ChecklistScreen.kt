@@ -20,9 +20,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.example.ptt.R
+import com.example.ptt.talk.TestAlertSection
+import com.example.ptt.talk.TestAlertViewModel
 
 private const val GREEN_ARGB = 0xFF1B7F3BL
 private const val RED_ARGB = 0xFFB3261EL
@@ -42,6 +45,9 @@ fun ChecklistScreen(viewModel: SetupViewModel, onBack: () -> Unit) {
         Text(stringResource(R.string.setup_title), style = MaterialTheme.typography.headlineMedium)
         Text(stringResource(R.string.setup_intro))
         state.rows.forEach { row -> ChecklistRowView(row) { open(context, row.item) } }
+        val testAlert: TestAlertViewModel = hiltViewModel()
+        val testState by testAlert.state.collectAsState()
+        TestAlertSection(testState, testAlert::start, testAlert::cancel)
         TextButton(onClick = onBack) { Text(stringResource(R.string.back)) }
     }
 }

@@ -5,15 +5,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ptt.alert.AlertEngine
 import com.example.ptt.alert.PageNotices
+import com.example.ptt.crypto.EnvelopePayload
 import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.OutboxKind
+import com.example.ptt.data.PageRole
 import com.example.ptt.outbox.Outbox
 import com.example.ptt.outbox.OutboxAction
 import com.example.ptt.outbox.OutboxOutcome
 import com.example.ptt.push.PageEvent
 import com.example.ptt.push.SessionKeys
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.Clock
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -33,7 +36,7 @@ enum class TalkPhase {
     /** The page is being looked up; nothing is shown yet. */
     OPENING,
 
-    /** This phone sent the page: still the stub. */
+    /** This phone sent the page: [TalkState.progress] says how far it got. */
     OUTGOING,
 
     /** The urgent full-screen intent: waiting for the Answer button. */
@@ -52,13 +55,51 @@ enum class TalkPhase {
     DONE
 }
 
-/** [caller] is the name from the intent or the alert engine, never from push fields; null if nobody knew it. */
+/** How far a page this phone sent got (spec "Sending a page"), shown on the sender's screen. */
+enum class SendProgress(val terminal: Boolean = false) {
+    SENDING,
+    NOT_DELIVERED,
+    DELIVERED,
+    ACKNOWLEDGED,
+    ANSWERED,
+
+    /** The page timed out unanswered (`missed`). */
+    NO_ANSWER(terminal = true),
+
+    /** The server never rang anyone: it ended at once, refused the page, or the send window ran out. */
+    FAILED(terminal = true);
+
+    /** Whether a screen at [this] moves to [next]: only forward, except that a final state always wins. */
+    fun allows(next: SendProgress) = !terminal && (next.terminal || next.ordinal > ordinal)
+
+    companion object {
+        /** The progress a page state stands for; null for `ended` and for states this build does not know. */
+        fun of(state: String): SendProgress? = when (state) {
+            "sending" -> SENDING
+            "not_delivered" -> NOT_DELIVERED
+            "delivered" -> DELIVERED
+            "acknowledged" -> ACKNOWLEDGED
+            "answered" -> ANSWERED
+            "missed" -> NO_ANSWER
+            "failed" -> FAILED
+            else -> null
+        }
+    }
+}
+
+/**
+ * [caller] is the name from the intent or the alert engine, never from push fields; null if nobody knew it. For a
+ * page this phone sent ([sender]) it is the receiver's name, [progress] the sender's state and [urgent] the level.
+ */
 data class TalkState(
     val pageId: String = "",
     val caller: String? = null,
     val phase: TalkPhase = TalkPhase.OPENING,
     /** End was pressed and is being carried out: the button is disabled. */
-    val ending: Boolean = false
+    val ending: Boolean = false,
+    val sender: Boolean = false,
+    val progress: SendProgress = SendProgress.SENDING,
+    val urgent: Boolean = false
 ) {
     val over: Boolean get() = phase == TalkPhase.ENDED || phase == TalkPhase.ANSWERED_ELSEWHERE
 }
@@ -80,7 +121,8 @@ class TalkViewModel @Inject constructor(
     internal val sessionKeys: SessionKeys,
     private val notices: PageNotices,
     private val pageEvents: @JvmSuppressWildcards SharedFlow<PageEvent>,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val clock: Clock
 ) : ViewModel() {
     private val _state = MutableStateFlow(TalkState())
     val state: StateFlow<TalkState> = _state
@@ -107,7 +149,8 @@ class TalkViewModel @Inject constructor(
         val caller = callerName ?: engine.nameOf(pageId)
         seenRowFor = null
         if (mode == TalkIntents.MODE_OUTGOING) {
-            _state.value = TalkState(pageId, caller, TalkPhase.OUTGOING)
+            _state.value = TalkState(pageId, caller, TalkPhase.OUTGOING, sender = true)
+            scope.launch { openOutgoing(pageId) }
             return
         }
         _state.value = TalkState(pageId, caller, TalkPhase.OPENING)
@@ -119,16 +162,21 @@ class TalkViewModel @Inject constructor(
         scope.launch { answer(pageId) }
     }
 
-    /** End: the answerer's cancel (protocol section 6), then forget the page and close. */
+    /**
+     * End: the cancel (protocol section 6), then forget the page and close. The sender may press it at any time:
+     * a page still waiting in the outbox collapses there without a request (ADR 0007), and one that is already
+     * lost (no answer, failed) needs no cancel, only the clean-up.
+     */
     fun end() {
         val current = _state.value
-        if (current.phase != TalkPhase.ANSWERED || current.ending) return
+        val canEnd = current.phase == TalkPhase.ANSWERED || (current.sender && current.phase == TalkPhase.OUTGOING)
+        if (!canEnd || current.ending) return
         _state.update { it.copy(ending = true) }
         scope.launch {
             val pageId = current.pageId
             // The answer may still be on its way to the outbox and the active-page row.
             answerJobs[pageId]?.join()
-            guarded("end") { outbox.enqueue(OutboxAction.Cancel(pageId)) }
+            if (!current.progress.terminal) guarded("end") { outbox.enqueue(OutboxAction.Cancel(pageId)) }
             engine.end(pageId)
             notices.clear(pageId)
             sessionKeys.clear(pageId)
@@ -150,6 +198,18 @@ class TalkViewModel @Inject constructor(
             row?.state == STATE_ANSWERED || mode == TalkIntents.MODE_ANSWER -> answer(pageId)
 
             else -> moveTo(pageId, TalkPhase.INCOMING)
+        }
+    }
+
+    /** The sender's screen: the row says where the page is; none means it is over (or was never ours). */
+    private suspend fun openOutgoing(pageId: String) {
+        val row = readRow(pageId)
+        if (_state.value.pageId != pageId) return
+        if (row == null) {
+            over(pageId, TalkPhase.ENDED)
+        } else {
+            seenRowFor = pageId
+            senderRow(row)
         }
     }
 
@@ -175,14 +235,26 @@ class TalkViewModel @Inject constructor(
                 outbox.outcomes.filter { it.kind == OutboxKind.ANSWER }.collect { answerOutcome(it.pageId, it.result) }
             }
             launch(start = CoroutineStart.UNDISPATCHED) {
+                outbox.outcomes.filter { it.kind == OutboxKind.PAGE }.collect { pageOutcome(it.pageId, it.result) }
+            }
+            launch(start = CoroutineStart.UNDISPATCHED) {
                 pageEvents.collect {
-                    if (it !is PageEvent.Ended) return@collect
-                    val phase = if (it.reason == REASON_ANSWERED_ELSEWHERE) {
-                        TalkPhase.ANSWERED_ELSEWHERE
-                    } else {
-                        TalkPhase.ENDED
+                    when (it) {
+                        is PageEvent.State -> senderState(it.pageId, it.state)
+
+                        is PageEvent.Answered -> senderProgress(it.pageId, SendProgress.ANSWERED)
+
+                        is PageEvent.Ended -> over(
+                            it.pageId,
+                            if (it.reason ==
+                                REASON_ANSWERED_ELSEWHERE
+                            ) {
+                                TalkPhase.ANSWERED_ELSEWHERE
+                            } else {
+                                TalkPhase.ENDED
+                            }
+                        )
                     }
-                    over(it.pageId, phase)
                 }
             }
             launch(start = CoroutineStart.UNDISPATCHED) { activePage.active.collect(::rowChanged) }
@@ -191,12 +263,96 @@ class TalkViewModel @Inject constructor(
 
     /** The row is the source of truth: once it has been the shown page's, its going away or ending ends the screen. */
     private fun rowChanged(row: ActivePageEntity?) {
+        if (_state.value.sender) {
+            senderRowChanged(row)
+            return
+        }
         val pageId = _state.value.pageId
         val mine = row != null && row.pageId == pageId
         if (mine) seenRowFor = pageId
         val gone = seenRowFor == pageId && !mine
         val ended = row != null && mine && row.state == STATE_ENDED
         if (gone || ended) over(pageId, TalkPhase.ENDED)
+    }
+
+    private fun senderRowChanged(row: ActivePageEntity?) {
+        val pageId = _state.value.pageId
+        val mine = row?.takeIf { it.pageId == pageId }
+        when {
+            // A page to this phone's own user: the receiver row is the ringing phone's, not this screen's.
+            mine != null && mine.role != PageRole.SENDER -> Unit
+
+            mine != null -> {
+                seenRowFor = pageId
+                senderRow(mine)
+            }
+
+            // The dispatcher deletes the row when the page is over; its state event, which may follow, says why.
+            seenRowFor == pageId -> senderOver(pageId)
+        }
+    }
+
+    private fun senderRow(row: ActivePageEntity) {
+        val urgent = row.level == EnvelopePayload.LEVEL_URGENT
+        _state.update { if (it.pageId == row.pageId) it.copy(urgent = urgent) else it }
+        // A page still `sending` past its send window was dropped by an outbox pass that no engine saw (a fresh
+        // WorkManager process): it will never ring.
+        val overdue = row.state == STATE_SENDING && clock.millis() - row.createdAt > Outbox.PAGE_SEND_WINDOW_MS
+        if (overdue) senderProgress(row.pageId, SendProgress.FAILED) else senderState(row.pageId, row.state)
+    }
+
+    private fun senderState(pageId: String, state: String) {
+        val progress = SendProgress.of(state)
+        if (progress == null) {
+            if (state == STATE_ENDED) senderOver(pageId)
+        } else {
+            senderProgress(pageId, progress)
+        }
+    }
+
+    /** The sender's page is over; a final progress already shown (no answer, failed) says more than "ended". */
+    private fun senderOver(pageId: String) {
+        val current = _state.value
+        if (!current.progress.terminal || current.pageId != pageId) over(pageId, TalkPhase.ENDED)
+    }
+
+    /**
+     * The server's word on a page this phone sent: forward only. A final state also corrects a screen that
+     * guessed "ended" from the row going away.
+     */
+    private fun senderProgress(pageId: String, progress: SendProgress, onlyWhileWaiting: Boolean = false) =
+        _state.update {
+            val ours = it.pageId == pageId && it.sender && !it.ending && it.phase != TalkPhase.DONE
+            val waiting = it.phase == TalkPhase.OUTGOING && it.progress <= SendProgress.NOT_DELIVERED
+            when {
+                !ours || (onlyWhileWaiting && !waiting) -> it
+
+                it.phase == TalkPhase.ENDED && progress.terminal -> it.copy(
+                    phase = TalkPhase.OUTGOING,
+                    progress = progress
+                )
+
+                it.phase == TalkPhase.OUTGOING && it.progress.allows(progress) -> it.copy(progress = progress)
+
+                else -> it
+            }
+        }
+
+    /** A page this phone sent that the server will never ring (the `ended` in its 201, a refusal, the send window). */
+    private fun pageOutcome(pageId: String, result: OutboxOutcome.Result) {
+        when (result) {
+            // A late `ended` in the 201 of an idempotent retry (the page already ran) is not a failure.
+            is OutboxOutcome.Result.Sent -> if (result.pageState == STATE_ENDED) {
+                senderProgress(pageId, SendProgress.FAILED, onlyWhileWaiting = true)
+            }
+
+            is OutboxOutcome.Result.Rejected, OutboxOutcome.Result.Expired -> senderProgress(
+                pageId,
+                SendProgress.FAILED
+            )
+
+            OutboxOutcome.Result.CancelledLocally -> Unit
+        }
     }
 
     /** Any final refusal of our answer means the page is over for us; the engine forgets its row and key. */
@@ -241,6 +397,7 @@ class TalkViewModel @Inject constructor(
         const val TAG = "TalkViewModel"
         const val STATE_ANSWERED = "answered"
         const val STATE_ENDED = "ended"
+        const val STATE_SENDING = "sending"
         const val REASON_ANSWERED_ELSEWHERE = "answered_elsewhere"
         const val STATUS_ALREADY_ANSWERED = 409
     }

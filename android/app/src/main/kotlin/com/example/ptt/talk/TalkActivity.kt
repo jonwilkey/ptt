@@ -57,10 +57,10 @@ object TalkIntents {
 }
 
 /**
- * The receiver's placeholder talk screen (live talk arrives in milestone 4). It shows over the lock screen
+ * The placeholder talk screen (live talk arrives in milestone 4). It shows over the lock screen
  * (the manifest and the calls below both ask for it) and holds nothing but this conversation: it has its own
  * task, so Back and End return to the lock screen. What it does for each [TalkIntents] mode is in
- * [TalkViewModel]; the sender's progress ([TalkIntents.MODE_OUTGOING]) is still the stub.
+ * [TalkViewModel].
  */
 @AndroidEntryPoint
 class TalkActivity : ComponentActivity() {
