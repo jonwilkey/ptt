@@ -1,7 +1,8 @@
 /**
- * Minimum versions for build-tool transitives (AGP, Android Lint, Robolectric) that carry known
- * high or critical advisories. A floor only ever RAISES a version: a request that is already at or
- * above its floor is left alone, so a future AGP that needs a newer library is never downgraded.
+ * Minimum versions for build-tool transitives (AGP, Android Lint, Robolectric, KSP/Hilt) that
+ * carry known high or critical advisories. A floor only ever RAISES a version: a request that is
+ * already at or above its floor is left alone, so a future AGP that needs a newer library is never
+ * downgraded.
  * Remove an entry once the tool's own dependency has moved past the fixed version.
  */
 object DependencyFloors {
@@ -16,7 +17,8 @@ object DependencyFloors {
     private val floors = mapOf(
         "org.bitbucket.b_c:jose4j" to "0.9.7",
         "org.jdom:jdom2" to "2.0.6.1",
-        "org.apache.commons:commons-lang3" to "3.21.0"
+        "org.apache.commons:commons-lang3" to "3.21.0",
+        "com.google.guava:guava" to "33.7.2-jre"
     )
 
     /** True for the Bouncy Castle artifacts that must all resolve to one version. */
