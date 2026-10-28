@@ -4,7 +4,7 @@ Production secrets encrypted with sops using age keys (one per admin). Only encr
 ever committed here — **never commit plaintext**. Decrypted working copies (`*.dec.*`,
 `*.plain.*`) are git-ignored.
 
-Planned contents: the FCM service-account key, `fcm-service-account.sops.json`, created by
+Contents: the FCM service-account key, `fcm-service-account.sops.json`, created by
 [docs/runbooks/firebase-setup.md](../../docs/runbooks/firebase-setup.md). Each file is listed in
 `app_secrets` (see `infra/ansible/inventory/group_vars/prod/main.yml`) to be deployed.
 
