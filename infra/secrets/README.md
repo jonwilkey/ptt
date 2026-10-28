@@ -10,7 +10,8 @@ Contents: the FCM service-account key, `fcm-service-account.sops.json`, created 
 
 Encrypt with `sops --encrypt --age <admin1>,<admin2>,<ci> --output <name>.sops.json <plaintext>`:
 the age public key of each admin plus the CI key (docs/runbooks/github-setup.md, "The CI age
-key"), because CI decrypts these files during deploys. Each encrypted file records its
+key"), because CI decrypts these files during deploys (only one admin key for now:
+[ADR 0008](../../docs/adr/0008-sops-secrets-one-admin-recipient.md)). Each encrypted file records its
 recipients' age public keys in its `sops` metadata; public keys are safe to publish. No
 `.sops.yaml` is committed, so always pass `--age` explicitly. Edit later with
 `sops <name>.sops.json`. Name decrypted working copies `*.dec.*` or `*.plain.*` so git ignores

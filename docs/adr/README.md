@@ -31,3 +31,4 @@ ADR that supersedes the old one.
 - [0005 — release-please calls server-release directly instead of relying on the tag push](0005-release-please-calls-server-release.md)
 - [0006 — Trust GitHub's immutable OIDC subject claims](0006-immutable-oidc-subject-claims.md)
 - [0007 — The outbox abandons rows after a send window](0007-outbox-send-window.md)
+- [0008 — sops secrets are encrypted to one admin key until the second admin has one](0008-sops-secrets-one-admin-recipient.md)
