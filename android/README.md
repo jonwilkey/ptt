@@ -166,8 +166,11 @@ Renovate monthly PR, which needs this step pushed to its branch) refresh both:
 ```sh
 cd android
 # Always use an EMPTY Gradle home: with a warm cache Gradle skips artifacts it already has, and
-# the metadata comes out incomplete (CI, which starts cold, then fails).
-GH="$(mktemp -d)"
+# the metadata comes out incomplete (CI, which starts cold, then fails). Each home gets
+# gradle/cold-home.properties as its gradle.properties: it caps memory, which an empty home
+# otherwise doesn't (~/.gradle/gradle.properties no longer applies).
+newgh() { d="$(mktemp -d)"; cp gradle/cold-home.properties "$d/gradle.properties"; echo "$d"; }
+GH="$(newgh)"
 FLAGS="--gradle-user-home $GH --no-daemon --no-configuration-cache --no-build-cache --rerun-tasks"
 TASKS="ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug assembleRelease"
 # 1. Remove stale checksums and locks (write mode must not see them).
@@ -178,15 +181,20 @@ find . -name '*.lockfile' -not -path '*/build/*' -delete
 ./gradlew $FLAGS $TASKS --write-locks
 # buildSrc is a separate build with its own verification file: use ANOTHER empty Gradle home.
 rm buildSrc/gradle/verification-metadata.xml buildSrc/gradle.lockfile
-./gradlew --gradle-user-home "$(mktemp -d)" --no-daemon --no-configuration-cache -p buildSrc test --rerun-tasks --write-locks \
+GH2="$(newgh)"
+./gradlew --gradle-user-home "$GH2" --no-daemon --no-configuration-cache -p buildSrc test --rerun-tasks --write-locks \
   --write-verification-metadata sha256
 # 3. Confirm with a second empty Gradle home, strict, exactly as CI runs it. An empty
 # ANDROID_USER_HOME also forces AGP to generate a debug keystore, as on a CI runner.
-GH="$(mktemp -d)"
+GH3="$(newgh)"
 export ANDROID_USER_HOME="$(mktemp -d)"
-./gradlew --gradle-user-home "$GH" --no-daemon -p buildSrc test
-./gradlew --gradle-user-home "$GH" --no-daemon ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug
+./gradlew --gradle-user-home "$GH3" --no-daemon -p buildSrc test
+./gradlew --gradle-user-home "$GH3" --no-daemon ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug
+# 4. Each Gradle home holds a full download (6-8 GB); delete them.
+rm -rf "$GH" "$GH2" "$GH3" "$ANDROID_USER_HOME"
 ```
+
+Run the steps one after another, never two refreshes (or a refresh and another build) at once.
 
 Review the diff: only the changed dependencies' entries should move. The lock files are
 written from the first resolution of each configuration. AGP resolves the runtime classpaths a
