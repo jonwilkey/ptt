@@ -413,7 +413,7 @@ jobs:
         env:
           PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
           GHCR_TOKEN: ${{ github.token }}
-          # Empty (and unused) while app_secrets is empty. Only this step can see it.
+          # Decrypts the app_secrets files; required. Only this step can see it.
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
           set -euo pipefail
