@@ -94,16 +94,9 @@
     mode: "0600"
   register: app_caddyfile
 
-- name: Write the compose environment file
-  ansible.builtin.template:
-    src: env.j2
-    dest: "{{ app_dir }}/.env"
-    owner: root
-    group: root
-    mode: "0600"
-
 # Decrypted on the controller (needs sops and an age key there), written as the
-# container user so pttd can read the read-only mount.
+# container user so pttd can read the read-only mount. Written before .env so a failed
+# decryption never leaves .env naming a secret file that does not exist.
 - name: Write decrypted secrets
   ansible.builtin.copy:
     content: "{{ lookup('community.sops.sops', app_secrets_src_dir ~ '/' ~ item.src, rstrip=false) }}"
@@ -115,6 +108,14 @@
   no_log: true
   diff: false
   register: app_secret_files
+
+- name: Write the compose environment file
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ app_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
 
 - name: Report that nothing is started yet
   ansible.builtin.debug:
