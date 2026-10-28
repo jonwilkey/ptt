@@ -9,6 +9,8 @@ class DependencyFloorsTest {
         assertEquals("1.86", DependencyFloors.raisedVersion("org.bouncycastle", "bcpkix-jdk18on", "1.9"))
         assertEquals("3.21.0", DependencyFloors.raisedVersion("org.apache.commons", "commons-lang3", "3.12.0"))
         assertEquals("2.0.6.1", DependencyFloors.raisedVersion("org.jdom", "jdom2", "2.0.6"))
+        assertEquals("33.7.2-jre", DependencyFloors.raisedVersion("com.google.guava", "guava", "33.4.0-jre"))
+        assertEquals("33.7.2-jre", DependencyFloors.raisedVersion("com.google.guava", "guava", "33.6.0-jre"))
     }
 
     @Test
@@ -18,6 +20,8 @@ class DependencyFloorsTest {
         assertNull(DependencyFloors.raisedVersion("org.bouncycastle", "bcutil-jdk18on", "2.0"))
         assertNull(DependencyFloors.raisedVersion("org.apache.commons", "commons-lang3", "3.21.1"))
         assertNull(DependencyFloors.raisedVersion("org.bitbucket.b_c", "jose4j", "0.10.0"))
+        assertNull(DependencyFloors.raisedVersion("com.google.guava", "guava", "33.7.2-jre"))
+        assertNull(DependencyFloors.raisedVersion("com.google.guava", "guava", "33.8.0-jre"))
     }
 
     @Test
