@@ -361,6 +361,22 @@ class PushDispatcherTest {
         assertEquals(built.payload.pageId, f.activePage.current()?.pageId)
     }
 
+    @Test
+    fun aRowAnsweredWhileThePageWasBeingDeliveredStaysAnswered() = runBlocking {
+        val built = build()
+        f.activePage.start(
+            built.payload.pageId,
+            PageRole.RECEIVER,
+            built.payload.sessionId,
+            ADMIN_USER,
+            "normal",
+            "answered"
+        )
+        serveDelivered(built)
+        dispatcher().dispatch(pagePush(built))
+        assertEquals("answered", f.activePage.current()?.state)
+    }
+
     // --- the other messages ---
 
     private suspend fun ringingPage(level: String = "normal"): BuiltEnvelope {

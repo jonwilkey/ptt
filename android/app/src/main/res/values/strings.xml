@@ -166,4 +166,11 @@
     <string name="talk_stub_caller">Page from %1$s</string>
     <string name="talk_stub_unknown_caller">Page</string>
     <string name="talk_stub_page_id">Page id: %1$s</string>
+    <string name="talk_urgent_page">Urgent page</string>
+    <string name="talk_answer">Answer</string>
+    <string name="talk_answered">Answered</string>
+    <string name="talk_live_unavailable">Live talk is not available yet.</string>
+    <string name="talk_end">End</string>
+    <string name="talk_page_ended">Page ended</string>
+    <string name="talk_answered_elsewhere">Answered on another phone</string>
 </resources>

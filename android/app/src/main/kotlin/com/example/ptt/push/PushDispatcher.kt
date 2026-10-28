@@ -189,7 +189,9 @@ class PushDispatcher(
      */
     private suspend fun storeActive(page: IncomingPage, state: String) = guarded("store active page") {
         val current = activePage.current()
-        if (current == null || isReplaceable(current, page)) {
+        // This page was answered while it was being delivered: the answered row must not go back to ringing.
+        val answeredHere = current?.pageId == page.pageId && current.state == STATE_ANSWERED
+        if (!answeredHere && (current == null || isReplaceable(current, page))) {
             activePage.start(page.pageId, PageRole.RECEIVER, page.sessionId, page.fromUserId, page.level, state)
         }
     }

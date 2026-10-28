@@ -381,6 +381,55 @@ class AlertEngineTest {
     }
 
     @Test
+    fun answeringAPageThatRangWithoutARowCreatesTheRowFromTheEnginesPage() = runTest {
+        val rig = rig()
+        rig.engine.start(IncomingPage(NORMAL, "normal", PEER, "Mom", "session-9"))
+        rig.engine.answer(NORMAL)
+        val row = rig.repo.current()!!
+        assertEquals(NORMAL, row.pageId)
+        assertEquals(PageRole.RECEIVER, row.role)
+        assertEquals("session-9", row.sessionId)
+        assertEquals(PEER, row.peerUserId)
+        assertEquals("answered", row.state)
+    }
+
+    @Test
+    fun answeringReplacesAnotherPagesRow() = runTest {
+        val rig = rig()
+        rig.repo.start(URGENT, PageRole.RECEIVER, "other", PEER, "urgent", "ringing")
+        rig.engine.start(normal)
+        rig.engine.answer(NORMAL)
+        assertEquals(NORMAL, rig.repo.current()?.pageId)
+        assertEquals("answered", rig.repo.current()?.state)
+    }
+
+    @Test
+    fun answeringTwiceQueuesOneServerCall() = runTest {
+        val rig = rig()
+        rig.activate(normal)
+        rig.engine.answer(NORMAL)
+        rig.engine.answer(NORMAL)
+        assertEquals(listOf(OutboxKind.ANSWER), db.outboxDao().all().map { it.kind })
+    }
+
+    @Test
+    fun anAnsweredRowThatIsNotAReceiverRowDoesNotCountAsAnswered() = runTest {
+        val rig = rig()
+        rig.repo.start(NORMAL, PageRole.SENDER, "s", PEER, "normal", "answered")
+        rig.engine.start(normal)
+        rig.engine.answer(NORMAL)
+        assertEquals(listOf(OutboxKind.ANSWER), db.outboxDao().all().map { it.kind })
+    }
+
+    @Test
+    fun aPageNobodyKnowsIsStillAnsweredAndTheServerDecides() = runTest {
+        val rig = rig()
+        rig.engine.answer(NORMAL)
+        assertEquals(listOf(OutboxKind.ANSWER), db.outboxDao().all().map { it.kind })
+        assertNull(rig.repo.current())
+    }
+
+    @Test
     fun nameOfComesFromTheKnownPage() = runTest {
         val rig = rig()
         rig.engine.start(normal)

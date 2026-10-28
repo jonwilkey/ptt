@@ -7,14 +7,11 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import com.example.ptt.R
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import dagger.hilt.android.AndroidEntryPoint
 
 /**
  * The intent contract of [TalkActivity]. Every notification and full-screen intent that opens the talk
@@ -60,29 +57,45 @@ object TalkIntents {
 }
 
 /**
- * Placeholder for the talk screen, so that notification and full-screen intents resolve. It shows over the
- * lock screen (the manifest and the calls below both ask for it, as the real screen will) and only
- * displays the caller and page id; it takes no action yet.
+ * The receiver's placeholder talk screen (live talk arrives in milestone 4). It shows over the lock screen
+ * (the manifest and the calls below both ask for it) and holds nothing but this conversation: it has its own
+ * task, so Back and End return to the lock screen. What it does for each [TalkIntents] mode is in
+ * [TalkViewModel]; the sender's progress ([TalkIntents.MODE_OUTGOING]) is still the stub.
  */
+@AndroidEntryPoint
 class TalkActivity : ComponentActivity() {
+    internal val viewModel: TalkViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setShowWhenLocked(true)
         setTurnScreenOn(true)
-        val pageId = intent.getStringExtra(TalkIntents.EXTRA_PAGE_ID).orEmpty()
-        val caller = intent.getStringExtra(TalkIntents.EXTRA_CALLER_NAME)
+        open(intent)
         setContent {
             MaterialTheme {
-                Column(Modifier.fillMaxSize().padding(24.dp)) {
-                    Text(callerLine(caller))
-                    Text(getString(R.string.talk_stub_page_id, pageId))
-                }
+                val state by viewModel.state.collectAsState()
+                TalkScreen(state, viewModel::answerPressed, viewModel::end, ::finishAndRemoveTask)
             }
         }
     }
 
-    private fun callerLine(caller: String?): String = when (caller) {
-        null -> getString(R.string.talk_stub_unknown_caller)
-        else -> getString(R.string.talk_stub_caller, caller)
+    public override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        open(intent)
+    }
+
+    /** Recreation and a repeated intent for the same page are no-ops: the view model remembers the page. */
+    private fun open(intent: Intent) {
+        val pageId = intent.getStringExtra(TalkIntents.EXTRA_PAGE_ID)
+        if (pageId == null) {
+            finishAndRemoveTask()
+            return
+        }
+        viewModel.show(
+            pageId,
+            intent.getStringExtra(TalkIntents.EXTRA_MODE).orEmpty(),
+            intent.getStringExtra(TalkIntents.EXTRA_CALLER_NAME)
+        )
     }
 }
