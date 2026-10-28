@@ -190,11 +190,15 @@ GH3="$(newgh)"
 export ANDROID_USER_HOME="$(mktemp -d)"
 ./gradlew --gradle-user-home "$GH3" --no-daemon -p buildSrc test
 ./gradlew --gradle-user-home "$GH3" --no-daemon ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug
-# 4. Each Gradle home holds a full download (6-8 GB); delete them.
+# 4. Each Gradle home holds a full download (6-8 GB); delete them. Each home also started its
+# own Kotlin daemon, which would otherwise idle for up to 10 minutes.
+pkill -f '[K]otlinCompileDaemon' || true
 rm -rf "$GH" "$GH2" "$GH3" "$ANDROID_USER_HOME"
+unset ANDROID_USER_HOME
 ```
 
 Run the steps one after another, never two refreshes (or a refresh and another build) at once.
+If a step fails, still run step 4.
 
 Review the diff: only the changed dependencies' entries should move. The lock files are
 written from the first resolution of each configuration. AGP resolves the runtime classpaths a
