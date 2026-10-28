@@ -71,6 +71,35 @@ class AlertEngine(
             outbox.outcomes.filter { it.kind == OutboxKind.ANSWER && it.result is OutboxOutcome.Result.Rejected }
                 .collect { answerRefused(it.pageId) }
         }
+        // The same for a page this phone sent that the server will never ring: it ended at once (`ended` in the
+        // 201), was refused for good, or ran out of its send window (ADR 0007).
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            outbox.outcomes.filter { it.kind == OutboxKind.PAGE && it.result.pageLost() }
+                .collect { sentPageLost(it.pageId, onlyIfWaiting = it.result is OutboxOutcome.Result.Sent) }
+        }
+    }
+
+    private fun OutboxOutcome.Result.pageLost() = when (this) {
+        is OutboxOutcome.Result.Sent -> pageState == STATE_ENDED
+        is OutboxOutcome.Result.Rejected, OutboxOutcome.Result.Expired -> true
+        OutboxOutcome.Result.CancelledLocally -> false
+    }
+
+    /**
+     * The sender row of a lost page says `failed`, so an open or reopened screen shows it and the next page may
+     * replace the row; its session key goes. A receiver row of the same page (a Test alert to this phone itself)
+     * is the receiver's and stays.
+     */
+    private suspend fun sentPageLost(pageId: String, onlyIfWaiting: Boolean) {
+        guarded("page lost") {
+            // A late `ended` in the 201 of an idempotent retry (the page already ran) is not a failure.
+            val row = activePage.current()?.takeIf { it.pageId == pageId && it.role == PageRole.SENDER }
+            val waiting = row?.state == STATE_SENDING || row?.state == STATE_NOT_DELIVERED
+            if (row != null && (waiting || !onlyIfWaiting)) {
+                sessionKeys.clear(pageId)
+                activePage.updateState(pageId, STATE_FAILED)
+            }
+        }
     }
 
     /**
@@ -391,5 +420,9 @@ class AlertEngine(
         private const val NORMAL = "normal"
         private const val STATE_ACKNOWLEDGED = "acknowledged"
         private const val STATE_ANSWERED = "answered"
+        private const val STATE_ENDED = "ended"
+        private const val STATE_FAILED = "failed"
+        private const val STATE_SENDING = "sending"
+        private const val STATE_NOT_DELIVERED = "not_delivered"
     }
 }

@@ -31,6 +31,7 @@
     <string name="loading">Loading\u2026</string>
 
     <!-- Home entries -->
+    <string name="home_family">Family</string>
     <string name="home_setup">Setup</string>
     <string name="home_setup_attention">Setup, needs attention</string>
     <string name="home_add_device">Settings: Add device</string>
@@ -163,9 +164,15 @@
     <string name="notif_test">Test push</string>
     <string name="notif_service_title">Incoming page</string>
     <string name="notif_roster_sync">Updating the family list</string>
-    <string name="talk_stub_caller">Page from %1$s</string>
-    <string name="talk_stub_unknown_caller">Page</string>
-    <string name="talk_stub_page_id">Page id: %1$s</string>
+    <string name="talk_outgoing">Page to %1$s</string>
+    <string name="talk_outgoing_urgent">Urgent page to %1$s</string>
+    <string name="talk_sending">Sending</string>
+    <string name="talk_delivered">Delivered</string>
+    <string name="talk_acknowledged">Acknowledged</string>
+    <string name="talk_not_delivered">Not delivered yet</string>
+    <string name="talk_no_answer">No answer</string>
+    <string name="talk_failed">Failed</string>
+    <string name="talk_close">Close</string>
     <string name="talk_urgent_page">Urgent page</string>
     <string name="talk_answer">Answer</string>
     <string name="talk_answered">Answered</string>
@@ -173,4 +180,28 @@
     <string name="talk_end">End</string>
     <string name="talk_page_ended">Page ended</string>
     <string name="talk_answered_elsewhere">Answered on another phone</string>
+    <!-- Family and Test alert -->
+    <string name="family_title">Family</string>
+    <string name="family_empty">No one else is in the family yet. Ask an admin to add their phone.</string>
+    <string name="family_not_loaded">The family list is not loaded yet. Try again in a moment.</string>
+    <string name="family_page">Page</string>
+    <string name="family_urgent">Urgent</string>
+    <string name="family_page_to">Page %1$s</string>
+    <string name="family_urgent_to">Urgent page to %1$s</string>
+    <string name="family_confirm_title">End the current page?</string>
+    <string name="family_confirm_text">End the current page with %1$s?</string>
+    <string name="family_confirm_text_unknown">End the current page?</string>
+    <string name="family_confirm_yes">End it and page</string>
+    <string name="family_no_phones">No phones for %1$s.</string>
+    <string name="send_not_ready">This phone is not ready to send yet. Open the app and try again.</string>
+    <string name="send_keys_unavailable">This phone\'s keys cannot be used. Close and reopen the app to set it up again.</string>
+    <string name="send_error">The page could not be sent. Try again.</string>
+    <string name="test_alert_title">Test alert</string>
+    <string name="test_alert_intro">Sends a page to yourself, so you can check that it rings and answers on a locked phone.</string>
+    <string name="test_alert_normal">Test normal page</string>
+    <string name="test_alert_urgent">Test urgent page</string>
+    <string name="test_alert_countdown">Lock your phone now. The page arrives in %1$d s.</string>
+    <string name="test_alert_cancel">Cancel test</string>
+    <string name="test_alert_busy">Another page is active, so the test page was not sent.</string>
+    <string name="test_alert_sent">Test page sent.</string>
 </resources>

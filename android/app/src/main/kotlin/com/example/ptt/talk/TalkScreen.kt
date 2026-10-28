@@ -22,7 +22,10 @@ import kotlinx.coroutines.delay
 /** How long the "page ended" line stays up before the screen closes itself. */
 const val OVER_CLOSE_DELAY_MS = 2_000L
 
-/** The receiver's placeholder talk screen for [state]. [onClose] must finish the whole task. */
+/**
+ * The placeholder talk screen (live talk is milestone 4) for [state], either side of a page. [onClose] must
+ * finish the whole task.
+ */
 @Composable
 fun TalkScreen(state: TalkState, onAnswer: () -> Unit, onEnd: () -> Unit, onClose: () -> Unit) {
     LaunchedEffect(state.phase) {
@@ -37,7 +40,7 @@ fun TalkScreen(state: TalkState, onAnswer: () -> Unit, onEnd: () -> Unit, onClos
         when (state.phase) {
             TalkPhase.OPENING, TalkPhase.DONE -> Unit
 
-            TalkPhase.OUTGOING -> Outgoing(state)
+            TalkPhase.OUTGOING -> Outgoing(state, onEnd)
 
             TalkPhase.INCOMING -> {
                 Text(stringResource(R.string.talk_urgent_page), style = MaterialTheme.typography.titleLarge)
@@ -68,17 +71,29 @@ private fun Caller(state: TalkState) {
     Text(state.caller ?: stringResource(R.string.unknown_caller), style = MaterialTheme.typography.headlineLarge)
 }
 
-/** The sender's progress is a later PR; this is what the stub showed. */
+/** The sender's progress; End is there at any time, and closes the screen once the page is lost anyway. */
 @Composable
-private fun Outgoing(state: TalkState) {
+private fun Outgoing(state: TalkState, onEnd: () -> Unit) {
+    val name = state.caller ?: stringResource(R.string.unknown_caller)
     Text(
-        if (state.caller == null) {
-            stringResource(R.string.talk_stub_unknown_caller)
-        } else {
-            stringResource(R.string.talk_stub_caller, state.caller)
-        }
+        stringResource(if (state.urgent) R.string.talk_outgoing_urgent else R.string.talk_outgoing, name),
+        style = MaterialTheme.typography.headlineLarge
     )
-    Text(stringResource(R.string.talk_stub_page_id, state.pageId))
+    val progress = state.progress
+    Text(stringResource(progress.label()), style = MaterialTheme.typography.titleLarge)
+    if (progress == SendProgress.ANSWERED) Text(stringResource(R.string.talk_live_unavailable))
+    BigButton(if (progress.terminal) R.string.talk_close else R.string.talk_end, onEnd, enabled = !state.ending)
+}
+
+@StringRes
+private fun SendProgress.label(): Int = when (this) {
+    SendProgress.SENDING -> R.string.talk_sending
+    SendProgress.NOT_DELIVERED -> R.string.talk_not_delivered
+    SendProgress.DELIVERED -> R.string.talk_delivered
+    SendProgress.ACKNOWLEDGED -> R.string.talk_acknowledged
+    SendProgress.ANSWERED -> R.string.talk_answered
+    SendProgress.NO_ANSWER -> R.string.talk_no_answer
+    SendProgress.FAILED -> R.string.talk_failed
 }
 
 @Composable

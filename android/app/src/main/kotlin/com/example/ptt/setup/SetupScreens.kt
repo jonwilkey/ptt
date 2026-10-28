@@ -35,6 +35,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.ptt.R
+import com.example.ptt.talk.FamilyHost
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -151,7 +152,7 @@ private fun WaitingScreen(viewModel: SetupViewModel) {
     }
 }
 
-private enum class HomePage { HOME, SETUP, ADD_DEVICE, DEVICES }
+private enum class HomePage { HOME, FAMILY, SETUP, ADD_DEVICE, DEVICES }
 
 /**
  * Home and the screens reachable from it. The current page is saved across recreation (it is only an
@@ -173,6 +174,8 @@ private fun HomeHost(viewModel: SetupViewModel, onSecureScreen: (Boolean) -> Uni
     BackHandler(enabled = page != HomePage.HOME) { page = HomePage.HOME }
     when (page) {
         HomePage.HOME -> HomeScreen(viewModel, info) { page = it }
+
+        HomePage.FAMILY -> FamilyHost { page = HomePage.HOME }
 
         HomePage.SETUP -> ChecklistScreen(viewModel) { page = HomePage.HOME }
 
@@ -196,6 +199,7 @@ private fun HomeScreen(viewModel: SetupViewModel, info: HomeInfo?, open: (HomePa
             it.serverUrl?.let { url -> Text(stringResource(R.string.home_server, url)) }
             it.rosterVersion?.let { v -> Text(stringResource(R.string.home_roster_version, v)) }
         }
+        Button(onClick = { open(HomePage.FAMILY) }) { Text(stringResource(R.string.home_family)) }
         // Material's Badge is the error colour (red); the button text also says it, so colour is not the only signal.
         BadgedBox(badge = { if (checklist.hasFailures) Badge { Text("!") } }) {
             Button(onClick = { open(HomePage.SETUP) }) {

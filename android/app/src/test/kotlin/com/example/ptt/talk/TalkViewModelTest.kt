@@ -14,9 +14,14 @@ import com.example.ptt.data.PageRole
 import com.example.ptt.data.PttDatabase
 import com.example.ptt.data.TestDb
 import com.example.ptt.net.ApiResult
+import com.example.ptt.net.CreatePageRequest
+import com.example.ptt.net.CreatePageResponse
+import com.example.ptt.net.NotEnrolledReason
+import com.example.ptt.net.SignedObjectDto
 import com.example.ptt.outbox.Backoff
 import com.example.ptt.outbox.FakePttApi
 import com.example.ptt.outbox.Outbox
+import com.example.ptt.outbox.OutboxAction
 import com.example.ptt.outbox.VirtualClock
 import com.example.ptt.push.PageEvent
 import com.example.ptt.push.SessionKeys
@@ -27,6 +32,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -87,7 +93,7 @@ class TalkViewModelTest {
             repo,
             keys
         )
-        return Rig(TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope), engine, repo)
+        return Rig(TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock), engine, repo)
     }
 
     /** Reads of the active page wait for [gate] while it is set, to hold a coroutine at a chosen point. */
@@ -129,7 +135,19 @@ class TalkViewModelTest {
         rig.engine.start(urgent)
         rig.vm.show(PAGE, TalkIntents.MODE_ANSWER, null)
         runCurrent()
-        val second = TalkViewModel(rig.engine, rig.repo, rig.vm.outbox, keys, notices, events, backgroundScope)
+        val second =
+            TalkViewModel(
+                rig.engine,
+                rig.repo,
+                rig.vm.outbox,
+                keys,
+                notices,
+                events,
+                backgroundScope,
+                VirtualClock {
+                    currentTime
+                }
+            )
         second.show(PAGE, TalkIntents.MODE_ANSWER, null)
         runCurrent()
         assertEquals(TalkPhase.ANSWERED, second.state.value.phase)
@@ -295,13 +313,198 @@ class TalkViewModelTest {
         assertNull(rig.repo.current())
     }
 
+    // --- the sender's progress ---
+
+    private fun pageRequest() = CreatePageRequest(PAGE, PEER, "normal", "session-1", SignedObjectDto("p", OTHER, "s"))
+
+    /** The state a sender screen starts from: the row [PageSender] stores, with the page row waiting in the outbox. */
+    private suspend fun Rig.sendPage(level: String = "normal") {
+        keys.put(PAGE, ByteArray(32) { 1 })
+        repo.start(PAGE, PageRole.SENDER, "session-1", PEER, level, "sending")
+        vm.outbox.enqueue(OutboxAction.Page(pageRequest()))
+    }
+
     @Test
-    fun theSendersScreenIsStillTheStubAndSendsNothing() = runTest {
+    fun theSendersScreenFollowsTheRowForwardOnly() = runTest {
         val rig = rig()
+        rig.sendPage("urgent")
         rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
         runCurrent()
         assertEquals(TalkPhase.OUTGOING, rig.vm.state.value.phase)
+        assertEquals(SendProgress.SENDING, rig.vm.state.value.progress)
+        assertTrue(rig.vm.state.value.urgent)
+        for ((state, progress) in listOf(
+            "not_delivered" to SendProgress.NOT_DELIVERED,
+            "delivered" to SendProgress.DELIVERED,
+            "acknowledged" to SendProgress.ACKNOWLEDGED,
+            // A late, older state never moves the screen back.
+            "delivered" to SendProgress.ACKNOWLEDGED,
+            "answered" to SendProgress.ANSWERED
+        )) {
+            rig.repo.updateState(PAGE, state)
+            runCurrent()
+            assertEquals(state, progress, rig.vm.state.value.progress)
+        }
+        assertEquals("Mom", rig.vm.state.value.caller)
+    }
+
+    @Test
+    fun pageEventsMoveTheSendersScreenToo() = runTest {
+        val rig = rig()
+        rig.sendPage()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        events.tryEmit(PageEvent.State(PAGE, "delivered"))
+        events.tryEmit(PageEvent.State(OTHER, "acknowledged"))
+        runCurrent()
+        assertEquals(SendProgress.DELIVERED, rig.vm.state.value.progress)
+        events.tryEmit(PageEvent.Answered(PAGE))
+        runCurrent()
+        assertEquals(SendProgress.ANSWERED, rig.vm.state.value.progress)
+    }
+
+    @Test
+    fun noAnswerShowsWhicheverOfTheRowAndTheEventComesFirst() = runTest {
+        for (eventFirst in listOf(true, false)) {
+            val rig = rig()
+            rig.repo.start(PAGE, PageRole.SENDER, "session-1", PEER, "normal", "delivered")
+            rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+            runCurrent()
+            // The dispatcher deletes the row of a missed page, then publishes the event.
+            rig.repo.end(PAGE)
+            if (eventFirst) events.tryEmit(PageEvent.State(PAGE, "missed"))
+            runCurrent()
+            if (!eventFirst) {
+                assertEquals(TalkPhase.ENDED, rig.vm.state.value.phase)
+                events.tryEmit(PageEvent.State(PAGE, "missed"))
+                runCurrent()
+            }
+            assertEquals(TalkPhase.OUTGOING, rig.vm.state.value.phase)
+            assertEquals(SendProgress.NO_ANSWER, rig.vm.state.value.progress)
+            assertFalse(rig.vm.state.value.over)
+        }
+    }
+
+    @Test
+    fun theAnswererEndingShowsPageEnded() = runTest {
+        val rig = rig()
+        rig.repo.start(PAGE, PageRole.SENDER, "session-1", PEER, "normal", "answered")
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        assertEquals(SendProgress.ANSWERED, rig.vm.state.value.progress)
+        rig.repo.end(PAGE)
+        events.tryEmit(PageEvent.State(PAGE, "ended"))
+        runCurrent()
+        assertEquals(TalkPhase.ENDED, rig.vm.state.value.phase)
+    }
+
+    @Test
+    fun aPageTheServerEndedAtOnceFails() = runTest {
+        api.pageResults += ApiResult.Success(CreatePageResponse(PAGE, "ended"))
+        val rig = rig()
+        rig.sendPage()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        assertEquals(SendProgress.FAILED, rig.vm.state.value.progress)
+        assertEquals("failed", rig.repo.current()?.state)
+        assertFalse(keys.has(PAGE))
+    }
+
+    @Test
+    fun aPageTheServerRefusedFails() = runTest {
+        api.pageResults += ApiResult.Final(403, "forbidden")
+        val rig = rig()
+        rig.sendPage()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        assertEquals(SendProgress.FAILED, rig.vm.state.value.progress)
+        assertEquals("failed", rig.repo.current()?.state)
+    }
+
+    @Test
+    fun aPageThatRanOutOfItsSendWindowFailsEvenWithNoScreenOpen() = runTest {
+        api.pageResults += ApiResult.Retryable(503)
+        val rig = rig()
+        rig.sendPage()
+        runCurrent()
+        advanceTimeBy(Outbox.PAGE_SEND_WINDOW_MS + 1_000)
+        runCurrent()
+        assertEquals("failed", rig.repo.current()?.state)
+        assertFalse(keys.has(PAGE))
+        // Reopened later, the screen shows the final state from the row.
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        assertEquals(SendProgress.FAILED, rig.vm.state.value.progress)
+    }
+
+    @Test
+    fun reopeningAPageThatIsOverShowsPageEnded() = runTest {
+        val rig = rig()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        assertEquals(TalkPhase.ENDED, rig.vm.state.value.phase)
         assertEquals(emptyList<OutboxKind>(), outboxKinds())
+    }
+
+    @Test
+    fun endBeforeThePageWasSentCollapsesLocally() = runTest {
+        // The phone is not enrolled (yet): the page row stays in the outbox, never sent (attempts == 0).
+        api.pageResults += ApiResult.NotEnrolled(NotEnrolledReason.NOT_ENROLLED)
+        val rig = rig()
+        rig.sendPage()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        assertEquals(listOf(OutboxKind.PAGE), outboxKinds())
+        rig.vm.end()
+        rig.vm.end()
+        runCurrent()
+        // No cancel went out and the page is gone: nothing will ever ring.
+        assertEquals(listOf("page:$PAGE"), api.calls)
+        assertEquals(emptyList<OutboxKind>(), outboxKinds())
+        assertNull(rig.repo.current())
+        assertFalse(keys.has(PAGE))
+        assertEquals(1, notices.count("clear:$PAGE"))
+        assertEquals(TalkPhase.DONE, rig.vm.state.value.phase)
+    }
+
+    @Test
+    fun endAfterThePageWasSentCancelsItOnTheServerInOrder() = runTest {
+        val rig = rig()
+        rig.sendPage()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        rig.repo.updateState(PAGE, "delivered")
+        rig.vm.end()
+        runCurrent()
+        assertEquals(listOf("page:$PAGE", "cancel:$PAGE"), api.calls)
+        assertNull(rig.repo.current())
+        assertEquals(TalkPhase.DONE, rig.vm.state.value.phase)
+    }
+
+    @Test
+    fun endOnALostPageOnlyCleansUp() = runTest {
+        api.pageResults += ApiResult.Final(403, "forbidden")
+        val rig = rig()
+        rig.sendPage()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        rig.vm.end()
+        runCurrent()
+        assertEquals(listOf("page:$PAGE"), api.calls)
+        assertNull(rig.repo.current())
+        assertEquals(TalkPhase.DONE, rig.vm.state.value.phase)
+    }
+
+    @Test
+    fun aReceiverRowOfTheSamePageDoesNotMoveTheSendersScreen() = runTest {
+        val rig = rig()
+        rig.repo.start(PAGE, PageRole.SENDER, "session-1", PEER, "normal", "sending")
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        rig.repo.start(PAGE, PageRole.RECEIVER, "session-1", PEER, "normal", "answered")
+        runCurrent()
+        assertEquals(SendProgress.SENDING, rig.vm.state.value.progress)
+        assertEquals(TalkPhase.OUTGOING, rig.vm.state.value.phase)
     }
 
     @Test
@@ -366,5 +569,36 @@ class TalkViewModelTest {
         runCurrent()
         assertNull(rig.repo.current())
         assertFalse(keys.has(PAGE))
+    }
+
+    @Test
+    fun aLateEndedInTheCreateResponseDoesNotFailAPageThatAlreadyRan() = runTest {
+        api.pageResults += ApiResult.Success(CreatePageResponse(PAGE, "ended"))
+        val gate = CompletableDeferred<Unit>()
+        api.gate = gate
+        val rig = rig()
+        rig.sendPage()
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        // The page was answered while the request (a retry of one the server already ran) was in flight.
+        rig.repo.updateState(PAGE, "answered")
+        events.tryEmit(PageEvent.Answered(PAGE))
+        runCurrent()
+        assertEquals(SendProgress.ANSWERED, rig.vm.state.value.progress)
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("page:$PAGE"), api.calls)
+        assertEquals(SendProgress.ANSWERED, rig.vm.state.value.progress)
+        assertEquals("answered", rig.repo.current()?.state)
+    }
+
+    @Test
+    fun aSendingRowOlderThanTheSendWindowShowsFailedOnOpen() = runTest {
+        val rig = rig()
+        rig.repo.start(PAGE, PageRole.SENDER, "session-1", PEER, "normal", "sending")
+        advanceTimeBy(Outbox.PAGE_SEND_WINDOW_MS + 1_000)
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        assertEquals(SendProgress.FAILED, rig.vm.state.value.progress)
     }
 }

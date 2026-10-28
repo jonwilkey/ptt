@@ -21,8 +21,10 @@ import com.example.ptt.push.PageEvent
 import com.example.ptt.push.PushDispatcher
 import com.example.ptt.push.RosterSyncScheduler
 import com.example.ptt.push.RosterSyncWorker
+import com.example.ptt.push.SelfPages
 import com.example.ptt.push.SessionKeys
 import com.example.ptt.setup.RosterSync
+import com.example.ptt.talk.PageSender
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -35,7 +37,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
-/** Wires the `push` and `alert` packages. */
+/** Wires the `push`, `alert` and sending (`talk`) packages. */
 @Module
 @InstallIn(SingletonComponent::class)
 @Suppress("LongParameterList")
@@ -43,6 +45,10 @@ object AlertModule {
     @Provides
     @Singleton
     fun sessionKeys() = SessionKeys()
+
+    @Provides
+    @Singleton
+    fun selfPages() = SelfPages()
 
     @Provides
     @Singleton
@@ -103,7 +109,8 @@ object AlertModule {
         activePage: ActivePageRepository,
         sessionKeys: SessionKeys,
         scheduler: RosterSyncScheduler,
-        clock: Clock
+        clock: Clock,
+        selfPages: SelfPages
     ) = PushDispatcher(
         rosterSync,
         tokens,
@@ -114,8 +121,24 @@ object AlertModule {
         activePage,
         sessionKeys,
         scheduler,
-        clock
+        clock,
+        selfPages = selfPages
     )
+
+    @Provides
+    @Singleton
+    fun pageSender(
+        rosterSync: RosterSync,
+        tokens: DeviceTokenStore,
+        keyStore: DeviceKeyStore,
+        outbox: Outbox,
+        activePage: ActivePageRepository,
+        sessionKeys: SessionKeys,
+        engine: AlertEngine,
+        notices: PageNotices,
+        selfPages: SelfPages,
+        clock: Clock
+    ) = PageSender(rosterSync, tokens, keyStore, outbox, activePage, sessionKeys, engine, notices, selfPages, clock)
 
     /** What the talk screen listens to for a page ending. */
     @Provides

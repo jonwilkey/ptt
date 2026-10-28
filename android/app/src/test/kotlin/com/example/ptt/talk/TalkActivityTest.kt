@@ -11,6 +11,7 @@ import androidx.compose.ui.test.performClick
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
+import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.OutboxKind
 import com.example.ptt.data.PageRole
 import com.example.ptt.data.PttDatabase
@@ -188,15 +189,35 @@ class TalkActivityTest {
     }
 
     @Test
-    fun theSendersScreenIsStillTheStub() {
-        launch("page-2", TalkIntents.MODE_OUTGOING, "Mom").use {
-            shows("Page from Mom")
-            shows("Page id: page-2")
-        }
-        launch("page-3", TalkIntents.MODE_OUTGOING, null).use {
-            shows("Page")
+    fun theSendersScreenShowsTheNameTheLevelAndTheProgress() {
+        runBlocking { db.activePageDao().replace(senderRow(PAGE, "urgent", "sending")) }
+        launch(PAGE, TalkIntents.MODE_OUTGOING, "Mom").use { scenario ->
+            lateinit var activity: TalkActivity
+            scenario.onActivity { activity = it }
+            shows("Urgent page to Mom")
+            shows("Sending")
+            shows("End")
+            // Through the app's own repository: a second database connection would not notify its flows.
+            runBlocking { activity.viewModel.activePage.updateState(PAGE, "acknowledged") }
+            shows("Acknowledged")
         }
     }
+
+    @Test
+    fun endOnTheSendersScreenCancelsAndCloses() {
+        runBlocking { db.activePageDao().replace(senderRow(PAGE, "normal", "delivered")) }
+        launch(PAGE, TalkIntents.MODE_OUTGOING, null).use { scenario ->
+            lateinit var activity: TalkActivity
+            scenario.onActivity { activity = it }
+            shows("Page to Someone")
+            compose.onNodeWithText("End").performClick()
+            awaitTrue("the screen to close") { activity.isFinishing }
+            assertNull(runBlocking { db.activePageDao().get() })
+        }
+    }
+
+    private fun senderRow(pageId: String, level: String, state: String, now: Long = System.currentTimeMillis()) =
+        ActivePageEntity(pageId, PageRole.SENDER, "session-1", PEER, level, state, now, now)
 
     @Test
     fun anIntentWithoutAPageIdFinishesTheScreen() {
