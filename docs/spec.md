@@ -265,7 +265,7 @@ Answering works over the lock screen, so anyone holding a locked family phone ca
 **Transport**
 
 - TLS 1.3 only, terminated by Caddy with automatic Let's Encrypt certificates, HSTS on.
-- The app's network security config forbids cleartext and trusts only the ISRG Root X1 and X2 certificates (Let's Encrypt's roots). This blocks interception by other CAs without breaking on routine certificate renewals.
+- The app's network security config forbids cleartext and trusts only the ISRG Root X1 and X2 certificates (Let's Encrypt's roots), except that `firebaseinstallations.googleapis.com` alone also trusts the system CAs (Firebase Installations runs in our process; ADR 0009). This blocks interception by other CAs without breaking on routine certificate renewals.
 
 **Server hardening**
 
@@ -382,7 +382,7 @@ Migrations follow expand-then-contract: add new columns or tables in one release
 
 **App updates**
 
-- The APK is served by our own server (`/v1/app/apk/<version>`, device-token authenticated) because the app's network security config trusts only ISRG Root X1 and X2, so it can only talk to our server (ADR 0003).
+- The APK is served by our own server (`/v1/app/apk/<version>`, device-token authenticated) because the app's network security config trusts only ISRG Root X1 and X2, so it can only talk to our server (ADR 0003) and, for FCM registration, the Firebase Installations host (ADR 0009).
 - A daily WorkManager job checks `/v1/app/latest`. If a newer version exists, it downloads the APK, verifies the SHA-256 and that the signing certificate matches, then installs through `PackageInstaller`.
 - The first update needs the user to tap Install. After the app has installed itself once, Android 12+ can allow later updates without a prompt (`USER_ACTION_NOT_REQUIRED`); the app should request this and fall back to a prompt.
 - `/v1/app/latest` also returns `min_supported_version`. Older apps show a blocking "Update required" screen but still receive and answer pages.

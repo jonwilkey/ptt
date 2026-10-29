@@ -1,11 +1,13 @@
 package com.example.ptt.setup
 
+import android.util.Log
 import com.example.ptt.data.RegistrationValues
 import com.example.ptt.data.SettingsRepository
 import com.example.ptt.net.ApiResult
 import com.example.ptt.net.PttApi
 import com.example.ptt.net.UpdateDeviceRequest
 import java.security.MessageDigest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -32,21 +34,37 @@ class DeviceRegistration(
         val last = settings.lastRegistration()
         val token = knownToken ?: fcm.token()
         val hash = token?.let { hashOf(it) }
-        val currentChecklist = checklist.serverMap()
+        val currentChecklist = currentChecklist()
         val request = UpdateDeviceRequest(
             fcmToken = token.takeIf { it != null && hash != last?.fcmTokenHash },
             appVersion = appVersion.takeIf { it != last?.appVersion },
             deviceName = profile.deviceName.takeIf { it != last?.deviceName },
-            checklist = currentChecklist.takeIf { it != (last?.checklist ?: emptyMap<String, Boolean>()) }
+            checklist = currentChecklist?.takeIf { it != (last?.checklist ?: emptyMap<String, Boolean>()) }
         )
         if (request.isEmpty()) return@withLock true
         val ok = api.updateDevice(request) is ApiResult.Success
         if (ok) {
             settings.setLastRegistration(
-                RegistrationValues(appVersion, profile.deviceName, hash ?: last?.fcmTokenHash, currentChecklist)
+                RegistrationValues(
+                    appVersion,
+                    profile.deviceName,
+                    hash ?: last?.fcmTokenHash,
+                    currentChecklist ?: last?.checklist.orEmpty()
+                )
             )
         }
         ok
+    }
+
+    /** The checklist is best effort: if it cannot be read, nothing is reported and the FCM token still goes out. */
+    @Suppress("TooGenericExceptionCaught")
+    private fun currentChecklist(): Map<String, Boolean>? = try {
+        checklist.serverMap()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w("DeviceRegistration", "checklist unreadable: ${e.javaClass.simpleName}")
+        null
     }
 
     private fun UpdateDeviceRequest.isEmpty() =

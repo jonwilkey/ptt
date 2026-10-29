@@ -155,6 +155,12 @@ ptt.firebase.sender-id=000000000000
 Without them the build still works and the app logs that FCM is unavailable. Where the values
 come from: `docs/runbooks/firebase-setup.md`, step 7.
 
+The network security config trusts only ISRG Root X1/X2, with one exception (ADR 0009): Firebase
+Installations runs in the app's process and talks to `firebaseinstallations.googleapis.com`, which is
+on a Google chain, so that host alone trusts the system CAs. If a phone enrolls but never registers
+an FCM token and logcat shows `Firebase Installations Service is unavailable` or TLS handshake
+errors, a Firebase SDK is calling a host the config does not allow; see the ADR before adding it.
+
 ## Dependency locking and verification
 
 Every configuration is locked (`app/gradle.lockfile`, `buildSrc/gradle.lockfile`,

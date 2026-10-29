@@ -28,9 +28,23 @@ object TinkKeys {
         .setVariant(HpkeParameters.Variant.NO_PREFIX)
         .build()
 
-    init {
+    private val registered: Unit by lazy {
         SignatureConfig.register()
         HybridConfig.register()
+    }
+
+    /**
+     * Registers the Tink key types this app uses. Idempotent, and it must run before any keyset is parsed or
+     * created: a keyset parsed first comes back with [com.google.crypto.tink.internal.LegacyProtoKey] entries
+     * instead of the real key classes. So every path that builds a [KeysetHandle] (the key store's create and
+     * load, `Application.onCreate`) calls this first, instead of relying on when this object happens to initialise.
+     */
+    fun register(): Unit = registered
+
+    // Also on first use of this object, as a backstop; the callers above are what guarantee the order.
+    // The lazy `registered` above must stay declared before this block (initialisers run in order).
+    init {
+        register()
     }
 
     /** Verifies [sig] over [message] with the raw 32-byte public key; false for any failure. */

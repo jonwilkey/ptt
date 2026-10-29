@@ -57,7 +57,11 @@ class AppStartup(
         return if (rosters.current() == null) Route.Waiting else Route.Home
     }
 
-    /** Keystore errors can be transient (boot, an OTA), so each check gets one retry before giving up. */
+    /**
+     * Keystore errors can be transient (boot, an OTA), so each check gets one retry before giving up.
+     * Keep this on `keyStore.load()` only: building [com.example.ptt.crypto.DeviceKeys] here could turn a
+     * programming error (IllegalStateException) into a wipe of the device's identity.
+     */
     private fun credentialsUsable(): Boolean = attempt {
         keyStore.load()
         true

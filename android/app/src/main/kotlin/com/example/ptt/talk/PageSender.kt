@@ -102,6 +102,10 @@ class PageSender(
             DeviceKeys.load(keyStore)
         } catch (_: DeviceKeysUnavailable) {
             return SendResult.KeysUnavailable
+        } catch (e: IllegalStateException) {
+            // A programming error (an unexpected key type), not unavailable keys: nothing is wiped.
+            Log.w(TAG, "send failed: ${e.javaClass.simpleName}")
+            return SendResult.Error
         }
         try {
             // A page to this phone's own user is received here too, and the receiver keeps the key it unwraps (a

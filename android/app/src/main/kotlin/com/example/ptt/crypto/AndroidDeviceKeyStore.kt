@@ -28,6 +28,7 @@ class AndroidDeviceKeyStore(private val context: Context) : DeviceKeyStore {
     private val prefs get() = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
 
     override fun create(): KeysetPair {
+        TinkKeys.register() // before Tink parses or creates any keyset
         check(KEYSETS.none { prefs.contains(it.name) }) { "device keys already exist" }
         try {
             return KeysetPair(
@@ -42,6 +43,7 @@ class AndroidDeviceKeyStore(private val context: Context) : DeviceKeyStore {
     }
 
     override fun load(): KeysetPair {
+        TinkKeys.register() // before Tink parses any stored keyset, or it yields LegacyProtoKey entries
         for (keyset in KEYSETS) {
             if (!prefs.contains(keyset.name)) throw DeviceKeysUnavailable("a device keyset is missing")
         }

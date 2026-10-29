@@ -53,10 +53,12 @@ class DeviceKeys private constructor(pair: KeysetPair) {
     private val decrypter = TinkKeys.decrypter(hpkeKeyset)
 
     /** Raw 32-byte Ed25519 public key. */
-    val ed25519Public: ByteArray = rawPublic(signingKeyset) { (it as Ed25519PublicKey).publicKeyBytes.toByteArray() }
+    val ed25519Public: ByteArray = rawPublic(signingKeyset) {
+        (it as? Ed25519PublicKey)?.publicKeyBytes?.toByteArray()
+    }
 
     /** Raw 32-byte X25519 public key. */
-    val x25519Public: ByteArray = rawPublic(hpkeKeyset) { (it as HpkePublicKey).publicKeyBytes.toByteArray() }
+    val x25519Public: ByteArray = rawPublic(hpkeKeyset) { (it as? HpkePublicKey)?.publicKeyBytes?.toByteArray() }
 
     /** Signs `ctx || 0x00 || payload` and returns the 64-byte signature. */
     fun sign(ctx: String, payload: ByteArray): ByteArray = signer.sign(SignedObject.message(ctx, payload))
@@ -79,10 +81,19 @@ class DeviceKeys private constructor(pair: KeysetPair) {
         return key
     }
 
-    private fun rawPublic(keyset: KeysetHandle, extract: (Any) -> ByteArray): ByteArray {
+    /**
+     * A keyset of an unexpected key type is a programming error (Tink's key types were not registered before the
+     * keyset was parsed), not unavailable keys: [IllegalStateException], never a ClassCastException and never
+     * [DeviceKeysUnavailable], whose handling wipes the device's identity.
+     */
+    private fun rawPublic(keyset: KeysetHandle, extract: (Any) -> ByteArray?): ByteArray {
         val publicKeyset = keyset.publicKeysetHandle
         ensure(publicKeyset.size() == 1) { "a device keyset must hold exactly one key" }
-        val raw = extract(publicKeyset.getAt(0).key)
+        val key = publicKeyset.getAt(0).key
+        val raw = extract(key) ?: error(
+            "device keyset holds an unexpected key type (${key.javaClass.simpleName}); " +
+                "was TinkKeys.register() skipped before it was parsed?"
+        )
         ensure(raw.size == Validation.KEY_BYTES) { "public key is not 32 bytes" }
         return raw
     }
