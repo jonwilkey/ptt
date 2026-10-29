@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/jonwilkey/ptt/compare/android-v0.1.0...android-v0.1.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **android:** trust anchors for Firebase Installations; register Tink before parsing keysets ([#31](https://github.com/jonwilkey/ptt/issues/31)) ([00375f7](https://github.com/jonwilkey/ptt/commit/00375f7e1729e6be0db5053915ebf48a5dd562c9))
+
 ## 0.1.0 (2026-10-28)
 
 
