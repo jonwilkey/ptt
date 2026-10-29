@@ -6,6 +6,7 @@ import com.example.ptt.alert.FakeDevices
 import com.example.ptt.alert.FakeNotices
 import com.example.ptt.alert.FakeServiceControl
 import com.example.ptt.alert.IncomingPage
+import com.example.ptt.alert.LostPages
 import com.example.ptt.data.ActivePageDao
 import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.ActivePageRepository
@@ -93,6 +94,8 @@ class TalkViewModelTest {
             repo,
             keys
         )
+        // The sender row of a lost page says `failed`: the app-wide owner of that, as in PttApplication.
+        LostPages(outbox, repo, keys).start(backgroundScope)
         return Rig(TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock), engine, repo)
     }
 

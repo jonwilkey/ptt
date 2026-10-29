@@ -5,6 +5,7 @@ import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import com.example.ptt.alert.AlertChannels
 import com.example.ptt.alert.AndroidAlarmVolume
+import com.example.ptt.alert.SenderWaiting
 import com.example.ptt.crypto.TinkKeys
 import com.example.ptt.push.FirebaseInitializer
 import dagger.hilt.android.HiltAndroidApp
@@ -16,6 +17,9 @@ class PttApplication :
     Configuration.Provider {
     @Inject
     lateinit var workerFactory: HiltWorkerFactory
+
+    @Inject
+    lateinit var senderWaiting: SenderWaiting
 
     // WorkManager's default initializer is removed in the manifest so workers get Hilt injection.
     override val workManagerConfiguration: Configuration
@@ -29,5 +33,7 @@ class PttApplication :
         // An alarm volume a crash or force-stop left raised for an urgent page goes back now.
         AndroidAlarmVolume(this).restoreLeftover()
         FirebaseInitializer.initialize(this)
+        // The waiting notification of a page this phone sent follows its active-page row, from process start.
+        senderWaiting.start()
     }
 }
