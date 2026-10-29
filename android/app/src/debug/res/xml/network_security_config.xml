@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Debug builds only: same trust anchors as release (see src/main), plus cleartext to the
-     emulator's host loopback and localhost so the app can reach a local pttd. -->
+<!-- Debug builds only: same trust anchors as release (see src/main, including the Firebase Installations
+     exception of ADR 0009), plus cleartext to the emulator's host loopback and localhost so the app can
+     reach a local pttd. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
@@ -8,6 +9,12 @@
             <certificates src="@raw/isrg_root_x2" />
         </trust-anchors>
     </base-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">firebaseinstallations.googleapis.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">10.0.2.2</domain>
         <domain includeSubdomains="false">localhost</domain>

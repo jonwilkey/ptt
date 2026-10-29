@@ -2,6 +2,7 @@ package com.example.ptt.setup
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ptt.BuildConfig
 import com.example.ptt.data.DeviceProfile
 import com.example.ptt.data.RosterRepository
 import com.example.ptt.data.SettingsRepository
@@ -62,8 +63,8 @@ class SetupViewModel @Inject constructor(
     /** Re-checks the setup checklist (every app start and resume) and reports it to the server if it changed. */
     fun refreshChecklist() {
         launchSafely {
-            checklist.refresh()
-            registration.sync()
+            step("checklist") { checklist.refresh() }
+            step("registration") { registration.sync() }
         }
     }
 
@@ -72,11 +73,12 @@ class SetupViewModel @Inject constructor(
         launchSafely {
             _route.value = startup.resolve()
             if (_route.value !is Route.Enroll) {
-                checklist.refresh()
+                // Independent steps: one that fails is logged and must not skip the FCM token upload.
+                step("checklist") { checklist.refresh() }
                 syncNow()
-                registration.sync()
+                step("registration") { registration.sync() }
                 // A removal whose revoke never reached the server (an app restart) is finished now.
-                revoker.retryPending()
+                step("revoke retry") { revoker.retryPending() }
             }
         }
     }
@@ -96,10 +98,30 @@ class SetupViewModel @Inject constructor(
 
     /** Runs [block] so that no exception can crash the app; only the exception class is logged. */
     private fun launchSafely(block: suspend () -> Unit) {
-        val handler = CoroutineExceptionHandler { _, e ->
-            android.util.Log.w("SetupViewModel", "background step failed: ${e.javaClass.simpleName}")
-        }
+        val handler = CoroutineExceptionHandler { _, e -> logFailure("background step", e) }
         viewModelScope.launch(handler) { block() }
+    }
+
+    /** Runs one background step; a failure is logged (naming the step) and the caller carries on. */
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun step(name: String, block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logFailure(name, e)
+        }
+    }
+
+    /** Debug builds log the whole exception; release logs only its class, never a message that may hold data. */
+    private fun logFailure(step: String, e: Throwable) {
+        val message = "$step failed: ${e.javaClass.simpleName}"
+        if (BuildConfig.DEBUG) {
+            android.util.Log.w("SetupViewModel", message, e)
+        } else {
+            android.util.Log.w("SetupViewModel", message)
+        }
     }
 
     fun scanFailed() = _enrollState.update { it.copy(scanFailed = true) }
