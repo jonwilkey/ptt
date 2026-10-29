@@ -91,6 +91,18 @@
             android:exported="false" />
 
         <!--
+            The send entry point (the family widget's Page and Urgent). Not exported, so no other app can start a
+            page; not in Recents; and no showWhenLocked, so it never shows over the lock screen: it unlocks first.
+        -->
+        <activity
+            android:name=".talk.SendActivity"
+            android:theme="@style/Theme.Ptt.Translucent"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:taskAffinity="com.example.ptt.send" />
+
+        <!--
             Placeholder talk screen: shows over the lock screen so notification and full-screen intents work.
             Its own task affinity keeps MainActivity out of that task (Back and End return to the lock screen),
             and it stays out of Recents.

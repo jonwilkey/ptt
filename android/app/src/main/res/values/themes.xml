@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.Ptt" parent="android:Theme.Material.NoActionBar" />
+
+    <!-- The send entry point: no window flash while it sends; its spinner and dialog draw on the screen behind. -->
+    <style name="Theme.Ptt.Translucent" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 </resources>
