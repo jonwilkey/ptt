@@ -78,16 +78,10 @@ class FamilyViewModel @Inject constructor(
         if (!sending.compareAndSet(false, true)) return
         scope.launch {
             try {
-                when (val result = sender.send(person.userId, level, endCurrent)) {
-                    is SendResult.Sent -> eventChannel.send(FamilyEvent.Open(result.pageId, person.name))
-
-                    is SendResult.Busy -> _confirm.value = FamilyConfirm(person, level, result.peerName)
-
-                    SendResult.NoDevices -> eventChannel.send(
-                        FamilyEvent.Message(R.string.family_no_phones, person.name)
-                    )
-
-                    else -> eventChannel.send(FamilyEvent.Message(result.failureMessage()))
+                when (val outcome = sender.attempt(person.userId, person.name, level, endCurrent)) {
+                    is SendOutcome.Open -> eventChannel.send(FamilyEvent.Open(outcome.pageId, person.name))
+                    is SendOutcome.Ask -> _confirm.value = FamilyConfirm(person, level, outcome.peerName)
+                    is SendOutcome.Message -> eventChannel.send(FamilyEvent.Message(outcome.res, outcome.name))
                 }
             } finally {
                 sending.set(false)
