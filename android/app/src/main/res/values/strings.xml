@@ -139,7 +139,7 @@
     <string name="channel_status">Page updates</string>
     <string name="channel_status_description">Cancelled, missed and answered pages, and test messages</string>
     <string name="channel_quiet">Quiet</string>
-    <string name="channel_quiet_description">Pages you acknowledged, which you can still answer</string>
+    <string name="channel_quiet_description">Pages you acknowledged, which you can still answer, and pages you sent while you wait</string>
     <string name="channel_service">Background activity</string>
     <string name="channel_service_description">Shown while a page is ringing or the family list is updating</string>
     <string name="unknown_caller">Someone</string>
@@ -159,6 +159,8 @@
     <string name="notif_answered_text">You answered %1$s\u2019s page.</string>
     <string name="notif_sender_answered">%1$s answered</string>
     <string name="notif_sender_answered_unknown">Your page was answered</string>
+    <string name="notif_waiting_title">Waiting for %1$s</string>
+    <string name="notif_waiting_unknown">Waiting for an answer</string>
     <string name="notif_page_failed">Page to %1$s failed</string>
     <string name="notif_page_no_answer">%1$s did not answer your page</string>
     <string name="notif_test">Test push</string>

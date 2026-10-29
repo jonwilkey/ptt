@@ -12,6 +12,9 @@ import com.example.ptt.alert.AndroidAlertWakeLock
 import com.example.ptt.alert.AndroidRingerState
 import com.example.ptt.alert.PageNotices
 import com.example.ptt.alert.PageNotifier
+import com.example.ptt.alert.SenderWaiting
+import com.example.ptt.alert.WaitingNotices
+import com.example.ptt.alert.WaitingNotifier
 import com.example.ptt.crypto.DeviceKeyStore
 import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.SettingsRepository
@@ -91,6 +94,24 @@ object AlertModule {
         // A quick local read, taken once each time an urgent page starts ringing.
         maxVolumeEnabled = { runBlocking { settings.urgentAlertMaxVolume.first() } }
     )
+
+    @Provides
+    @Singleton
+    fun waitingNotices(@ApplicationContext context: Context): WaitingNotices = WaitingNotifier(context)
+
+    @Provides
+    @Singleton
+    fun senderWaiting(
+        activePage: ActivePageRepository,
+        rosterSync: RosterSync,
+        tokens: DeviceTokenStore,
+        outbox: Outbox,
+        sessionKeys: SessionKeys,
+        waiting: WaitingNotices,
+        notices: PageNotices,
+        clock: Clock,
+        scope: CoroutineScope
+    ) = SenderWaiting(activePage, rosterSync, tokens, outbox, sessionKeys, waiting, notices, clock, scope)
 
     @Provides
     @Singleton
