@@ -3,6 +3,7 @@ package com.example.ptt.talk
 import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import com.example.ptt.R
+import com.example.ptt.data.RosterEntity
 import com.example.ptt.data.RosterRepository
 import com.example.ptt.net.DeviceTokenStore
 import com.example.ptt.setup.RosterView
@@ -21,6 +22,16 @@ import kotlinx.coroutines.launch
 
 /** One person of the family (not one phone) that can be paged. */
 data class FamilyPerson(val userId: String, val name: String)
+
+/**
+ * Everyone in the verified roster except the user of the phone with [deviceId], one entry per person; null when
+ * there is no readable roster. Shared by the Family screen and the home-screen widget.
+ */
+internal fun familyPeople(entity: RosterEntity?, deviceId: String?): List<FamilyPerson>? {
+    val view = entity.toRoster()?.let { RosterView(it, deviceId) } ?: return null
+    val self = view.roster.find(view.selfId.orEmpty())?.userId
+    return view.people.filter { it.userId != self }.map { FamilyPerson(it.userId, it.displayName) }
+}
 
 /** The question asked before a live page is ended for a new one. */
 data class FamilyConfirm(val person: FamilyPerson, val level: String, val currentName: String?)
@@ -45,11 +56,7 @@ class FamilyViewModel @Inject constructor(
     private val scope: CoroutineScope
 ) : ViewModel() {
     /** Null while there is no readable verified roster: that is not an empty family. */
-    val people: Flow<List<FamilyPerson>?> = rosters.roster.map { entity ->
-        val view = entity.toRoster()?.let { RosterView(it, tokens.deviceId()) } ?: return@map null
-        val self = view.roster.find(view.selfId.orEmpty())?.userId
-        view.people.filter { it.userId != self }.map { FamilyPerson(it.userId, it.displayName) }
-    }
+    val people: Flow<List<FamilyPerson>?> = rosters.roster.map { familyPeople(it, tokens.deviceId()) }
 
     private val _confirm = MutableStateFlow<FamilyConfirm?>(null)
     val confirm: StateFlow<FamilyConfirm?> = _confirm

@@ -206,4 +206,18 @@
     <string name="test_alert_cancel">Cancel test</string>
     <string name="test_alert_busy">Another page is active, so the test page was not sent.</string>
     <string name="test_alert_sent">Test page sent.</string>
+    <string name="widget_name">Family PTT</string>
+    <string name="widget_description">Page or urgently page a family member from the home screen.</string>
+    <string name="widget_page">Page</string>
+    <string name="widget_urgent">Urgent</string>
+    <string name="widget_page_cd">Page %1$s</string>
+    <string name="widget_urgent_cd">Urgent page for %1$s</string>
+    <string name="widget_presence_ok">%1$s is reachable</string>
+    <string name="widget_presence_warning">%1$s is online but pages may not ring</string>
+    <string name="widget_presence_offline">%1$s is offline</string>
+    <string name="widget_needs_setup">Open Family PTT to set up</string>
+    <string name="widget_nobody">No one to page yet</string>
+    <string name="widget_checklist_warning">Setup needs attention: tap to fix</string>
+    <string name="widget_preview_row_1">Sam    Page   Urgent</string>
+    <string name="widget_preview_row_2">Alex   Page   Urgent</string>
 </resources>

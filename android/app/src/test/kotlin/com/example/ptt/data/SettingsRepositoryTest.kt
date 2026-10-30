@@ -83,4 +83,16 @@ class SettingsRepositoryTest {
         assertNull(s.profile())
         assertNull(s.lastRegistration())
     }
+
+    @Test(timeout = 60_000)
+    fun checklistRegressionIsStoredAndSurvivesUnenrolling() = runBlocking {
+        val s = repo()
+        assertFalse(s.checklistRegressed.first())
+        s.setChecklistRegressed(true)
+        assertTrue(s.checklistRegressed.first())
+        s.clearEnrollment()
+        assertTrue(s.checklistRegressed.first())
+        s.setChecklistRegressed(false)
+        assertFalse(s.checklistRegressed.first())
+    }
 }
