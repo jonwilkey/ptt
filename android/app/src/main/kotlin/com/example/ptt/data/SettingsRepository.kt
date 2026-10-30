@@ -43,6 +43,12 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
     val normalAlertVibrate: Flow<Boolean> = store.data.map { it[NORMAL_VIBRATE] ?: true }
     val urgentAlertMaxVolume: Flow<Boolean> = store.data.map { it[URGENT_MAX_VOLUME] ?: true }
 
+    /**
+     * True when the last setup-checklist run had a red row; the home-screen widget shows a badge for it. Kept across
+     * [clearEnrollment]: the widget hides the badge while not enrolled, and the updater only rewrites it on a change.
+     */
+    val checklistRegressed: Flow<Boolean> = store.data.map { it[CHECKLIST_REGRESSED] ?: false }
+
     val profileFlow: Flow<DeviceProfile?> = store.data.map { it.toProfile() }
 
     suspend fun profile(): DeviceProfile? = store.data.first().toProfile()
@@ -167,6 +173,10 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
         }
     }
 
+    suspend fun setChecklistRegressed(value: Boolean) {
+        store.edit { it[CHECKLIST_REGRESSED] = value }
+    }
+
     suspend fun setNormalAlertVibrate(value: Boolean) {
         store.edit { it[NORMAL_VIBRATE] = value }
     }
@@ -191,6 +201,7 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
         val PENDING_REVOCATIONS = stringSetPreferencesKey("pending_revocations")
         const val ANCHOR_SEPARATOR = ","
         const val ID_KEY_SEPARATOR = ":"
+        val CHECKLIST_REGRESSED = booleanPreferencesKey("checklist_regressed")
         val NORMAL_VIBRATE = booleanPreferencesKey("alert_normal_vibrate")
         val URGENT_MAX_VOLUME = booleanPreferencesKey("alert_urgent_max_volume")
     }

@@ -33,7 +33,6 @@ import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -96,16 +95,7 @@ class SendEntryTest {
     }
 
     @Test(timeout = TEST_TIMEOUT_MS)
-    fun theBuilderMakesDistinctImmutablePendingIntentsForANonExportedComponent() {
-        val a = SendIntents.pendingIntent(app, ADMIN_USER, "normal", "Pat")
-        val b = SendIntents.pendingIntent(app, ADMIN_USER, "urgent", "Pat")
-        val c = SendIntents.pendingIntent(app, LEE_USER, "normal", "Lee")
-        val again = SendIntents.pendingIntent(app, ADMIN_USER, "normal", "Pat")
-        assertEquals(a, again)
-        assertNotEquals(a, b)
-        assertNotEquals(a, c)
-        assertNotEquals(b, c)
-        assertTrue(shadowOf(a).flags and android.app.PendingIntent.FLAG_IMMUTABLE != 0)
+    fun theSendActivityIsNotExportedAndNeverShownOverTheLockScreen() {
         val info = app.packageManager.getActivityInfo(ComponentName(app, SendActivity::class.java), 0)
         assertFalse(info.exported)
         assertTrue(info.flags and ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS != 0)

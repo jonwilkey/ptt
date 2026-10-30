@@ -8,6 +8,7 @@ import com.example.ptt.alert.AndroidAlarmVolume
 import com.example.ptt.alert.SenderWaiting
 import com.example.ptt.crypto.TinkKeys
 import com.example.ptt.push.FirebaseInitializer
+import com.example.ptt.widget.WidgetUpdater
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 
@@ -20,6 +21,9 @@ class PttApplication :
 
     @Inject
     lateinit var senderWaiting: SenderWaiting
+
+    @Inject
+    lateinit var widgetUpdater: WidgetUpdater
 
     // WorkManager's default initializer is removed in the manifest so workers get Hilt injection.
     override val workManagerConfiguration: Configuration
@@ -35,5 +39,7 @@ class PttApplication :
         FirebaseInitializer.initialize(this)
         // The waiting notification of a page this phone sent follows its active-page row, from process start.
         senderWaiting.start()
+        // The home-screen widget follows the roster, presence and the setup checklist (never incoming pages).
+        widgetUpdater.start()
     }
 }

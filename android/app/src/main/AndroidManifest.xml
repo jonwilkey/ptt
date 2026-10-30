@@ -116,6 +116,22 @@
             android:taskAffinity="com.example.ptt.talk"
             android:turnScreenOn="true" />
 
+        <!--
+            The home-screen widget. Exported because the launcher host sends it APPWIDGET_UPDATE, enabled and
+            deleted broadcasts; it does nothing else with what it receives and holds no secret.
+        -->
+        <receiver
+            android:name=".widget.FamilyWidgetReceiver"
+            android:exported="true"
+            android:label="@string/widget_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/family_widget_info" />
+        </receiver>
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

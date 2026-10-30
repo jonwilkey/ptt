@@ -2,7 +2,6 @@ package com.example.ptt.talk
 
 import android.app.Activity
 import android.app.KeyguardManager
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -20,6 +19,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -27,6 +27,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
@@ -47,7 +48,7 @@ object SendIntents {
     /** Display only (the confirmation and the talk screen); absent if the widget could not name the person. */
     const val EXTRA_NAME = "com.example.ptt.extra.SEND_NAME"
 
-    /** `ptt://send/<user>/<level>`: what makes the PendingIntents of different buttons distinct. */
+    /** `ptt://send/<user>/<level>`: keeps the PendingIntents Glance builds for the widget buttons distinct. */
     fun identity(userId: String, level: String): Uri =
         Uri.Builder().scheme("ptt").authority("send").appendPath(userId).appendPath(level).build()
 
@@ -58,15 +59,6 @@ object SendIntents {
             .putExtra(EXTRA_USER_ID, userId)
             .putExtra(EXTRA_LEVEL, level)
             .apply { if (name != null) putExtra(EXTRA_NAME, name) }
-
-    /** Immutable and unique per ([userId], [level]); the widget's Page and Urgent buttons use this. */
-    fun pendingIntent(context: Context, userId: String, level: String, name: String? = null): PendingIntent =
-        PendingIntent.getActivity(
-            context,
-            0,
-            intent(context, userId, level, name),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
 
     @Suppress("ReturnCount")
     internal fun request(intent: Intent): SendRequest? {
@@ -190,6 +182,35 @@ class SendActivity : ComponentActivity() {
 /** What the send entry point shows: nothing but a spinner, the End question, or the reason nothing was sent. */
 @Composable
 fun SendScreen(ui: SendUi, onConfirm: () -> Unit, onClose: () -> Unit) {
+    // The window is translucent (the home screen shows through): the content gets a mostly opaque backdrop.
+    // The End question is a dialog with its own surface and needs none.
+    Surface(
+        Modifier.fillMaxSize(),
+        color = if (ui is SendUi.Confirm) Color.Transparent else MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+    ) {
+        SendBody(ui, onClose)
+    }
+    if (ui is SendUi.Confirm) {
+        AlertDialog(
+            onDismissRequest = onClose,
+            title = { Text(stringResource(R.string.family_confirm_title)) },
+            text = {
+                Text(
+                    if (ui.peerName != null) {
+                        stringResource(R.string.family_confirm_text, ui.peerName)
+                    } else {
+                        stringResource(R.string.family_confirm_text_unknown)
+                    }
+                )
+            },
+            confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.family_confirm_yes)) } },
+            dismissButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.devices_cancel)) } }
+        )
+    }
+}
+
+@Composable
+private fun SendBody(ui: SendUi, onClose: () -> Unit) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
@@ -215,22 +236,5 @@ fun SendScreen(ui: SendUi, onConfirm: () -> Unit, onClose: () -> Unit) {
                 }
             }
         }
-    }
-    if (ui is SendUi.Confirm) {
-        AlertDialog(
-            onDismissRequest = onClose,
-            title = { Text(stringResource(R.string.family_confirm_title)) },
-            text = {
-                Text(
-                    if (ui.peerName != null) {
-                        stringResource(R.string.family_confirm_text, ui.peerName)
-                    } else {
-                        stringResource(R.string.family_confirm_text_unknown)
-                    }
-                )
-            },
-            confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.family_confirm_yes)) } },
-            dismissButton = { TextButton(onClick = onClose) { Text(stringResource(R.string.devices_cancel)) } }
-        )
     }
 }
