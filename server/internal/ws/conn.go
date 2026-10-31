@@ -101,7 +101,7 @@ func newConn(h *Hub, sock *websocket.Conn) *conn {
 // socket is closed 4408 instead (a peer that is not reading, protocol section 11.7).
 func (c *conn) send(v any) { c.enqueue(out{data: encode(v)}) }
 
-// sendFrame queues a relayed audio frame byte for byte (task 14c). It reports false, and drops
+// sendFrame queues a relayed audio frame byte for byte. It reports false, and drops
 // the frame, when maxQueuedFrames frames are already waiting.
 func (c *conn) sendFrame(frame []byte) bool {
 	return c.enqueue(out{data: frame, binary: true, frame: true})

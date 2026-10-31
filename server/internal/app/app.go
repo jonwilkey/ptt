@@ -184,6 +184,7 @@ func (a *App) registry() *prometheus.Registry {
 	reg := metrics.New(a.version, a.activeSessions)
 	a.pageMet.Register(reg)
 	metrics.RegisterWS(reg, a.hub.Sockets)
+	metrics.RegisterFrames(reg, a.hub.FrameCounts)
 	return reg
 }
 

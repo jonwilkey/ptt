@@ -39,12 +39,19 @@ type session struct {
 	// timer and releases the 15-minute answered-page cap.
 	everBoth bool
 	idle     timer
+	// idleGen numbers the idle timer's armings: a firing carries the number it was armed with
+	// and is stale if the timer was re-armed since. ending is set while EndIdle is in flight.
+	// See idleFired.
+	idleGen uint64
+	ending  bool
+	floor   floorState
 }
 
 func newSession(h *Hub, p sqlcdb.ActivePage) *session {
 	return &session{
 		h: h, pageID: p.ID, sessionID: p.SessionID, sender: p.FromDevice,
 		members: map[string]*conn{}, idle: timer{clk: h.clk},
+		floor: floorState{silence: timer{clk: h.clk}, maxLen: timer{clk: h.clk}},
 	}
 }
 
@@ -65,40 +72,62 @@ func (s *session) bothJoined() bool {
 	return a != nil && b != nil && a != b && a.joined && b.joined
 }
 
-func (s *session) stopTimers() { s.idle.stop() }
+func (s *session) stopTimers() {
+	s.idle.stop()
+	s.floor.stop()
+}
 
 // resetIdleLocked restarts the 2-minute idle timer if it is running. Task 14c calls it, with
 // the hub lock held, on every floor_granted and floor_released; pings, frames and joins do not
 // reset it (protocol section 11.5).
 func (s *session) resetIdleLocked() {
-	if s.everBoth {
-		s.idle.reset(idleTimeout, func() { s.h.idleFired(s) })
+	if s.everBoth && !s.ending {
+		s.armIdleTimerLocked(idleTimeout)
 	}
+}
+
+func (s *session) armIdleTimerLocked(d time.Duration) {
+	if s.h.closed {
+		return // shutting down: sockets going away must not arm timers behind Shutdown
+	}
+	s.idleGen++
+	gen := s.idleGen
+	s.idle.reset(d, func() { s.h.idleFired(s, gen) })
 }
 
 // armIdleLocked arms the idle timer when both participants are joined for the first time.
 func (s *session) armIdleLocked() {
 	if !s.everBoth && s.bothJoined() {
 		s.everBoth = true
-		s.idle.reset(idleTimeout, func() { s.h.idleFired(s) })
+		s.armIdleTimerLocked(idleTimeout)
 	}
 }
 
 // idleFired ends the session after 2 minutes without floor activity.
-func (h *Hub) idleFired(s *session) {
+//
+// A grant or release can race the firing in two places, and both must win over the end:
+// between the timer firing and this function taking the lock (the timer's cancellation is not
+// atomic with the firing), which gen detects because the activity re-armed the timer; and while
+// EndIdle is in flight in the database, which the ending flag covers: it is set under the same
+// hold of the lock that validated gen, and floor_request answers no_peer while it is set. So
+// every floor_granted that was sent happened before the decision to end, and none is lost with
+// the session. (A generation alone cannot cover the second window; a flag alone, the first.)
+func (h *Hub) idleFired(s *session, gen uint64) {
 	h.mu.Lock()
-	current := h.rooms[s.pageID] == s
-	h.mu.Unlock()
-	if !current || h.ender == nil {
+	if h.rooms[s.pageID] != s || s.idleGen != gen || s.ending || h.ender == nil {
+		h.mu.Unlock()
 		return
 	}
+	s.ending = true
+	h.mu.Unlock()
 	if err := h.ender.EndIdle(h.ctx, s.pageID); err != nil {
 		if h.ctx.Err() == nil {
 			h.logger.LogAttrs(h.ctx, slog.LevelError, "end idle session", slog.String("error", err.Error()))
 			// Try again soon: the session is held, so nothing else would ever end this page.
 			h.mu.Lock()
 			if h.rooms[s.pageID] == s && !h.closed {
-				s.idle.reset(idleRetry, func() { h.idleFired(s) })
+				s.ending = false
+				s.armIdleTimerLocked(idleRetry)
 			}
 			h.mu.Unlock()
 		}
@@ -231,7 +260,7 @@ func (c *conn) onJoin(sessionID string) {
 		peer.send(peerMsg{Type: "peer_joined", DeviceID: c.deviceID})
 	}
 	s.armIdleLocked()
-	s.floorSnapshotLocked(c) // task 14c: floor_granted while the floor is held
+	s.floorSnapshotLocked(c) // floor_granted while the floor is held
 }
 
 // roleIn is the device's part in the active page: the sender at any time, the answering device
@@ -300,7 +329,7 @@ func (h *Hub) detachLocked(c *conn) {
 	}
 	wasJoined := c.joined
 	if wasJoined {
-		s.floorDetachLocked(c) // task 14c: release the floor if c held it
+		s.floorDetachLocked(c) // release the floor if c held it
 	}
 	h.leaveLocked(c, s)
 	if wasJoined {

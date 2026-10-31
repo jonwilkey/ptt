@@ -9,11 +9,11 @@
 // pages.Notifier (page transitions into the hub, implemented by *Hub) and Ender (session ends
 // out of the hub, implemented by *pages.Service), so the two packages do not import each other.
 //
-// Floor control and frame relay (milestone 4, task 14c) plug in at the marked hooks in
-// floor.go; this package only authenticates, joins, queues and ends.
+// Floor control and frame relay (protocol sections 11.6 and 11.7) live in floor.go; this
+// file authenticates, joins, queues and ends.
 //
 // Privacy (protocol section 1): nothing here logs, labels a metric with, or audits a page id,
-// session id or device id. The metrics are two unlabelled gauges.
+// session id or device id. The metrics are unlabelled gauges and frame counters.
 package ws
 
 import (
@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -149,6 +150,9 @@ type Hub struct {
 	socks  map[string]*conn    // device id -> its authenticated socket
 	rooms  map[string]*session // page id -> session
 	unauth int                 // sockets that have not completed hello yet
+
+	// relayed and dropped count audio frames from talkers: aggregate only, never labelled.
+	relayed, dropped atomic.Uint64
 }
 
 // New returns a Hub. Call Start to run the revocation sweep and Shutdown at exit.
