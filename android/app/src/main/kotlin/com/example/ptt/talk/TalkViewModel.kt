@@ -5,11 +5,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ptt.alert.AlertEngine
 import com.example.ptt.alert.PageNotices
+import com.example.ptt.audio.CaptureStatus
 import com.example.ptt.crypto.EnvelopePayload
 import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.OutboxKind
 import com.example.ptt.data.PageRole
+import com.example.ptt.net.SessionEndReason
 import com.example.ptt.outbox.Outbox
 import com.example.ptt.outbox.OutboxAction
 import com.example.ptt.outbox.OutboxOutcome
@@ -22,12 +24,19 @@ import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
@@ -101,7 +110,9 @@ data class TalkState(
     val progress: SendProgress = SendProgress.SENDING,
     val urgent: Boolean = false,
     /** RECORD_AUDIO is not granted, so live talk cannot start: the setup checklist has the item. */
-    val microphoneMissing: Boolean = false
+    val microphoneMissing: Boolean = false,
+    /** Why the live session ended (from the WebSocket `session_end`), for the line shown while the screen closes. */
+    val endReason: SessionEndReason? = null
 ) {
     /** Whether this screen's page should have the live-talk service running (a sender waiting, or an answered page). */
     val wantsLiveTalk: Boolean
@@ -119,7 +130,8 @@ data class TalkState(
  * activity, tapping the notification again, or the Answer button after a notification tap enqueue one
  * `answer` between them.
  */
-@Suppress("LongParameterList", "TooManyFunctions")
+@OptIn(ExperimentalCoroutinesApi::class)
+@Suppress("LongParameterList", "TooManyFunctions", "LargeClass")
 @HiltViewModel
 class TalkViewModel @Inject constructor(
     internal val engine: AlertEngine,
@@ -130,10 +142,34 @@ class TalkViewModel @Inject constructor(
     private val pageEvents: @JvmSuppressWildcards SharedFlow<PageEvent>,
     private val scope: CoroutineScope,
     private val clock: Clock,
-    private val talk: TalkSessions
+    private val talk: TalkSessions,
+    private val audio: TalkAudioSource
 ) : ViewModel() {
     private val _state = MutableStateFlow(TalkState())
     val state: StateFlow<TalkState> = _state
+
+    private val holdToTalk = HoldToTalk(audio)
+
+    /**
+     * The live-talk part of the screen. Eagerly shared so that the talk-disabled release below runs whether or
+     * not the UI is composed.
+     */
+    val live: StateFlow<TalkLive> = combine(
+        _state,
+        talk.state,
+        _state.map { it.pageId }.distinctUntilChanged().flatMapLatest { audio.captureStatus(it) }
+    ) { screen, session, capture ->
+        deriveLive(
+            screen,
+            if (ours(session)) session else TalkSessionState(),
+            eligible(screen),
+            capture
+        )
+    }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, TalkLive())
+
+    /** The one-shot events, for the chirps and the busy buzz (the next PR). Durable UI never reads these. */
+    val talkEvents: SharedFlow<TalkEvent> get() = talk.events
 
     private val answered: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
@@ -156,6 +192,7 @@ class TalkViewModel @Inject constructor(
         }
         val caller = callerName ?: engine.nameOf(pageId)
         seenRowFor = null
+        holdToTalk.release()
         if (mode == TalkIntents.MODE_OUTGOING) {
             _state.value = TalkState(pageId, caller, TalkPhase.OUTGOING, sender = true)
             scope.launch { openOutgoing(pageId) }
@@ -165,8 +202,26 @@ class TalkViewModel @Inject constructor(
         scope.launch { open(pageId, mode) }
     }
 
+    /**
+     * The hold-to-talk button went down. Does nothing (and never touches the microphone) unless talk is enabled for
+     * the shown page. True if a floor request was made; false is "no request", not an error.
+     */
+    fun pressTalk(): Boolean {
+        val shown = _state.value.pageId
+        return holdToTalk.press(shown, live.value.talkEnabled)
+    }
+
+    /** The button went up or was cancelled, the window lost focus, or the screen stopped. Idempotent. */
+    fun releaseTalk() = holdToTalk.release()
+
+    override fun onCleared() {
+        holdToTalk.release()
+    }
+
     /** Whether live talk may run for the shown page (never for a Test alert to this phone itself). */
     fun liveTalkEligible(): Boolean = talk.eligible(_state.value.pageId)
+
+    private fun eligible(screen: TalkState) = screen.pageId.isNotEmpty() && talk.eligible(screen.pageId)
 
     fun microphoneMissing(missing: Boolean) = _state.update { it.copy(microphoneMissing = missing) }
 
@@ -184,6 +239,7 @@ class TalkViewModel @Inject constructor(
         val current = _state.value
         val canEnd = current.phase == TalkPhase.ANSWERED || (current.sender && current.phase == TalkPhase.OUTGOING)
         if (!canEnd || current.ending) return
+        holdToTalk.release()
         _state.update { it.copy(ending = true) }
         scope.launch {
             val pageId = current.pageId
@@ -275,7 +331,31 @@ class TalkViewModel @Inject constructor(
                 }
             }
             launch(start = CoroutineStart.UNDISPATCHED) { activePage.active.collect(::rowChanged) }
+            launch(start = CoroutineStart.UNDISPATCHED) { talk.events.collect(::sessionEvent) }
+            launch(start = CoroutineStart.UNDISPATCHED) {
+                live.map { it.talkEnabled }.distinctUntilChanged().collect { if (!it) holdToTalk.release() }
+            }
         }
+    }
+
+    /** True if [session] is the live session of the shown page (the controller's state can be stale for another). */
+    private fun ours(session: TalkSessionState) = session.pageId != null && session.pageId == _state.value.pageId
+
+    private fun sessionEvent(event: TalkEvent) {
+        if (event is TalkEvent.SessionEnded && ours(talk.state.value)) sessionEnded(event.reason)
+    }
+
+    /**
+     * The live session ended. Our own End is handled by [end]; a peer's end or the idle timeout normally also
+     * arrives as the page ending, but make sure the screen cannot hang open if that is late. A sender's
+     * `missed`/`failed` is shown as its progress instead.
+     */
+    private fun sessionEnded(reason: SessionEndReason) {
+        val pageId = _state.value.pageId
+        if (reason == SessionEndReason.ENDED_BY_YOU) return
+        val keepsProgress = reason == SessionEndReason.MISSED || reason == SessionEndReason.FAILED
+        _state.update { if (it.pageId == pageId && !it.ending) it.copy(endReason = reason) else it }
+        if (!keepsProgress) over(pageId, TalkPhase.ENDED)
     }
 
     /** The row is the source of truth: once it has been the shown page's, its going away or ending ends the screen. */

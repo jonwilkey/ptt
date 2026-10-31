@@ -1,5 +1,6 @@
 package com.example.ptt.talk
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
 import android.os.Looper
@@ -8,14 +9,36 @@ import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
+import com.example.ptt.alert.AlertEngine
+import com.example.ptt.alert.FakeDevices
+import com.example.ptt.alert.FakeNotices
+import com.example.ptt.alert.FakeServiceControl
 import com.example.ptt.data.ActivePageEntity
+import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.OutboxKind
 import com.example.ptt.data.PageRole
 import com.example.ptt.data.PttDatabase
+import com.example.ptt.data.TestDb
+import com.example.ptt.outbox.Backoff
+import com.example.ptt.outbox.FakePttApi
+import com.example.ptt.outbox.Outbox
+import com.example.ptt.push.PageEvent
+import com.example.ptt.push.SessionKeys
+import java.time.Clock
+import kotlin.random.Random
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -44,7 +67,48 @@ class TalkActivityTest {
 
     @After
     fun tearDown() {
+        TalkActivity.viewModelFactory = null
+        fakeScope.cancel()
+        fakeDb?.close()
         db.close()
+    }
+
+    private val fakeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var fakeDb: PttDatabase? = null
+
+    /**
+     * The sender's screen of an answered page whose live session is up, with a view model built on fakes: [audio]
+     * records what reaches the microphone's hold.
+     */
+    private fun liveSendersScreen(audio: FakeAudioSource): ActivityScenario<TalkActivity> {
+        shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO)
+        val local = TestDb.inMemory(app).also { fakeDb = it }
+        val clock = Clock.systemUTC()
+        val repo = ActivePageRepository(local.activePageDao(), clock)
+        val keys = SessionKeys()
+        val notices = FakeNotices()
+        val outbox = Outbox(local.outboxDao(), FakePttApi(), Json, clock, { }, fakeScope, Backoff(Random(1)))
+        val engine = AlertEngine(fakeScope, FakeDevices().devices, notices, FakeServiceControl(), outbox, repo, keys)
+        val talk = FakeTalk()
+        talk.state.value = TalkSessionState(
+            pageId = PAGE,
+            stage = SessionStage.CONVERSATION,
+            connection = TalkConnection.LIVE,
+            peerPresent = true
+        )
+        val events = MutableSharedFlow<PageEvent>()
+        runBlocking { repo.start(PAGE, PageRole.SENDER, "session-1", PEER, "normal", "answered") }
+        TalkActivity.viewModelFactory = viewModelFactory {
+            initializer { TalkViewModel(engine, repo, outbox, keys, notices, events, fakeScope, clock, talk, audio) }
+        }
+        return launch(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+    }
+
+    private fun ActivityScenario<TalkActivity>.holdTalk() {
+        lateinit var vm: TalkViewModel
+        onActivity { vm = it.viewModel }
+        awaitTrue("talk to be enabled") { vm.live.value.talkEnabled }
+        onActivity { assertTrue(it.viewModel.pressTalk()) }
     }
 
     private fun launch(pageId: String, mode: String, caller: String?) =
@@ -106,7 +170,7 @@ class TalkActivityTest {
         launch(PAGE, TalkIntents.MODE_ANSWER, "Mom").use { scenario ->
             shows("Answered")
             shows("Mom")
-            shows("Live talk is not available yet.")
+            shows("Hold to talk")
             shows("End")
             awaitTrue("the answer") { answers(PAGE) == 1 }
             // Recreating the activity (rotation) keeps the view model, so nothing is sent again.
@@ -220,9 +284,29 @@ class TalkActivityTest {
         ActivePageEntity(pageId, PageRole.SENDER, "session-1", PEER, level, state, now, now)
 
     @Test
+    fun aHoldIsReleasedWhenTheScreenStops() {
+        val audio = FakeAudioSource(PAGE)
+        liveSendersScreen(audio).use { scenario ->
+            scenario.holdTalk()
+            scenario.moveToState(Lifecycle.State.CREATED)
+            assertEquals(listOf("press", "release"), audio.calls)
+        }
+    }
+
+    @Test
+    fun aHoldIsReleasedWhenTheWindowLosesFocus() {
+        val audio = FakeAudioSource(PAGE)
+        liveSendersScreen(audio).use { scenario ->
+            scenario.holdTalk()
+            scenario.onActivity { it.onWindowFocusChanged(false) }
+            assertEquals(listOf("press", "release"), audio.calls)
+        }
+    }
+
+    @Test
     fun anIntentWithoutAPageIdFinishesTheScreen() {
         ActivityScenario.launch<TalkActivity>(Intent(app, TalkActivity::class.java)).use { scenario ->
-            assertTrue(scenario.state == androidx.lifecycle.Lifecycle.State.DESTROYED)
+            assertTrue(scenario.state == Lifecycle.State.DESTROYED)
         }
     }
 }

@@ -7,6 +7,7 @@ import com.example.ptt.alert.FakeNotices
 import com.example.ptt.alert.FakeServiceControl
 import com.example.ptt.alert.IncomingPage
 import com.example.ptt.alert.LostPages
+import com.example.ptt.audio.CaptureStatus
 import com.example.ptt.data.ActivePageDao
 import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.ActivePageRepository
@@ -18,6 +19,7 @@ import com.example.ptt.net.ApiResult
 import com.example.ptt.net.CreatePageRequest
 import com.example.ptt.net.CreatePageResponse
 import com.example.ptt.net.NotEnrolledReason
+import com.example.ptt.net.SessionEndReason
 import com.example.ptt.net.SignedObjectDto
 import com.example.ptt.outbox.Backoff
 import com.example.ptt.outbox.FakePttApi
@@ -30,7 +32,11 @@ import kotlin.random.Random
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -56,6 +62,7 @@ private const val PEER = "33333333-3333-4333-8333-333333333333"
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
+@Suppress("LargeClass")
 class TalkViewModelTest {
     private lateinit var db: PttDatabase
     private val notices = FakeNotices()
@@ -80,7 +87,11 @@ class TalkViewModelTest {
 
     private class Rig(val vm: TalkViewModel, val engine: AlertEngine, val repo: ActivePageRepository)
 
-    private fun TestScope.rig(dao: ActivePageDao = db.activePageDao(), talk: TalkSessions = NoTalk): Rig {
+    private fun TestScope.rig(
+        dao: ActivePageDao = db.activePageDao(),
+        talk: TalkSessions = NoTalk,
+        audio: TalkAudioSource = FakeAudioSource()
+    ): Rig {
         val clock = VirtualClock { currentTime }
         // The outbox's send loop only runs when a test calls runCurrent, so queued rows stay put until then.
         val outbox = Outbox(db.outboxDao(), api, Json, clock, { }, backgroundScope, Backoff(Random(1)))
@@ -97,7 +108,7 @@ class TalkViewModelTest {
         // The sender row of a lost page says `failed`: the app-wide owner of that, as in PttApplication.
         LostPages(outbox, repo, keys).start(backgroundScope)
         return Rig(
-            TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock, talk),
+            TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock, talk, audio),
             engine,
             repo
         )
@@ -154,7 +165,8 @@ class TalkViewModelTest {
                 VirtualClock {
                     currentTime
                 },
-                NoTalk
+                NoTalk,
+                FakeAudioSource()
             )
         second.show(PAGE, TalkIntents.MODE_ANSWER, null)
         runCurrent()
@@ -627,6 +639,236 @@ class TalkViewModelTest {
         runCurrent()
         assertEquals(SendProgress.FAILED, rig.vm.state.value.progress)
     }
+
+    // ---- live talk screen ----
+
+    private class Live(val rig: Rig, val talk: FakeTalk, val audio: FakeAudioSource)
+
+    private fun TestScope.receiverLive(): Live {
+        val talk = FakeTalk()
+        val audio = FakeAudioSource(PAGE)
+        val rig = rig(talk = talk, audio = audio)
+        rig.engine.start(urgent)
+        rig.vm.show(PAGE, TalkIntents.MODE_ANSWER, null)
+        runCurrent()
+        return Live(rig, talk, audio)
+    }
+
+    private suspend fun TestScope.senderLive(): Live {
+        val talk = FakeTalk()
+        val audio = FakeAudioSource(PAGE)
+        val rig = rig(talk = talk, audio = audio)
+        rig.repo.start(PAGE, PageRole.SENDER, "session-1", PEER, "normal", "answered")
+        rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
+        runCurrent()
+        return Live(rig, talk, audio)
+    }
+
+    private fun conversation(peer: Boolean = true, rtt: Long? = 100) = TalkSessionState(
+        pageId = PAGE,
+        stage = SessionStage.CONVERSATION,
+        connection = TalkConnection.LIVE,
+        peerPresent = peer,
+        rttMillis = rtt
+    )
+
+    @Test
+    fun receiverTalkIsEnabledOnlyForALivePresentConversationOfTheShownPage() = runTest {
+        val l = receiverLive()
+        val vm = l.rig.vm
+        assertTrue(vm.live.value.active)
+        assertFalse(vm.live.value.talkEnabled)
+        l.talk.state.value = conversation()
+        runCurrent()
+        assertTrue(vm.live.value.talkEnabled)
+        for (off in listOf(
+            conversation(peer = false),
+            conversation().copy(connection = TalkConnection.CONNECTING),
+            conversation().copy(connection = TalkConnection.UNAVAILABLE),
+            conversation().copy(stage = SessionStage.WAITING),
+            conversation().copy(pageId = OTHER),
+            conversation().copy(pageId = null)
+        )) {
+            l.talk.state.value = off
+            runCurrent()
+            assertFalse("$off", vm.live.value.talkEnabled)
+        }
+    }
+
+    @Test
+    fun aStaleSessionOfAnotherPageShowsNothing() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation(rtt = 50).copy(pageId = OTHER, floor = TalkFloor.PEER_TALKING)
+        runCurrent()
+        val live = l.rig.vm.live.value
+        assertEquals(TalkConnection.IDLE, live.connection)
+        assertEquals(Speaker.NONE, live.speaker)
+        assertNull(live.quality)
+    }
+
+    @Test
+    fun statusLinesFollowTheSessionState() = runTest {
+        val l = receiverLive()
+        val vm = l.rig.vm
+        l.talk.state.value = conversation().copy(connection = TalkConnection.CONNECTING)
+        runCurrent()
+        assertEquals(TalkConnection.CONNECTING, vm.live.value.connection)
+        l.talk.state.value = conversation(rtt = 299)
+        runCurrent()
+        assertEquals(LinkQuality.GOOD, vm.live.value.quality)
+        l.talk.state.value = conversation(rtt = 300)
+        runCurrent()
+        assertEquals(LinkQuality.FAIR, vm.live.value.quality)
+        l.talk.state.value = conversation(rtt = 799)
+        runCurrent()
+        assertEquals(LinkQuality.FAIR, vm.live.value.quality)
+        l.talk.state.value = conversation(rtt = 800)
+        runCurrent()
+        assertEquals(LinkQuality.POOR, vm.live.value.quality)
+        l.talk.state.value = conversation(rtt = null)
+        runCurrent()
+        assertNull(vm.live.value.quality)
+        l.talk.state.value = conversation().copy(floor = TalkFloor.YOU)
+        runCurrent()
+        assertEquals(Speaker.YOU, vm.live.value.speaker)
+        l.talk.state.value = conversation().copy(floor = TalkFloor.PEER_TALKING)
+        runCurrent()
+        assertEquals(Speaker.PEER, vm.live.value.speaker)
+        l.talk.state.value = conversation().copy(floor = TalkFloor.BUSY)
+        runCurrent()
+        assertEquals(Speaker.NONE, vm.live.value.speaker)
+        l.talk.state.value = conversation(peer = false)
+        runCurrent()
+        assertTrue(vm.live.value.waitingForPeer)
+        l.talk.state.value = conversation().copy(connection = TalkConnection.UNAVAILABLE)
+        runCurrent()
+        assertFalse(vm.live.value.waitingForPeer)
+        assertEquals(TalkPhase.ANSWERED, vm.state.value.phase)
+    }
+
+    @Test
+    fun selfPageHasNoLiveUi() = runTest {
+        val talk = FakeTalk(isEligible = false)
+        val rig = rig(talk = talk, audio = FakeAudioSource(PAGE))
+        rig.engine.start(urgent)
+        rig.vm.show(PAGE, TalkIntents.MODE_ANSWER, null)
+        runCurrent()
+        talk.state.value = conversation()
+        runCurrent()
+        assertFalse(rig.vm.live.value.active)
+        assertFalse(rig.vm.live.value.talkEnabled)
+    }
+
+    @Test
+    fun theSessionsFirstTalkerLockDisablesTalk() = runTest {
+        val l = senderLive()
+        val vm = l.rig.vm
+        l.talk.state.value = conversation().copy(firstTalkerLocked = true)
+        runCurrent()
+        assertTrue(vm.live.value.firstTalkerLocked)
+        assertFalse(vm.live.value.talkEnabled)
+        assertFalse(vm.pressTalk())
+        assertEquals(emptyList<String>(), l.audio.calls)
+        l.talk.state.value = conversation()
+        runCurrent()
+        assertFalse(vm.live.value.firstTalkerLocked)
+        assertTrue(vm.live.value.talkEnabled)
+    }
+
+    @Test
+    fun pressAndReleaseReachTheAudioOnlyWhileTalkIsEnabled() = runTest {
+        val l = receiverLive()
+        val vm = l.rig.vm
+        assertFalse(vm.pressTalk())
+        assertEquals(emptyList<String>(), l.audio.calls)
+        l.talk.state.value = conversation()
+        runCurrent()
+        assertTrue(vm.pressTalk())
+        assertFalse("a second press while held is not a new request", vm.pressTalk())
+        vm.releaseTalk()
+        vm.releaseTalk()
+        assertEquals(listOf("press", "release"), l.audio.calls)
+    }
+
+    @Test
+    fun aRefusedPressIsNotARequestAndNeedsNoRelease() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.audio.pressResult = false
+        assertFalse(l.rig.vm.pressTalk())
+        l.rig.vm.releaseTalk()
+        assertEquals(listOf("press"), l.audio.calls)
+    }
+
+    @Test
+    fun noPressWhenTheServiceHostsAnotherPage() = runTest {
+        val l = receiverLive()
+        l.audio.hosted = OTHER
+        l.talk.state.value = conversation()
+        runCurrent()
+        assertFalse(l.rig.vm.pressTalk())
+        assertEquals(emptyList<String>(), l.audio.calls)
+    }
+
+    @Test
+    fun talkBecomingDisabledWhileHeldReleases() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        assertTrue(l.rig.vm.pressTalk())
+        l.talk.state.value = conversation().copy(connection = TalkConnection.CONNECTING)
+        runCurrent()
+        assertEquals(listOf("press", "release"), l.audio.calls)
+    }
+
+    @Test
+    fun theCaptureStatusIsShownAndTalkingComesOnlyFromTheFloor() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        l.audio.capture.value = CaptureStatus.STOPPED_AT_CAP
+        runCurrent()
+        assertEquals(CaptureStatus.STOPPED_AT_CAP, l.rig.vm.live.value.capture)
+        assertEquals(Speaker.NONE, l.rig.vm.live.value.speaker)
+        assertEquals(emptyList<String>(), l.audio.calls)
+    }
+
+    @Test
+    fun anIdleSessionEndClosesWithItsOwnLine() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.talk.events.emit(TalkEvent.SessionEnded(SessionEndReason.IDLE))
+        runCurrent()
+        assertEquals(TalkPhase.ENDED, l.rig.vm.state.value.phase)
+        assertEquals(SessionEndReason.IDLE, l.rig.vm.state.value.endReason)
+        assertFalse(l.rig.vm.live.value.talkEnabled)
+    }
+
+    @Test
+    fun aPeerEndClosesTheSenderToo() = runTest {
+        val l = senderLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.talk.events.emit(TalkEvent.SessionEnded(SessionEndReason.ENDED_BY_PEER))
+        runCurrent()
+        assertEquals(TalkPhase.ENDED, l.rig.vm.state.value.phase)
+        assertEquals(SessionEndReason.ENDED_BY_PEER, l.rig.vm.state.value.endReason)
+    }
+
+    @Test
+    fun endSendsSessionEndAndCancelAndReleasesTheHold() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.rig.vm.pressTalk()
+        l.rig.vm.end()
+        runCurrent()
+        assertEquals(listOf(PAGE), l.talk.ends)
+        assertEquals(listOf("press", "release"), l.audio.calls)
+        assertEquals(1, api.calls.count { it == "cancel:$PAGE" })
+        assertEquals(TalkPhase.DONE, l.rig.vm.state.value.phase)
+    }
 }
 
 /** A view model test has no live session: End goes through the outbox. */
@@ -634,6 +876,10 @@ object NoTalk : TalkSessions {
     override fun eligible(pageId: String) = true
 
     override fun requestEnd(pageId: String) = false
+
+    override val state = MutableStateFlow(TalkSessionState())
+
+    override val events = MutableSharedFlow<TalkEvent>()
 }
 
 /** A live session whose WebSocket `session_end` is queued (or not) and which records it. */
@@ -642,8 +888,52 @@ class RecordingTalk(private val sent: Boolean) : TalkSessions {
 
     override fun eligible(pageId: String) = true
 
+    override val state = MutableStateFlow(TalkSessionState())
+
+    override val events = MutableSharedFlow<TalkEvent>(extraBufferCapacity = 16)
+
     override fun requestEnd(pageId: String): Boolean {
         ends += pageId
         return sent
     }
+}
+
+/** A live session the test drives by hand. */
+class FakeTalk(var isEligible: Boolean = true) : TalkSessions {
+    val ends = mutableListOf<String>()
+
+    override fun eligible(pageId: String) = isEligible
+
+    override val state = MutableStateFlow(TalkSessionState())
+
+    override val events = MutableSharedFlow<TalkEvent>(extraBufferCapacity = 16)
+
+    override fun requestEnd(pageId: String): Boolean {
+        ends += pageId
+        return true
+    }
+}
+
+/** An audio seam that records presses and releases of the hosted page. */
+class FakeAudioSource(var hosted: String? = null) : TalkAudioSource {
+    val calls = mutableListOf<String>()
+    val capture = MutableStateFlow(CaptureStatus.IDLE)
+    var pressResult = true
+
+    private val port = object : TalkAudioPort {
+        override fun press(): Boolean {
+            calls += "press"
+            return pressResult
+        }
+
+        override fun release() {
+            calls += "release"
+        }
+
+        override val captureStatus: StateFlow<CaptureStatus> get() = capture
+    }
+
+    override fun audio(pageId: String): TalkAudioPort? = port.takeIf { hosted == pageId }
+
+    override fun audios(pageId: String): Flow<TalkAudioPort?> = flowOf(audio(pageId))
 }

@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -62,6 +63,7 @@ private class FakeSink : SocketPageEvents {
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
+@Suppress("LargeClass")
 class TalkSessionControllerTest {
     private val app: Application = ApplicationProvider.getApplicationContext()
     private lateinit var db: PttDatabase
@@ -736,5 +738,132 @@ class TalkSessionControllerTest {
         ws.serverText("""{"type":"peer_joined","device_id":"ffffffff-ffff-4fff-8fff-ffffffffffff"}""")
         runCurrent()
         assertFalse(rig.controller.state.value.peerPresent)
+    }
+
+    // ---- the first-talker rule ----
+
+    private fun TalkSessionController.locked() = state.value.firstTalkerLocked
+
+    /** A transmission id of the receiver's, granted to them on [ws]. */
+    private fun TestScope.peerTalks(ws: FakeWs): String {
+        val id = AudioSession.forAnswerer(KEY.copyOf(), SESSION, PEER_DEVICE, OWN).requestFloor()
+        ws.grant(PEER_DEVICE, id)
+        runCurrent()
+        return id
+    }
+
+    private fun FakeWs.peerReleased(id: String) = serverText(
+        """{"type":"floor_released","talker":"$PEER_DEVICE","transmission_id":"$id","reason":"released"}"""
+    )
+
+    @Test(timeout = 60_000)
+    fun aPeerAlreadyThereAtJoinLocksTheSenderForTenSecondsOfSilence() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val ws = rig.connect()
+        assertTrue("locked from the start", rig.controller.locked())
+        // The join snapshot names the peer: the window starts now, however late the screen looks.
+        rig.joined(ws)
+        advanceTimeBy(FirstTalkerRule.WINDOW_MS - 1)
+        runCurrent()
+        assertTrue(rig.controller.locked())
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun withoutThePeerTheSenderStaysLocked() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        rig.joined(rig.connect(), peer = false)
+        advanceTimeBy(10 * FirstTalkerRule.WINDOW_MS)
+        runCurrent()
+        assertTrue(rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun aPeerTalkingInsideTheWindowKeepsTheLockUntilTheirRelease() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val ws = rig.connect()
+        rig.joined(ws)
+        val id = peerTalks(ws)
+        advanceTimeBy(3 * FirstTalkerRule.WINDOW_MS)
+        runCurrent()
+        assertTrue(rig.controller.locked())
+        ws.peerReleased(id)
+        runCurrent()
+        assertFalse(rig.controller.locked())
+        // Once unlocked, the peer talking again changes nothing.
+        peerTalks(ws)
+        assertFalse(rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun theSendersSocketDroppingWhileThePeerTalksEndsTheirTurn() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect()
+        rig.joined(first)
+        peerTalks(first)
+        first.serverClose(1006)
+        runCurrent()
+        assertFalse("no release will ever come for that transmission", rig.controller.locked())
+        // The rejoin snapshot has no grant; the lock stays lifted.
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        rig.joined(rig.connect(1))
+        assertFalse(rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun theSessionEndingWhileThePeerTalksLiftsTheLock() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val ws = rig.connect()
+        rig.joined(ws)
+        peerTalks(ws)
+        ws.serverText("""{"type":"session_end","reason":"ended_by_peer"}""")
+        runCurrent()
+        assertFalse(rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun aReplayedPeerJoinedAfterAReconnectDoesNotRestartTheWindow() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect()
+        rig.joined(first)
+        val joinedAt = currentTime
+        advanceTimeBy(FirstTalkerRule.WINDOW_MS / 2)
+        first.serverClose(1006)
+        runCurrent()
+        assertTrue(rig.controller.locked())
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS / 10)
+        rig.joined(rig.connect(1))
+        assertTrue(currentTime < joinedAt + FirstTalkerRule.WINDOW_MS)
+        assertTrue(rig.controller.locked())
+        advanceTimeBy(joinedAt + FirstTalkerRule.WINDOW_MS - currentTime)
+        runCurrent()
+        assertFalse("ten seconds from the first sight of the peer", rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun theReceiverIsNeverLocked() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        val ws = rig.connect()
+        assertFalse(rig.controller.locked())
+        rig.joined(ws, state = "answered")
+        assertFalse(rig.controller.locked())
+        assertTrue(rig.controller.pressTalk())
     }
 }
