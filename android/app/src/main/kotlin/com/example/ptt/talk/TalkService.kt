@@ -14,6 +14,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.example.ptt.alert.SenderWaiting
 import com.example.ptt.alert.WaitingNotifier
+import com.example.ptt.audio.TalkAudio
+import com.example.ptt.audio.TalkAudioFactory
 import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.PageRole
@@ -57,6 +59,17 @@ class TalkService : Service() {
     @Inject
     lateinit var senderWaiting: SenderWaiting
 
+    @Inject
+    lateinit var audioFactory: TalkAudioFactory
+
+    /**
+     * The audio of the hosted page's session (capture, playback, routing); null while no page is hosted. The talk
+     * screen's hold-to-talk button calls [TalkAudio.press] and [TalkAudio.release] on it.
+     */
+    @Volatile
+    var audio: TalkAudio? = null
+        private set
+
     private var scope: CoroutineScope? = null
     internal var pageId: String? = null
         private set
@@ -78,6 +91,10 @@ class TalkService : Service() {
             return START_NOT_STICKY
         }
         pageId?.takeIf { it != page }?.let { controller.stop(it) }
+        if (pageId != page || audio == null) {
+            audio?.close()
+            audio = audioFactory.create(page)
+        }
         pageId = page
         current = this
         hosting.host(page)
@@ -148,6 +165,8 @@ class TalkService : Service() {
         scope?.cancel()
         getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
         pageId?.let(controller::stop)
+        audio?.close()
+        audio = null
         hosting.host(null)
         if (current === this) current = null
         // The waiting notification of a page that is still waiting comes back.
