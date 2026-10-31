@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/jonwilkey/ptt/compare/android-v0.1.1...android-v0.2.0) (2026-10-30)
+
+
+### Features
+
+* **android:** family home-screen widget with checklist badge ([#36](https://github.com/jonwilkey/ptt/issues/36)) ([eab075f](https://github.com/jonwilkey/ptt/commit/eab075fa82d412e7e380254aa88f901c6e1b3731))
+* **android:** send-and-open intent for the widget ([#35](https://github.com/jonwilkey/ptt/issues/35)) ([0be9b79](https://github.com/jonwilkey/ptt/commit/0be9b7990d59cb49d411bd24ca1e26d5aa8ad20c))
+* **android:** waiting notification for sent pages ([#33](https://github.com/jonwilkey/ptt/issues/33)) ([92c5a80](https://github.com/jonwilkey/ptt/commit/92c5a80ec1df538e6f1cf0bf4a615bf61310f596))
+
 ## [0.1.1](https://github.com/jonwilkey/ptt/compare/android-v0.1.0...android-v0.1.1) (2026-10-29)
 
 
