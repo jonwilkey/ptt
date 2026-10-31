@@ -17,6 +17,7 @@ import com.example.ptt.setup.ADMIN_USER
 import com.example.ptt.talk.FamilyPerson
 import com.example.ptt.talk.LEE_USER
 import com.example.ptt.talk.SendIntents
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -27,6 +28,7 @@ class WidgetRenderTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val pat = FamilyPerson(ADMIN_USER, "Pat")
     private val lee = FamilyPerson(LEE_USER, "Lee")
+    private val ann = FamilyPerson(LEE_USER, "Ann Marie Smith")
 
     private fun family(warning: Boolean = false, people: List<WidgetPerson> = rows()) =
         WidgetState.Family(people, warning)
@@ -35,10 +37,11 @@ class WidgetRenderTest {
 
     private fun render(
         state: WidgetState,
+        size: DpSize = DpSize(250.dp, 110.dp),
         block: androidx.glance.appwidget.testing.unit.GlanceAppWidgetUnitTest.() -> Unit
     ) = runGlanceAppWidgetUnitTest {
         setContext(context)
-        setAppWidgetSize(DpSize(250.dp, 110.dp))
+        setAppWidgetSize(size)
         provideComposable { WidgetContent(state) }
         block()
     }
@@ -90,5 +93,74 @@ class WidgetRenderTest {
     fun nobodyToPageShowsItsOwnMessage() = render(family(people = emptyList())) {
         onNode(hasText(context.getString(R.string.widget_nobody))).assertExists()
         onNode(hasContentDescription(context.getString(R.string.widget_page_cd, "Pat"))).assertDoesNotExist()
+    }
+
+    @Test(timeout = 60_000)
+    fun atTheThreeByOneMinimumRowsShowFirstNamesAndKeepBothButtons() =
+        render(family(people = listOf(WidgetPerson(ann, WidgetPresence.OK))), size = DpSize(180.dp, 40.dp)) {
+            onNode(hasText("Ann")).assertExists()
+            onNode(hasText(ann.name)).assertDoesNotExist()
+            onNode(hasContentDescription(context.getString(R.string.widget_presence_ok, ann.name))).assertExists()
+            onNode(hasContentDescription(context.getString(R.string.widget_page_cd, ann.name)))
+                .assertHasStartActivityClickAction(
+                    SendIntents.intent(context, ann.userId, EnvelopePayload.LEVEL_NORMAL, ann.name)
+                )
+            onNode(hasContentDescription(context.getString(R.string.widget_urgent_cd, ann.name)))
+                .assertHasStartActivityClickAction(
+                    SendIntents.intent(context, ann.userId, EnvelopePayload.LEVEL_URGENT, ann.name)
+                )
+        }
+
+    @Test(timeout = 60_000)
+    fun theDefaultSizeKeepsFullNames() = render(family(people = listOf(WidgetPerson(ann, WidgetPresence.OK)))) {
+        onNode(hasText(ann.name)).assertExists()
+    }
+
+    @Test(timeout = 60_000)
+    fun compactWithAChecklistWarningKeepsTheBadgeAndThePersonButtons() =
+        render(family(warning = true), size = DpSize(180.dp, 40.dp)) {
+            val badge = context.getString(R.string.widget_checklist_warning)
+            onNode(hasText(badge)).assertExists()
+            onNode(hasText(badge)).assertHasStartActivityClickAction(Intent(context, MainActivity::class.java))
+            onNode(hasContentDescription(context.getString(R.string.widget_page_cd, "Pat"))).assertExists()
+            onNode(hasContentDescription(context.getString(R.string.widget_urgent_cd, "Pat"))).assertExists()
+        }
+
+    @Test(timeout = 60_000)
+    fun aFourByOneWidgetIsCompactToo() =
+        render(family(people = listOf(WidgetPerson(ann, WidgetPresence.OK))), size = DpSize(250.dp, 40.dp)) {
+            onNode(hasText("Ann")).assertExists()
+            onNode(hasText(ann.name)).assertDoesNotExist()
+        }
+
+    @Test(timeout = 60_000)
+    fun compactNeedsSetupStillOpensTheApp() = render(WidgetState.NeedsSetup, size = DpSize(180.dp, 40.dp)) {
+        val text = context.getString(R.string.widget_needs_setup)
+        onNode(hasText(text)).assertHasStartActivityClickAction(Intent(context, MainActivity::class.java))
+    }
+
+    @Test(timeout = 60_000)
+    fun compactEmptyListWithAWarningShowsOnlyTheWarning() =
+        render(family(warning = true, people = emptyList()), size = DpSize(180.dp, 40.dp)) {
+            onNode(hasText(context.getString(R.string.widget_checklist_warning))).assertExists()
+            onNode(hasText(context.getString(R.string.widget_nobody))).assertDoesNotExist()
+        }
+
+    @Test(timeout = 60_000)
+    fun aSlightlySmallFourByTwoStillGetsFullNames() =
+        render(family(people = listOf(WidgetPerson(ann, WidgetPresence.OK))), size = DpSize(230.dp, 105.dp)) {
+            onNode(hasText(ann.name)).assertExists()
+        }
+
+    @Test(timeout = 60_000)
+    fun compactLabelsUseTheFirstWordUnlessItIsShared() {
+        assertEquals("Ann", firstName("  Ann Marie"))
+        assertEquals("Ann", firstName("Ann\u00A0Marie"))
+        assertEquals("Mom", firstName("Mom"))
+        assertEquals("", firstName(""))
+        assertEquals("   ", firstName("   "))
+        val all = listOf("Ann Marie", "Ann Lee", "Mom")
+        assertEquals("Ann Marie", compactLabel("Ann Marie", all))
+        assertEquals("Mom", compactLabel("Mom", all))
     }
 }
