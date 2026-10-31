@@ -1,6 +1,7 @@
 package com.example.ptt.di
 
 import android.content.Context
+import com.example.ptt.BuildConfig
 import com.example.ptt.alert.AlertDevices
 import com.example.ptt.alert.AlertEngine
 import com.example.ptt.alert.AlertServiceControl
@@ -18,7 +19,12 @@ import com.example.ptt.alert.WaitingNotifier
 import com.example.ptt.crypto.DeviceKeyStore
 import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.SettingsRepository
+import com.example.ptt.net.DeviceTalkAuth
 import com.example.ptt.net.DeviceTokenStore
+import com.example.ptt.net.EnrollmentState
+import com.example.ptt.net.OkHttpTalkTransport
+import com.example.ptt.net.TalkAuth
+import com.example.ptt.net.TalkTransport
 import com.example.ptt.outbox.Outbox
 import com.example.ptt.push.PageEvent
 import com.example.ptt.push.PushDispatcher
@@ -26,8 +32,14 @@ import com.example.ptt.push.RosterSyncScheduler
 import com.example.ptt.push.RosterSyncWorker
 import com.example.ptt.push.SelfPages
 import com.example.ptt.push.SessionKeys
+import com.example.ptt.push.SocketPageEvents
 import com.example.ptt.setup.RosterSync
+import com.example.ptt.talk.AndroidTalkServiceControl
 import com.example.ptt.talk.PageSender
+import com.example.ptt.talk.TalkHosting
+import com.example.ptt.talk.TalkServiceControl
+import com.example.ptt.talk.TalkSessionController
+import com.example.ptt.talk.TalkSessions
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -39,6 +51,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 
 /** Wires the `push`, `alert` and sending (`talk`) packages. */
 @Module
@@ -97,7 +110,61 @@ object AlertModule {
 
     @Provides
     @Singleton
-    fun waitingNotices(@ApplicationContext context: Context): WaitingNotices = WaitingNotifier(context)
+    fun waitingNotices(@ApplicationContext context: Context, hosting: TalkHosting): WaitingNotices =
+        WaitingNotifier(context) { hosting.isHosting(it) }
+
+    @Provides
+    @Singleton
+    fun talkHosting() = TalkHosting()
+
+    @Provides
+    @Singleton
+    fun talkServiceControl(): TalkServiceControl = AndroidTalkServiceControl()
+
+    @Provides
+    @Singleton
+    fun talkTransport(client: OkHttpClient, state: EnrollmentState): TalkTransport = OkHttpTalkTransport(client, state)
+
+    @Provides
+    @Singleton
+    fun talkAuth(tokens: DeviceTokenStore, state: EnrollmentState): TalkAuth = DeviceTalkAuth(tokens, state)
+
+    @Provides
+    fun talkSessions(controller: TalkSessionController): TalkSessions = controller
+
+    @Provides
+    @Singleton
+    fun socketPageEvents(dispatcher: PushDispatcher): SocketPageEvents = dispatcher
+
+    @Provides
+    @Singleton
+    @Suppress("LongParameterList")
+    fun talkSessionController(
+        transport: TalkTransport,
+        auth: TalkAuth,
+        sessionKeys: SessionKeys,
+        activePage: ActivePageRepository,
+        tokens: DeviceTokenStore,
+        outbox: Outbox,
+        events: SocketPageEvents,
+        selfPages: SelfPages,
+        service: TalkServiceControl,
+        scope: CoroutineScope,
+        clock: Clock
+    ) = TalkSessionController(
+        transport,
+        auth,
+        BuildConfig.VERSION_NAME,
+        sessionKeys,
+        activePage,
+        tokens,
+        outbox.outcomes,
+        events,
+        selfPages,
+        service,
+        scope,
+        clock::millis
+    )
 
     @Provides
     @Singleton
@@ -131,7 +198,8 @@ object AlertModule {
         sessionKeys: SessionKeys,
         scheduler: RosterSyncScheduler,
         clock: Clock,
-        selfPages: SelfPages
+        selfPages: SelfPages,
+        hosting: TalkHosting
     ) = PushDispatcher(
         rosterSync,
         tokens,
@@ -143,7 +211,8 @@ object AlertModule {
         sessionKeys,
         scheduler,
         clock,
-        selfPages = selfPages
+        selfPages = selfPages,
+        hosting = hosting
     )
 
     @Provides

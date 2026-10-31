@@ -9,6 +9,17 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class SessionKeys {
     private val keys = ConcurrentHashMap<String, ByteArray>()
+    private val peers = ConcurrentHashMap<String, Set<String>>()
+
+    /**
+     * The device ids that may be the other end of [pageId]'s live session, from the signed envelope: for a page
+     * this phone sent, the recipient's devices that hold a wrapped key; for a page it received, the sender device.
+     */
+    fun putPeers(pageId: String, devices: Set<String>) {
+        peers[pageId] = devices.toSet()
+    }
+
+    fun peers(pageId: String): Set<String> = peers[pageId].orEmpty()
 
     fun put(pageId: String, key: ByteArray) {
         keys.put(pageId, key)?.fill(0)
@@ -33,6 +44,7 @@ class SessionKeys {
     fun has(pageId: String): Boolean = keys.containsKey(pageId)
 
     fun clear(pageId: String) {
+        peers.remove(pageId)
         keys.computeIfPresent(pageId) { _, v ->
             v.fill(0)
             null

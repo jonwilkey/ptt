@@ -16,12 +16,15 @@ import com.example.ptt.data.OutboxDao
 import com.example.ptt.data.OutboxEntity
 import com.example.ptt.data.OutboxKind
 import com.example.ptt.data.PageRole
+import com.example.ptt.net.SessionEndReason
+import com.example.ptt.net.WsPageState
 import com.example.ptt.outbox.Outbox
 import com.example.ptt.setup.ADMIN_USER
 import com.example.ptt.setup.ISSUED_AT
 import com.example.ptt.setup.SetupFixture
 import com.example.ptt.setup.TestAdmin
 import com.example.ptt.setup.USER
+import com.example.ptt.talk.TalkHosting
 import java.time.Clock
 import java.time.Duration
 import java.util.UUID
@@ -53,6 +56,7 @@ import org.robolectric.RobolectricTestRunner
 
 /** The push dispatcher against the real roster, crypto, outbox, Room and a MockWebServer for the server. */
 @RunWith(RobolectricTestRunner::class)
+@Suppress("LargeClass")
 class PushDispatcherTest {
     @get:Rule
     val tmp = TemporaryFolder()
@@ -99,7 +103,8 @@ class PushDispatcherTest {
         useOutbox: Outbox = outbox,
         useEngine: AlertEngine = engine,
         useActivePage: ActivePageRepository = f.activePage,
-        useSelfPages: SelfPages = selfPages
+        useSelfPages: SelfPages = selfPages,
+        useHosting: TalkHosting = TalkHosting()
     ) = PushDispatcher(
         f.sync,
         f.tokens,
@@ -112,7 +117,8 @@ class PushDispatcherTest {
         { rosterSyncs++ },
         clock,
         timeoutMs,
-        useSelfPages
+        useSelfPages,
+        useHosting
     )
 
     private fun build(level: String = "normal", pageId: String = UUID.randomUUID().toString()): BuiltEnvelope =
@@ -471,6 +477,92 @@ class PushDispatcherTest {
         assertEquals(listOf("sender-answered:sent-1:Pat"), notices.events)
         assertEquals("answered", f.activePage.current()?.state)
         assertEquals(listOf<PageEvent>(PageEvent.Answered("sent-1")), events)
+    }
+
+    @Test(timeout = 60_000)
+    fun webSocketProgressIsMonotonicAndInterleavesWithFcm() = runBlocking {
+        senderRow("sent-3")
+        val events = mutableListOf<PageEvent>()
+        val d = dispatcher()
+        val job = launch(Dispatchers.Unconfined) { d.events.toList(events) }
+        d.socketPageState("sent-3", WsPageState.ACKNOWLEDGED)
+        // Late WebSocket and FCM messages for earlier steps change nothing.
+        d.socketPageState("sent-3", WsPageState.DELIVERED)
+        d.socketPageState("sent-3", WsPageState.RINGING)
+        d.socketPageState("sent-3", WsPageState.UNKNOWN)
+        d.dispatch(mapOf("type" to "page_state", "page_id" to "sent-3", "state" to "delivered"))
+        assertEquals("acknowledged", f.activePage.current()?.state)
+        d.socketPageState("sent-3", WsPageState.ANSWERED)
+        // FCM page_answered always follows; the answer is not announced twice as an event by the socket.
+        d.socketPageState("sent-3", WsPageState.ANSWERED)
+        job.cancel()
+        assertEquals("answered", f.activePage.current()?.state)
+        assertEquals(
+            listOf<PageEvent>(
+                PageEvent.State("sent-3", "acknowledged"),
+                PageEvent.State("sent-3", "delivered"),
+                PageEvent.Answered("sent-3")
+            ),
+            events
+        )
+    }
+
+    @Test(timeout = 60_000)
+    fun fcmAnsweredWhileTheServiceHostsThePageOnlyRefreshesTheOngoingNotification() = runBlocking {
+        senderRow("sent-4")
+        val hosting = TalkHosting()
+        hosting.host("sent-4")
+        val refreshes = mutableListOf<String>()
+        val d = dispatcher(useHosting = hosting)
+        val job = launch(Dispatchers.Unconfined) { hosting.refresh.toList(refreshes) }
+        d.socketPageState("sent-4", WsPageState.ANSWERED)
+        d.dispatch(mapOf("type" to "page_answered", "page_id" to "sent-4"))
+        job.cancel()
+        assertTrue("no second notification", notices.events.isEmpty())
+        assertEquals(listOf("sent-4"), refreshes)
+        assertEquals("answered", f.activePage.current()?.state)
+    }
+
+    @Test(timeout = 60_000)
+    fun sessionEndMapsToTheSameOutcomesAsTheFcmPaths() = runBlocking {
+        val d = dispatcher()
+        val events = mutableListOf<PageEvent>()
+        val job = launch(Dispatchers.Unconfined) { d.events.toList(events) }
+        for ((reason, expected) in listOf(
+            SessionEndReason.ENDED_BY_PEER to "ended",
+            SessionEndReason.IDLE to "ended",
+            SessionEndReason.MISSED to "missed",
+            SessionEndReason.FAILED to "failed"
+        )) {
+            senderRow("sent-5")
+            sessionKeys.put("sent-5", ByteArray(32) { 1 })
+            d.sessionEnded("sent-5", PageRole.SENDER, reason)
+            assertNull(reason.name, f.activePage.current())
+            assertFalse(sessionKeys.has("sent-5"))
+            assertEquals(PageEvent.State("sent-5", expected), events.last())
+        }
+        assertEquals(listOf("sender-state:sent-5:missed:Pat", "sender-state:sent-5:failed:Pat"), notices.events)
+        job.cancel()
+    }
+
+    @Test(timeout = 60_000)
+    fun sessionEndForTheAnswererClearsTheRowAndKeyAndTellsTheScreen() = runBlocking {
+        val d = dispatcher()
+        val events = mutableListOf<PageEvent>()
+        val job = launch(Dispatchers.Unconfined) { d.events.toList(events) }
+        f.activePage.start("recv-1", PageRole.RECEIVER, "s", ADMIN_USER, "normal", "answered")
+        sessionKeys.put("recv-1", ByteArray(32) { 1 })
+        d.sessionEnded("recv-1", PageRole.RECEIVER, SessionEndReason.ENDED_BY_PEER)
+        assertNull(f.activePage.current())
+        assertFalse(sessionKeys.has("recv-1"))
+        assertEquals(listOf("cancelled:recv-1"), notices.events.filter { it.startsWith("cancelled") })
+        assertEquals(PageEvent.Ended("recv-1", "cancelled"), events.last())
+
+        f.activePage.start("recv-2", PageRole.RECEIVER, "s", ADMIN_USER, "normal", "answered")
+        d.sessionEnded("recv-2", PageRole.RECEIVER, SessionEndReason.IDLE)
+        assertNull(f.activePage.current())
+        assertEquals("no 'cancelled' notice for an idle end", 1, notices.count("cancelled"))
+        job.cancel()
     }
 
     @Test

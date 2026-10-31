@@ -133,7 +133,12 @@ class PageSender(
             var stored = false
             try {
                 if (live != null) endCurrentPage(live)
-                if (keepKey) sessionKeys.put(pageId, built.sessionKey) else selfPages.add(pageId)
+                if (keepKey) {
+                    sessionKeys.put(pageId, built.sessionKey)
+                    sessionKeys.putPeers(pageId, built.payload.keys.keys)
+                } else {
+                    selfPages.add(pageId)
+                }
                 store(CreatePageRequest(pageId, toUser, level, sessionId, built.signed.toDto()))
                 stored = true
             } finally {

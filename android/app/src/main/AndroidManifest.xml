@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- AlertService (incoming-page ringing): a sideloaded app may use specialUse; see its subtype below. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- TalkService (live talk) is a microphone foreground service; RECORD_AUDIO must be granted before it starts. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Setup checklist (docs/spec.md, "Permissions and setup checklist"): each is explained and checked there. -->
@@ -84,6 +86,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Rings and vibrates for an incoming family page until it is answered, acknowledged or cancelled" />
         </service>
+
+        <!-- Live talk (talk.TalkService): started only while TalkActivity is visible and RECORD_AUDIO is granted. -->
+        <service
+            android:name=".talk.TalkService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- The Acknowledged action on the incoming-page notification. -->
         <receiver

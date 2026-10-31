@@ -22,24 +22,17 @@ interface WaitingNotices {
  * of dead-process ringing notifications does not touch it. The channel is the existing quiet one (low
  * importance, no sound). It has no actions: tapping it only reopens the page's talk screen.
  */
-class WaitingNotifier(private val context: Context) : WaitingNotices {
+class WaitingNotifier(private val context: Context, private val hosted: (String) -> Boolean = { false }) :
+    WaitingNotices {
     private val manager: NotificationManager? get() = context.getSystemService(NotificationManager::class.java)
 
     override fun show(pageId: String, name: String?, state: String) {
-        val who = name?.let { context.getString(R.string.notif_waiting_title, it) }
-            ?: context.getString(R.string.notif_waiting_unknown)
-        val notification = NotificationCompat.Builder(context, AlertChannels.QUIET)
-            .setSmallIcon(R.drawable.ic_launcher)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setContentTitle(who)
-            .setContentText(context.getString(label(state)))
-            .setContentIntent(TalkIntents.pendingIntent(context, pageId, TalkIntents.MODE_OUTGOING, name))
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .build()
-        manager?.notify(pageId, WAITING_NOTIFICATION_ID, notification)
+        if (hosted(pageId)) {
+            // The running TalkService shows this page's ongoing notification; a second one would duplicate it.
+            manager?.cancel(pageId, WAITING_NOTIFICATION_ID)
+            return
+        }
+        manager?.notify(pageId, WAITING_NOTIFICATION_ID, build(context, pageId, name, state))
     }
 
     override fun retain(keep: String?) {
@@ -49,14 +42,39 @@ class WaitingNotifier(private val context: Context) : WaitingNotices {
             .forEach { manager.cancel(it.tag, it.id) }
     }
 
-    private fun label(state: String) = when (state) {
-        "not_delivered" -> R.string.talk_not_delivered
-        "delivered" -> R.string.talk_delivered
-        "acknowledged" -> R.string.talk_acknowledged
-        else -> R.string.talk_sending
-    }
-
     companion object {
         const val WAITING_NOTIFICATION_ID = 4
+
+        /** The "Waiting for <name>" notification; also what [com.example.ptt.talk.TalkService] shows while waiting. */
+        fun build(context: Context, pageId: String, name: String?, state: String) = base(context, name, pageId).run {
+            val who = name?.let { context.getString(R.string.notif_waiting_title, it) }
+                ?: context.getString(R.string.notif_waiting_unknown)
+            setContentTitle(who).setContentText(context.getString(label(state))).build()
+        }
+
+        /** The ongoing notification of a conversation: "Talking with <name>", tap returns to the talk screen. */
+        fun buildTalking(context: Context, pageId: String, name: String?, mode: String) =
+            base(context, name, pageId, mode).run {
+                val who = name?.let { context.getString(R.string.notif_talking_title, it) }
+                    ?: context.getString(R.string.notif_talking_unknown)
+                setContentTitle(who).build()
+            }
+
+        private fun base(context: Context, name: String?, pageId: String, mode: String = TalkIntents.MODE_OUTGOING) =
+            NotificationCompat.Builder(context, AlertChannels.QUIET)
+                .setSmallIcon(R.drawable.ic_launcher)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setContentIntent(TalkIntents.pendingIntent(context, pageId, mode, name))
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+
+        private fun label(state: String) = when (state) {
+            "not_delivered" -> R.string.talk_not_delivered
+            "delivered" -> R.string.talk_delivered
+            "acknowledged" -> R.string.talk_acknowledged
+            else -> R.string.talk_sending
+        }
     }
 }

@@ -8,6 +8,7 @@ import com.example.ptt.alert.AndroidAlarmVolume
 import com.example.ptt.alert.SenderWaiting
 import com.example.ptt.crypto.TinkKeys
 import com.example.ptt.push.FirebaseInitializer
+import com.example.ptt.talk.TalkSessionController
 import com.example.ptt.widget.WidgetUpdater
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
@@ -21,6 +22,9 @@ class PttApplication :
 
     @Inject
     lateinit var senderWaiting: SenderWaiting
+
+    @Inject
+    lateinit var talkSessions: TalkSessionController
 
     @Inject
     lateinit var widgetUpdater: WidgetUpdater
@@ -39,6 +43,8 @@ class PttApplication :
         FirebaseInitializer.initialize(this)
         // The waiting notification of a page this phone sent follows its active-page row, from process start.
         senderWaiting.start()
+        // Live talk learns from the outbox when the server accepted a page or an answer (it joins only then).
+        talkSessions.start()
         // The home-screen widget follows the roster, presence and the setup checklist (never incoming pages).
         widgetUpdater.start()
     }

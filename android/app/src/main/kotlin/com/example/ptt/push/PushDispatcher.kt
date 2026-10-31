@@ -17,10 +17,13 @@ import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.PageRole
 import com.example.ptt.net.DeviceTokenStore
+import com.example.ptt.net.SessionEndReason
+import com.example.ptt.net.WsPageState
 import com.example.ptt.outbox.DeliveredOutcome
 import com.example.ptt.outbox.Outbox
 import com.example.ptt.outbox.OutboxAction
 import com.example.ptt.setup.RosterSync
+import com.example.ptt.talk.TalkHosting
 import java.time.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -38,6 +41,15 @@ sealed interface PageEvent {
 
     /** A page this phone was paged with ended: [reason] is `cancelled`, `answered_elsewhere` or `missed`. */
     data class Ended(val pageId: String, val reason: String) : PageEvent
+}
+
+/** What the live-talk WebSocket feeds into the same progress model as FCM (docs/protocol.md section 8). */
+interface SocketPageEvents {
+    /** `page_state` over the WebSocket, for a page this phone sent. Monotonic and de-duplicated by page id. */
+    suspend fun socketPageState(pageId: String, state: WsPageState)
+
+    /** `session_end {reason}` (or the page found to be over) for [role]'s side of the page. */
+    suspend fun sessionEnded(pageId: String, role: PageRole, reason: SessionEndReason)
 }
 
 /** Schedules a roster sync that survives the FCM service (an expedited WorkManager job). */
@@ -65,8 +77,9 @@ class PushDispatcher(
     private val rosterScheduler: RosterSyncScheduler,
     private val clock: Clock,
     private val deliveredTimeoutMs: Long = DELIVERED_TIMEOUT_MS,
-    private val selfPages: SelfPages = SelfPages()
-) {
+    private val selfPages: SelfPages = SelfPages(),
+    private val hosting: TalkHosting = TalkHosting()
+) : SocketPageEvents {
     private val rules = ActivePageRules(engine, sessionKeys, clock)
     private val eventFlow = MutableSharedFlow<PageEvent>(extraBufferCapacity = EVENT_BUFFER)
     val events: SharedFlow<PageEvent> = eventFlow.asSharedFlow()
@@ -140,6 +153,7 @@ class PushDispatcher(
         )
         // Held in memory from here, so a re-push arriving while `delivered` is in flight is recognised.
         sessionKeys.put(page.pageId, result.sessionKey)
+        sessionKeys.putPeers(page.pageId, setOf(result.sender.id))
         when (deliver(page.pageId)) {
             // Over, not ours, or already answered by another device: drop silently (protocol section 9).
             is DeliveredOutcome.Drop -> sessionKeys.clear(page.pageId)
@@ -237,7 +251,12 @@ class PushDispatcher(
         if (rowOf(pageId)?.state?.let(ActivePageRules::isSenderTerminal) == true) return
         val name = nameFromActivePage(pageId)
         advanceSenderState(pageId, STATE_ANSWERED)
-        notices.senderAnswered(pageId, name)
+        if (hosting.isHosting(pageId)) {
+            // Already in the session: the high-priority push ends in a visible change of the ongoing notification.
+            hosting.requestRefresh(pageId)
+        } else {
+            notices.senderAnswered(pageId, name)
+        }
         eventFlow.tryEmit(PageEvent.Answered(pageId))
     }
 
@@ -254,6 +273,69 @@ class PushDispatcher(
             advanceSenderState(pageId, state)
         }
         eventFlow.tryEmit(PageEvent.State(pageId, state))
+    }
+
+    // --- the WebSocket (SocketPageEvents) ---
+
+    @Suppress("ReturnCount")
+    override suspend fun socketPageState(pageId: String, state: WsPageState) {
+        val s = when (state) {
+            WsPageState.DELIVERED -> "delivered"
+            WsPageState.ACKNOWLEDGED -> STATE_ACKNOWLEDGED
+            WsPageState.NOT_DELIVERED -> "not_delivered"
+            WsPageState.ANSWERED -> STATE_ANSWERED
+            WsPageState.RINGING, WsPageState.UNKNOWN -> return
+        }
+        if (isOwnPage(pageId)) return
+        val row = rowOf(pageId)
+        // WebSocket and FCM can arrive in any order: only a step forward counts.
+        if (row != null && (
+                ActivePageRules.isSenderTerminal(row.state) ||
+                    ActivePageRules.senderRank(s) <= ActivePageRules.senderRank(row.state)
+                )
+        ) {
+            return
+        }
+        advanceSenderState(pageId, s)
+        eventFlow.tryEmit(if (s == STATE_ANSWERED) PageEvent.Answered(pageId) else PageEvent.State(pageId, s))
+    }
+
+    override suspend fun sessionEnded(pageId: String, role: PageRole, reason: SessionEndReason) {
+        try {
+            when {
+                reason == SessionEndReason.ENDED_BY_YOU -> localCleanup(pageId)
+
+                role == PageRole.SENDER -> {
+                    val state = when (reason) {
+                        SessionEndReason.MISSED -> STATE_MISSED
+                        SessionEndReason.FAILED -> STATE_FAILED
+                        else -> STATE_ENDED
+                    }
+                    if (state != STATE_ENDED) notices.senderState(pageId, state, nameFromActivePage(pageId))
+                    sessionKeys.clear(pageId)
+                    guarded("end active page") { activePage.end(pageId) }
+                    eventFlow.tryEmit(PageEvent.State(pageId, state))
+                }
+
+                reason == SessionEndReason.IDLE -> {
+                    localCleanup(pageId)
+                    eventFlow.tryEmit(PageEvent.Ended(pageId, REASON_CANCELLED))
+                }
+
+                else -> pageCancel(mapOf(PAGE_ID to pageId, REASON to REASON_CANCELLED))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
+            Log.w(TAG, "session end failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    private suspend fun localCleanup(pageId: String) {
+        engine.end(pageId)
+        notices.clear(pageId)
+        sessionKeys.clear(pageId)
+        guarded("end active page") { activePage.end(pageId) }
     }
 
     /** The sender's row only ever moves forward: `page_state` is normal priority and can arrive late. */
