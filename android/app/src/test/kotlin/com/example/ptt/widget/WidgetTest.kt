@@ -139,7 +139,8 @@ class WidgetTest {
         fun attr(name: String) = Regex("android:$name=\"([^\"]*)\"").find(text)?.groupValues?.get(1)
         assertEquals("250dp", attr("minWidth"))
         assertEquals("110dp", attr("minHeight"))
-        assertEquals("250dp", attr("minResizeWidth"))
+        assertEquals("180dp", attr("minResizeWidth"))
+        assertEquals("40dp", attr("minResizeHeight"))
         assertEquals("horizontal|vertical", attr("resizeMode"))
         assertEquals("0", attr("updatePeriodMillis"))
         assertEquals("home_screen", attr("widgetCategory"))
@@ -159,7 +160,9 @@ class WidgetTest {
         assertEquals(0, int("updatePeriodMillis"))
         assertEquals(4, int("targetCellWidth"))
         assertEquals(2, int("targetCellHeight"))
-        assertNotEquals(null, parser.getAttributeValue(ns, "minResizeWidth"))
+        // Compiled dimensions print as "180.0dip".
+        assertEquals("180.0dip", parser.getAttributeValue(ns, "minResizeWidth"))
+        assertEquals("40.0dip", parser.getAttributeValue(ns, "minResizeHeight"))
         assertNotEquals(null, parser.getAttributeValue(ns, "description"))
         assertNotEquals(null, parser.getAttributeValue(ns, "previewLayout"))
     }
