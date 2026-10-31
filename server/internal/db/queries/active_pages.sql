@@ -41,3 +41,10 @@ FROM active_pages;
 
 -- name: DeleteExpiredPageTombstones :execrows
 DELETE FROM page_tombstones WHERE expires_at <= ?;
+
+-- The WebSocket join: the active page that uses a session id (unique among active pages).
+-- name: GetActivePageBySession :one
+SELECT id, session_id, from_device, to_user, level, envelope, state, created_at, delivered_at,
+       push_attempts, recipients, answered_by, answered_at
+FROM active_pages
+WHERE session_id = ?;

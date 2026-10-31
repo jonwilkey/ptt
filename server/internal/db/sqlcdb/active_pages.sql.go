@@ -73,6 +73,35 @@ func (q *Queries) GetActivePage(ctx context.Context, id string) (ActivePage, err
 	return i, err
 }
 
+const getActivePageBySession = `-- name: GetActivePageBySession :one
+SELECT id, session_id, from_device, to_user, level, envelope, state, created_at, delivered_at,
+       push_attempts, recipients, answered_by, answered_at
+FROM active_pages
+WHERE session_id = ?
+`
+
+// The WebSocket join: the active page that uses a session id (unique among active pages).
+func (q *Queries) GetActivePageBySession(ctx context.Context, sessionID string) (ActivePage, error) {
+	row := q.db.QueryRowContext(ctx, getActivePageBySession, sessionID)
+	var i ActivePage
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.FromDevice,
+		&i.ToUser,
+		&i.Level,
+		&i.Envelope,
+		&i.State,
+		&i.CreatedAt,
+		&i.DeliveredAt,
+		&i.PushAttempts,
+		&i.Recipients,
+		&i.AnsweredBy,
+		&i.AnsweredAt,
+	)
+	return i, err
+}
+
 const insertActivePage = `-- name: InsertActivePage :exec
 INSERT INTO active_pages
   (id, session_id, from_device, to_user, level, envelope, state, created_at, push_attempts, recipients)

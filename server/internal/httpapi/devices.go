@@ -88,6 +88,11 @@ func (a *api) revokeDevice(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.serverError(w, r, "revoke device", err)
 	default:
+		// Even when it was already revoked: a socket may have survived a revoke done by the
+		// CLI in the meantime, and closing is idempotent.
+		if a.onRevoke != nil {
+			a.onRevoke(id)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

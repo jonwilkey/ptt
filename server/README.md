@@ -30,7 +30,8 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `internal/pages/` | The page lifecycle: strict envelope parser, `Create` and the delivered/acknowledge/answer/cancel transitions, the DB-driven scheduler (re-push, missed, answered expiry), and the bounded async FCM fan-out |
 | `internal/cleanup/` | The nightly retention sweep |
 | `internal/clock/` | Injectable clock (and a deterministic fake) for the scheduler and the cleanup |
-| `internal/auth/` | Device-token and enrollment-code generation and hashing |
+| `internal/auth/` | Device-token and enrollment-code generation and hashing; the `Authenticator` shared by the REST middleware and the WebSocket `hello` |
+| `internal/ws/` | The live-talk WebSocket (`GET /v1/ws`, `docs/protocol.md` section 11): `hello`, `join`, sessions and their timers, ping/pong, revocation, the per-socket ordered send queue. Floor control and frame relay plug in at `floor.go` |
 | `migrations/` | goose SQL migrations, embedded in the binary |
 
 ## Make targets
@@ -156,13 +157,18 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
       `page_state failed`; a transient failure leaves it ringing for the re-push.
     - Timers are derived from the `active_pages` row and the clock, not stored: an undelivered
       page is pushed again (and `page_state not_delivered` sent) 30 s and 2 min after creation;
-      a normal page unanswered after 15 min is `missed`; an answered page ends 15 min after the
-      answer; urgent pages never time out. The scheduler wakes on the next deadline or every
+      a normal page unanswered after 15 min is `missed`; an answered page ends `idle` 15 min after
+      the answer unless both participants have joined its WebSocket session (then the session's
+      2-minute idle timer, in `internal/ws`, ends it); urgent pages never time out. The scheduler wakes on the next deadline or every
       second at most, first pass at startup, so a restart while a page rings carries on. If a
       page's end is already due (a long outage) it is ended without re-ringing it first; if both
       re-push deadlines passed, one re-push covers both. A re-push re-reads the page and does
       nothing unless it is still ringing and undelivered; if it reaches nobody the page fails.
       The rate-limit budget is spent only by requests that pass validation.
+    - Progress reaches a participant over its live WebSocket (joined, heard from within 15 s)
+      instead of FCM; `page_answered` is always FCM (`pages.Notifier`, implemented by the
+      WebSocket hub). A session id is unique among active pages: a different page on an active
+      one is `409 conflict` (unique index, migration `00004`).
     - An ended page's row is deleted in the same transaction that writes its tombstone (id and
       expiry only, 24 h). Nothing about pages is logged, labelled or audited.
   - Nightly cleanup (at startup, then every 24 h; logs counts only): deletes expired page
@@ -170,7 +176,8 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
     admin can still see `used`/`expired` for a day, then `GET /v1/enrollment-codes/{code_id}` is
     `404`), and `audit_log` rows older than 90 days.
 - `GET /metrics` (internal): Go and process collectors, `pttd_build_info{version}`,
-  `pttd_active_sessions` (0 until milestone 4; deploys wait for it to be 0), and page
+  `pttd_active_sessions` (answered pages with a live-talk session in memory; deploys wait for it
+  to be 0), `pttd_ws_active_sockets` (open WebSockets), and page
   aggregates: `pttd_page_delivery_seconds` and `pttd_page_answer_seconds` (histograms, creation
   to first `delivered` / to the answer), `pttd_pages_ended_total{reason}` (`cancelled`, `ended`,
   `missed`, `failed`, `expired`) and `pttd_fcm_send_errors_total{kind}` (`unregistered`,

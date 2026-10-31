@@ -94,6 +94,8 @@ type Options struct {
 	Clock clock.Clock
 	// Metrics defaults to a private, unexported set.
 	Metrics *metrics.Pages
+	// Notifier reaches live WebSocket participants; defaults to none (everything by FCM).
+	Notifier Notifier
 }
 
 // Service is the page lifecycle. Call Start to run the scheduler and Close at shutdown.
@@ -105,6 +107,7 @@ type Service struct {
 	clk     clock.Clock
 	metrics *metrics.Pages
 	limiter *ratelimit.Limiter
+	notify  Notifier
 
 	// ctx bounds background pushes; Close cancels it.
 	ctx    context.Context
@@ -133,12 +136,25 @@ func NewService(o Options) *Service {
 	if o.Sender == nil {
 		o.Sender = push.Disabled{}
 	}
+	if o.Notifier == nil {
+		o.Notifier = nopNotifier{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
-		db: o.DB, q: sqlcdb.New(o.DB), sender: o.Sender, logger: o.Logger, clk: o.Clock, metrics: o.Metrics,
+		notify: o.Notifier,
+		db:     o.DB, q: sqlcdb.New(o.DB), sender: o.Sender, logger: o.Logger, clk: o.Clock, metrics: o.Metrics,
 		limiter: ratelimit.New(createLimit, createWindow, o.Clock.Now),
 		ctx:     ctx, cancel: cancel, gate: make(chan struct{}, sendConcurrency),
 	}
+}
+
+// SetNotifier connects the live-socket side (the Notifier and the Service depend on each
+// other, so one must be built first). Call it before Start and before serving requests.
+func (s *Service) SetNotifier(n Notifier) {
+	if n == nil {
+		n = nopNotifier{}
+	}
+	s.notify = n
 }
 
 // Wait blocks until every background push started so far has finished (for tests).
@@ -215,6 +231,15 @@ func (s *Service) Create(ctx context.Context, caller Caller, req CreateRequest) 
 
 		recipients, err = liveRecipients(ctx, q, env, caller.DeviceID)
 		if err != nil {
+			return err
+		}
+		// A session id is unique among active pages (protocol section 11.4): the WebSocket join
+		// finds the page by it. The retry of this very page returned above; a tombstoned page
+		// holds nothing. The unique index is the backstop; the write lock of this transaction
+		// makes the check exact.
+		if _, err := q.GetActivePageBySession(ctx, req.SessionID); err == nil {
+			return ErrConflict
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		// A valid new page: only now does it count against the device's budget, so requests
@@ -329,8 +354,10 @@ func (s *Service) endPage(ctx context.Context, q *sqlcdb.Queries, id string, now
 func (s *Service) failPage(ctx context.Context, id, sender string) {
 	now := s.clk.Now()
 	failed := false
+	var p sqlcdb.ActivePage
 	err := db.InTx(ctx, s.db, func(q *sqlcdb.Queries) error {
-		p, err := q.GetActivePage(ctx, id)
+		var err error
+		p, err = q.GetActivePage(ctx, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -349,7 +376,10 @@ func (s *Service) failPage(ctx context.Context, id, sender string) {
 	}
 	if failed {
 		s.metrics.Ended.WithLabelValues(metrics.EndFailed).Inc()
-		s.sendTo(ctx, []string{sender}, stateMsg(id, "failed"))
+		live := s.notify.Ended(Ending{PageID: id, SessionID: p.SessionID, Sender: sender, Reason: ReasonFailed})
+		if !live.Sender {
+			s.sendTo(ctx, []string{sender}, stateMsg(id, "failed"))
+		}
 	}
 }
 

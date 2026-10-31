@@ -2,16 +2,13 @@ package httpapi
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jonwilkey/ptt/server/internal/auth"
-	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 )
 
 // Caller is the authenticated device behind a request.
@@ -49,7 +46,8 @@ func bearerToken(r *http.Request) (string, bool) {
 // revoked devices, so a revocation applies to the very next call.
 //
 // Privacy: a failure with a well-formed token writes an auth_failure audit row with no actor
-// and no token material, at most one per authFailAuditWindow. Nothing here logs the token.
+// and no token material, at most one per auth.FailureAuditWindow (see auth.Authenticator).
+// Nothing here logs the token.
 func (a *api) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r)
@@ -57,56 +55,18 @@ func (a *api) authenticate(next http.Handler) http.Handler {
 			unauthorized(w)
 			return
 		}
-		hash, err := auth.HashToken(token)
-		if err != nil {
+		dev, err := a.auth.Authenticate(r.Context(), token)
+		switch {
+		case errors.Is(err, auth.ErrMalformed), errors.Is(err, auth.ErrUnauthorized):
 			unauthorized(w)
 			return
-		}
-		row, err := a.q.GetActiveDeviceByTokenHash(r.Context(), hash)
-		if errors.Is(err, sql.ErrNoRows) {
-			a.auditAuthFailure(r.Context())
-			unauthorized(w)
-			return
-		}
-		if err != nil {
+		case err != nil:
 			a.serverError(w, r, "authenticate", err)
 			return
 		}
-
-		now := a.now()
-		a.touchLastSeen(r.Context(), row, now)
-		caller := Caller{DeviceID: row.ID, UserID: row.UserID, IsAdmin: row.IsAdmin == 1, IsTest: row.IsTest == 1}
+		caller := Caller{DeviceID: dev.ID, UserID: dev.UserID, IsAdmin: dev.IsAdmin, IsTest: dev.IsTest}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller)))
 	})
-}
-
-// touchLastSeen records contact, at most once per lastSeenInterval per device. The previous
-// value comes from the lookup, so no extra state is held. A failure is logged and ignored: it
-// must not fail an otherwise good request.
-func (a *api) touchLastSeen(ctx context.Context, row sqlcdb.GetActiveDeviceByTokenHashRow, now time.Time) {
-	if row.LastSeenAt.Valid && now.Sub(time.UnixMilli(row.LastSeenAt.Int64)) < lastSeenInterval {
-		return
-	}
-	err := a.q.TouchDeviceLastSeen(ctx, sqlcdb.TouchDeviceLastSeenParams{
-		LastSeenAt: sql.NullInt64{Int64: now.UnixMilli(), Valid: true},
-		ID:         row.ID,
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		a.logger.LogAttrs(ctx, slog.LevelWarn, "update last_seen_at", slog.String("error", err.Error()))
-	}
-}
-
-func (a *api) auditAuthFailure(ctx context.Context) {
-	if ok, _ := a.authFailLimiter.Allow("auth_failure"); !ok {
-		return
-	}
-	err := a.q.InsertAuditLog(ctx, sqlcdb.InsertAuditLogParams{
-		At:     a.now().UnixMilli(),
-		Action: "auth_failure",
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		a.logger.LogAttrs(ctx, slog.LevelWarn, "write auth_failure audit row", slog.String("error", err.Error()))
-	}
 }
 
 // requireAdmin admits only devices whose user is an admin. Test devices are refused even when
