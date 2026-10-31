@@ -14,12 +14,29 @@ class SessionKeys {
         keys.put(pageId, key)?.fill(0)
     }
 
+    /** The live array, which [clear] zeroes in place. Audio code must use [copy] instead. */
     fun get(pageId: String): ByteArray? = keys[pageId]
+
+    /**
+     * An independent copy of the key, made atomically with respect to [clear] (both run under the map's
+     * per-key lock), so it is never a zeroed or partly zeroed key. Use this to start an audio session.
+     */
+    fun copy(pageId: String): ByteArray? {
+        var out: ByteArray? = null
+        keys.computeIfPresent(pageId) { _, v ->
+            out = v.copyOf()
+            v
+        }
+        return out
+    }
 
     fun has(pageId: String): Boolean = keys.containsKey(pageId)
 
     fun clear(pageId: String) {
-        keys.remove(pageId)?.fill(0)
+        keys.computeIfPresent(pageId) { _, v ->
+            v.fill(0)
+            null
+        }
     }
 
     fun clearAll() {
