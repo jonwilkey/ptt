@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,8 @@ type fixture struct {
 	hub  *Hub
 	srv  *httptest.Server
 	priv ed25519.PrivateKey
+	// authHook, when set, runs inside every Authenticate (it is the authenticator's clock).
+	authHook atomic.Pointer[func()]
 
 	alexUser, samUser string
 	ids               map[string]string // device name -> id
@@ -70,7 +73,12 @@ func newFixture(t *testing.T) *fixture {
 		ids: map[string]string{}, tokens: map[string]string{},
 	}
 	f.svc = pages.NewService(pages.Options{DB: d, Sender: f.fcm, Clock: f.clk})
-	f.hub = New(Options{DB: d, Ender: f.svc, Clock: f.clk, Auth: auth.NewAuthenticator(d, nil, f.clk.Now)})
+	f.hub = New(Options{DB: d, Ender: f.svc, Clock: f.clk, Auth: auth.NewAuthenticator(d, nil, func() time.Time {
+		if h := f.authHook.Load(); h != nil {
+			(*h)()
+		}
+		return f.clk.Now()
+	})})
 	f.svc.SetNotifier(f.hub)
 	// A server that has been up for a while; the restart grace has its own tests.
 	f.hub.started = t0.Add(-time.Hour)

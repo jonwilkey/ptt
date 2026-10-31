@@ -519,8 +519,17 @@ func TestRestartGraceEndsAtTheCapWhenNobodyRejoins(t *testing.T) {
 func TestReplacementByASocketThatIsAlreadyClosingDoesNothing(t *testing.T) {
 	f := newFixture(t)
 	old := f.connect("A")
-	// A second socket that times out while authenticating must not evict the first.
+	// A second socket is closed (timed out) while its hello is still being authenticated: when
+	// the authentication returns it must not evict the first socket.
+	entered, release := make(chan struct{}), make(chan struct{})
+	hook := func() {
+		close(entered)
+		<-release
+	}
+	f.authHook.Store(&hook)
 	c := f.dial()
+	c.send(hello(f.tokens["A"]))
+	<-entered
 	f.hub.mu.Lock()
 	var mine *conn
 	for k := range f.hub.conns {
@@ -530,7 +539,8 @@ func TestReplacementByASocketThatIsAlreadyClosingDoesNothing(t *testing.T) {
 	}
 	f.hub.mu.Unlock()
 	mine.closeNow(codeTimeout)
-	c.send(hello(f.tokens["A"]))
+	close(release)
 	c.wantClose(4408, "timeout")
-	old.ping()
+	f.authHook.Store(nil)
+	old.ping() // still the registered socket, not replaced
 }

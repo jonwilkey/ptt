@@ -1,12 +1,15 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"log/slog"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -331,4 +334,107 @@ func TestRestartWhileRingingClosesSocketsAndKeepsPages(t *testing.T) {
 			t.Errorf("upgrade during shutdown = %d, want 503", resp.StatusCode)
 		}
 	}
+}
+
+func (c *liveClient) sendBinary(b []byte) {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(c.t.Context(), 3*time.Second)
+	defer cancel()
+	if err := c.ws.Write(ctx, websocket.MessageBinary, b); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+func (c *liveClient) recvFrame() []byte {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(c.t.Context(), 3*time.Second)
+	defer cancel()
+	typ, raw, err := c.ws.Read(ctx)
+	if err != nil {
+		c.t.Fatalf("read: %v", err)
+	}
+	if typ != websocket.MessageBinary {
+		c.t.Fatalf("got text %q, want a frame", raw)
+	}
+	return raw
+}
+
+func liveFrame(tx string, seq uint32, body []byte) []byte {
+	id := uuid.MustParse(tx)
+	b := append([]byte{0x01}, id[:]...)
+	b = binary.BigEndian.AppendUint32(b, seq)
+	return append(b, body...)
+}
+
+// TestLiveTalkRelaysOpaqueFramesBothWays is the milestone-4 integration test: two real
+// clients over a real HTTP server join, the sender talks (opaque frames arrive identically and
+// in order), releases, the answerer talks back, and the session ends.
+func TestLiveTalkRelaysOpaqueFramesBothWays(t *testing.T) {
+	start := time.Date(2026, 10, 24, 15, 0, 0, 0, time.UTC)
+	fake := push.NewFake()
+	a, d := bootLogged(t, filepath.Join(t.TempDir(), "pttd.db"), clock.NewFake(start), fake, &logBuf{})
+	t.Cleanup(func() { a.Close(context.WithoutCancel(t.Context())); _ = d.Close() })
+	alex, sam := addPerson(t, d, "alex"), addPerson(t, d, "sam")
+	h := a.PublicHandler()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	id, session := makePage(t, h, start, alex, sam)
+	alexWS := dialLive(t, srv)
+	alexWS.hello(alex)
+	alexWS.send(map[string]any{"type": "join", "session_id": session})
+	alexWS.want("page_state", "state", "ringing")
+	if rec := call(t, h, sam.token, "/v1/pages/"+id+"/answer", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("answer = %d %s", rec.Code, rec.Body)
+	}
+	alexWS.want("page_state", "state", "answered")
+	samWS := dialLive(t, srv)
+	samWS.hello(sam)
+	samWS.send(map[string]any{"type": "join", "session_id": session})
+	samWS.want("page_state", "state", "answered")
+	samWS.want("peer_joined", "device_id", alex.device)
+	alexWS.want("peer_joined", "device_id", sam.device)
+
+	// Alex talks: N opaque frames reach Sam identically and in order.
+	tx1 := uuid.NewString()
+	alexWS.send(map[string]any{"type": "floor_request", "transmission_id": tx1})
+	alexWS.want("floor_granted", "talker", alex.device, "transmission_id", tx1)
+	samWS.want("floor_granted", "talker", alex.device, "transmission_id", tx1)
+	r := mrand.New(mrand.NewPCG(7, 8))
+	for i := range 100 {
+		body := make([]byte, 40+i%30)
+		for j := range body {
+			body[j] = byte(r.UintN(256))
+		}
+		fr := liveFrame(tx1, uint32(i), body)
+		alexWS.sendBinary(fr)
+		// In lock step: a listener that does not read loses frames past 25 queued (by design).
+		if got := samWS.recvFrame(); !bytes.Equal(got, fr) {
+			t.Fatalf("frame %d differs from what was sent", i)
+		}
+	}
+	alexWS.send(map[string]any{"type": "floor_release", "transmission_id": tx1})
+	alexWS.want("floor_released", "transmission_id", tx1, "reason", "released")
+	samWS.want("floor_released", "transmission_id", tx1, "reason", "released")
+
+	// Sam talks back; Alex receives.
+	tx2 := uuid.NewString()
+	samWS.send(map[string]any{"type": "floor_request", "transmission_id": tx2})
+	samWS.want("floor_granted", "talker", sam.device, "transmission_id", tx2)
+	alexWS.want("floor_granted", "talker", sam.device, "transmission_id", tx2)
+	back := liveFrame(tx2, 0, bytes.Repeat([]byte{0xAB}, 48))
+	samWS.sendBinary(back)
+	if got := alexWS.recvFrame(); !bytes.Equal(got, back) {
+		t.Fatal("reply frame differs")
+	}
+	samWS.send(map[string]any{"type": "floor_release", "transmission_id": tx2})
+	samWS.want("floor_released", "reason", "released")
+	alexWS.want("floor_released", "reason", "released")
+
+	samWS.send(map[string]any{"type": "session_end"})
+	samWS.want("session_end", "reason", "ended_by_you")
+	alexWS.want("session_end", "reason", "ended_by_peer")
+	samWS.wantClose(1000)
+	alexWS.wantClose(1000)
+	waitFor(t, func() bool { return strings.Contains(metricsText(t, a), "pttd_ws_frames_relayed_total 101") })
 }
