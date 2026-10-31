@@ -50,6 +50,7 @@ type File struct {
 	Envelopes       []EnvelopeVector `json:"envelope_payloads"`
 	EnvelopeReceive []ReceiveVector  `json:"envelope_receive"`
 	RosterAccept    []AcceptVector   `json:"roster_accept"`
+	AudioFrames     AudioSection     `json:"audio_frames"`
 }
 
 // SignedVector: Wire is the JSON text of the signed object. Expect is "valid" (decodes and
@@ -489,6 +490,7 @@ func generate(old *File) File {
 	f.Envelopes = envelopeVectors(s)
 	f.EnvelopeReceive = receiveVectors(s)
 	f.RosterAccept = acceptVectors()
+	f.AudioFrames = audioVectors()
 	return f
 }
 
@@ -1004,6 +1006,7 @@ func mustB64(t *testing.T, s string) []byte {
 
 func checkFile(t *testing.T, f File) {
 	t.Helper()
+	checkAudio(t, f.AudioFrames)
 	for _, v := range f.Signed {
 		t.Run("signed/"+v.Name, func(t *testing.T) {
 			pub := ed25519.PublicKey(mustB64(t, v.Public))
