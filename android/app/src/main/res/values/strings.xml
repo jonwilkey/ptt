@@ -161,6 +161,9 @@
     <string name="notif_sender_answered_unknown">Your page was answered</string>
     <string name="notif_waiting_title">Waiting for %1$s</string>
     <string name="notif_waiting_unknown">Waiting for an answer</string>
+    <string name="notif_talking_title">Talking with %1$s</string>
+    <string name="notif_talking_unknown">Talking</string>
+    <string name="talk_microphone_missing">Allow the microphone in the setup checklist to talk live.</string>
     <string name="notif_page_failed">Page to %1$s failed</string>
     <string name="notif_page_no_answer">%1$s did not answer your page</string>
     <string name="notif_test">Test push</string>

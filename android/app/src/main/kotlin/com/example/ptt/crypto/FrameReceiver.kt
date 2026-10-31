@@ -20,7 +20,7 @@ enum class GrantVerdict {
 /** Verdict on one binary frame (docs/protocol.md section 12.5). */
 sealed interface FrameVerdict {
     /** Authenticated and first time for its seq: hand [opus] to the jitter buffer. */
-    class Accepted(val opus: ByteArray) : FrameVerdict
+    class Accepted(val opus: ByteArray, val transmissionId: String, val seq: Int) : FrameVerdict
 
     /** Authenticated, but the seq was already accepted for this transmission. */
     data object Replay : FrameVerdict
@@ -139,7 +139,7 @@ class FrameReceiver internal constructor(sessionKey: ByteArray, private val sess
             return FrameVerdict.Replay
         }
         cur.accepted.set(header.seq)
-        return FrameVerdict.Accepted(opus)
+        return FrameVerdict.Accepted(opus, header.transmissionId, header.seq)
     }
 
     /** Zeroes all keys and forgets all state. */

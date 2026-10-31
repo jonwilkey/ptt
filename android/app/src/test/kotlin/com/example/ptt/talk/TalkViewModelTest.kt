@@ -80,7 +80,7 @@ class TalkViewModelTest {
 
     private class Rig(val vm: TalkViewModel, val engine: AlertEngine, val repo: ActivePageRepository)
 
-    private fun TestScope.rig(dao: ActivePageDao = db.activePageDao()): Rig {
+    private fun TestScope.rig(dao: ActivePageDao = db.activePageDao(), talk: TalkSessions = NoTalk): Rig {
         val clock = VirtualClock { currentTime }
         // The outbox's send loop only runs when a test calls runCurrent, so queued rows stay put until then.
         val outbox = Outbox(db.outboxDao(), api, Json, clock, { }, backgroundScope, Backoff(Random(1)))
@@ -96,7 +96,11 @@ class TalkViewModelTest {
         )
         // The sender row of a lost page says `failed`: the app-wide owner of that, as in PttApplication.
         LostPages(outbox, repo, keys).start(backgroundScope)
-        return Rig(TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock), engine, repo)
+        return Rig(
+            TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock, talk),
+            engine,
+            repo
+        )
     }
 
     /** Reads of the active page wait for [gate] while it is set, to hold a coroutine at a chosen point. */
@@ -149,7 +153,8 @@ class TalkViewModelTest {
                 backgroundScope,
                 VirtualClock {
                     currentTime
-                }
+                },
+                NoTalk
             )
         second.show(PAGE, TalkIntents.MODE_ANSWER, null)
         runCurrent()
@@ -221,6 +226,24 @@ class TalkViewModelTest {
         assertEquals(2, notices.count("clear:$PAGE"))
         // Our own End deleting the row is not "the page ended".
         assertEquals(TalkPhase.DONE, rig.vm.state.value.phase)
+    }
+
+    @Test(timeout = 60_000)
+    fun endAlwaysQueuesTheRestCancelWhetherOrNotTheSocketSentSessionEnd() = runTest {
+        for (sentOverSocket in listOf(true, false)) {
+            val talk = RecordingTalk(sentOverSocket)
+            val before = api.calls.count { it == "cancel:$PAGE" }
+            val rig = rig(talk = talk)
+            rig.engine.start(urgent)
+            keys.put(PAGE, ByteArray(32) { 1 })
+            rig.vm.show(PAGE, TalkIntents.MODE_ANSWER, null)
+            runCurrent()
+            rig.vm.end()
+            runCurrent()
+            assertEquals(listOf(PAGE), talk.ends)
+            assertEquals(1, api.calls.count { it == "cancel:$PAGE" } - before)
+            assertEquals("no error is shown for the cancel", TalkPhase.DONE, rig.vm.state.value.phase)
+        }
     }
 
     @Test
@@ -603,5 +626,24 @@ class TalkViewModelTest {
         rig.vm.show(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
         runCurrent()
         assertEquals(SendProgress.FAILED, rig.vm.state.value.progress)
+    }
+}
+
+/** A view model test has no live session: End goes through the outbox. */
+object NoTalk : TalkSessions {
+    override fun eligible(pageId: String) = true
+
+    override fun requestEnd(pageId: String) = false
+}
+
+/** A live session whose WebSocket `session_end` is queued (or not) and which records it. */
+class RecordingTalk(private val sent: Boolean) : TalkSessions {
+    val ends = mutableListOf<String>()
+
+    override fun eligible(pageId: String) = true
+
+    override fun requestEnd(pageId: String): Boolean {
+        ends += pageId
+        return sent
     }
 }

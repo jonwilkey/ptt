@@ -11,7 +11,13 @@ import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 /**
  * The intent contract of [TalkActivity]. Every notification and full-screen intent that opens the talk
@@ -71,6 +77,20 @@ class TalkActivity : ComponentActivity() {
         setShowWhenLocked(true)
         setTurnScreenOn(true)
         open(intent)
+        // Live talk's microphone service may only start while this screen is visible (spec, "Talk and audio").
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.state
+                    .map { it.pageId to it.wantsLiveTalk }
+                    .distinctUntilChanged()
+                    .collect { (pageId, wants) ->
+                        if (wants && viewModel.liveTalkEligible()) {
+                            val started = TalkService.start(applicationContext, pageId, viewModel.state.value.caller)
+                            viewModel.microphoneMissing(!started && !TalkService.canStart(applicationContext))
+                        }
+                    }
+            }
+        }
         setContent {
             MaterialTheme {
                 val state by viewModel.state.collectAsState()

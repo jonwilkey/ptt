@@ -52,6 +52,7 @@ fun TalkScreen(state: TalkState, onAnswer: () -> Unit, onEnd: () -> Unit, onClos
                 Caller(state)
                 Text(stringResource(R.string.talk_answered), style = MaterialTheme.typography.titleLarge)
                 Text(stringResource(R.string.talk_live_unavailable))
+                if (state.microphoneMissing) Text(stringResource(R.string.talk_microphone_missing))
                 BigButton(R.string.talk_end, onEnd, enabled = !state.ending)
             }
 
@@ -82,6 +83,7 @@ private fun Outgoing(state: TalkState, onEnd: () -> Unit) {
     val progress = state.progress
     Text(stringResource(progress.label()), style = MaterialTheme.typography.titleLarge)
     if (progress == SendProgress.ANSWERED) Text(stringResource(R.string.talk_live_unavailable))
+    if (state.microphoneMissing) Text(stringResource(R.string.talk_microphone_missing))
     BigButton(if (progress.terminal) R.string.talk_close else R.string.talk_end, onEnd, enabled = !state.ending)
 }
 

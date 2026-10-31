@@ -99,8 +99,15 @@ data class TalkState(
     val ending: Boolean = false,
     val sender: Boolean = false,
     val progress: SendProgress = SendProgress.SENDING,
-    val urgent: Boolean = false
+    val urgent: Boolean = false,
+    /** RECORD_AUDIO is not granted, so live talk cannot start: the setup checklist has the item. */
+    val microphoneMissing: Boolean = false
 ) {
+    /** Whether this screen's page should have the live-talk service running (a sender waiting, or an answered page). */
+    val wantsLiveTalk: Boolean
+        get() = pageId.isNotEmpty() &&
+            (phase == TalkPhase.ANSWERED || (sender && phase == TalkPhase.OUTGOING && !progress.terminal))
+
     val over: Boolean get() = phase == TalkPhase.ENDED || phase == TalkPhase.ANSWERED_ELSEWHERE
 }
 
@@ -122,7 +129,8 @@ class TalkViewModel @Inject constructor(
     private val notices: PageNotices,
     private val pageEvents: @JvmSuppressWildcards SharedFlow<PageEvent>,
     private val scope: CoroutineScope,
-    private val clock: Clock
+    private val clock: Clock,
+    private val talk: TalkSessions
 ) : ViewModel() {
     private val _state = MutableStateFlow(TalkState())
     val state: StateFlow<TalkState> = _state
@@ -157,6 +165,11 @@ class TalkViewModel @Inject constructor(
         scope.launch { open(pageId, mode) }
     }
 
+    /** Whether live talk may run for the shown page (never for a Test alert to this phone itself). */
+    fun liveTalkEligible(): Boolean = talk.eligible(_state.value.pageId)
+
+    fun microphoneMissing(missing: Boolean) = _state.update { it.copy(microphoneMissing = missing) }
+
     fun answerPressed() {
         val pageId = _state.value.pageId
         scope.launch { answer(pageId) }
@@ -176,6 +189,10 @@ class TalkViewModel @Inject constructor(
             val pageId = current.pageId
             // The answer may still be on its way to the outbox and the active-page row.
             answerJobs[pageId]?.join()
+            // The WebSocket session_end (when joined) ends the peer's session at once, but a half-dead socket can lose
+            // it: the REST cancel through the outbox is always queued too. Both are idempotent; a 410 is harmless
+            // (cancel outcomes are not watched here).
+            guarded("end session") { talk.requestEnd(pageId) }
             if (!current.progress.terminal) guarded("end") { outbox.enqueue(OutboxAction.Cancel(pageId)) }
             engine.end(pageId)
             notices.clear(pageId)

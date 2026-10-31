@@ -56,6 +56,19 @@ class SenderWaiting(
         }
     }
 
+    /** Renders the current row again (the talk service stopped: its ongoing notification no longer stands in). */
+    fun refresh() {
+        scope.launch {
+            try {
+                render(activePage.current())
+            } catch (e: CancellationException) {
+                throw e
+            } catch (@Suppress("TooGenericExceptionCaught") _: Exception) {
+                // The row is read again at the next change.
+            }
+        }
+    }
+
     private suspend fun render(row: ActivePageEntity?) {
         val roster = heldRoster()
         val ownUser = tokens.deviceId()?.let { roster?.find(it)?.userId }
