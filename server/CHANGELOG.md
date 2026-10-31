@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/jonwilkey/ptt/compare/server-v0.2.0...server-v0.3.0) (2026-10-31)
+
+
+### Features
+
+* **server:** floor control and audio relay ([#42](https://github.com/jonwilkey/ptt/issues/42)) ([8afc4ef](https://github.com/jonwilkey/ptt/commit/8afc4ef576a77d018eb9d975e03764ff169fa447))
+* **server:** WebSocket sessions for live talk ([#40](https://github.com/jonwilkey/ptt/issues/40)) ([22f5998](https://github.com/jonwilkey/ptt/commit/22f599836f87535bc9ad459ace7cd40aae7e9996))
+
 ## [0.2.0](https://github.com/jonwilkey/ptt/compare/server-v0.1.0...server-v0.2.0) (2026-10-28)
 
 
