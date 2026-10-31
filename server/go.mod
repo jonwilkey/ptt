@@ -6,6 +6,7 @@ toolchain go1.27.3
 
 require (
 	firebase.google.com/go/v4 v4.22.0
+	github.com/coder/websocket v1.8.15
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/google/uuid v1.6.0
 	github.com/pressly/goose/v3 v3.29.0

@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/jonwilkey/ptt/server/internal/auth"
 	"github.com/jonwilkey/ptt/server/internal/cleanup"
 	"github.com/jonwilkey/ptt/server/internal/clock"
 	"github.com/jonwilkey/ptt/server/internal/config"
@@ -23,6 +24,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/metrics"
 	"github.com/jonwilkey/ptt/server/internal/pages"
 	"github.com/jonwilkey/ptt/server/internal/push"
+	"github.com/jonwilkey/ptt/server/internal/ws"
 )
 
 // ShutdownTimeout is how long in-flight requests get to finish after SIGTERM. Docker's default
@@ -43,6 +45,8 @@ type App struct {
 	clk      clock.Clock
 	pageSvc  *pages.Service
 	pageMet  *metrics.Pages
+	authn    *auth.Authenticator
+	hub      *ws.Hub
 
 	// The background loops started by Start.
 	bgCancel context.CancelFunc
@@ -84,6 +88,11 @@ func New(version string, logger *slog.Logger, sqlDB *sql.DB, migrator *db.Migrat
 	a.pageSvc = pages.NewService(pages.Options{
 		DB: sqlDB, Sender: a.sender, Logger: logger, Clock: a.clk, Metrics: a.pageMet,
 	})
+	// The REST middleware and the WebSocket hello share one authenticator, so a flood of bad
+	// tokens over both writes one auth_failure audit row per window.
+	a.authn = auth.NewAuthenticator(sqlDB, logger, a.clk.Now)
+	a.hub = ws.New(ws.Options{DB: sqlDB, Auth: a.authn, Ender: a.pageSvc, Logger: logger, Clock: a.clk})
+	a.pageSvc.SetNotifier(a.hub)
 	return a
 }
 
@@ -97,6 +106,7 @@ func (a *App) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.bgCancel = cancel
 	a.pageSvc.Start()
+	a.hub.Start()
 	a.bgWG.Add(1)
 	go func() {
 		defer a.bgWG.Done()
@@ -107,6 +117,8 @@ func (a *App) Start() {
 // Close stops the background loops, then lets in-flight pushes finish until ctx ends and
 // cancels whatever is left.
 func (a *App) Close(ctx context.Context) {
+	// Sockets first: the clients are told 4503 and reconnect when the server is back.
+	a.hub.Shutdown(ctx)
 	if a.bgCancel != nil {
 		a.bgCancel()
 		a.bgWG.Wait()
@@ -115,9 +127,8 @@ func (a *App) Close(ctx context.Context) {
 	a.notifier.Close(ctx)
 }
 
-// activeSessions is the number of open talk sessions. Sessions arrive with the WebSocket relay
-// in milestone 4; until then there are none, which is what the deploy workflow waits for.
-func (a *App) activeSessions() int { return 0 }
+// activeSessions is the number of open talk sessions, which the deploy workflow waits to drain.
+func (a *App) activeSessions() int { return a.hub.Sessions() }
 
 // Health reports whether the database answers and the schema is fully migrated.
 func (a *App) Health(ctx context.Context) error {
@@ -144,6 +155,9 @@ func (a *App) PublicHandler() http.Handler {
 
 		RosterNotifier: a.notifier,
 		Pages:          a.pageSvc,
+		Auth:           a.authn,
+		WS:             a.hub,
+		OnRevoke:       a.hub.CloseDevice,
 	})
 }
 
@@ -169,6 +183,7 @@ func (a *App) InternalHandler() http.Handler {
 func (a *App) registry() *prometheus.Registry {
 	reg := metrics.New(a.version, a.activeSessions)
 	a.pageMet.Register(reg)
+	metrics.RegisterWS(reg, a.hub.Sockets)
 	return reg
 }
 

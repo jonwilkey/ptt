@@ -8,6 +8,7 @@ package sqlcdb
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const clearFCMToken = `-- name: ClearFCMToken :exec
@@ -191,6 +192,18 @@ func (q *Queries) InsertDevice(ctx context.Context, arg InsertDeviceParams) erro
 	return err
 }
 
+const isDeviceRevoked = `-- name: IsDeviceRevoked :one
+SELECT COUNT(*) FROM devices WHERE id = ? AND revoked_at IS NOT NULL
+`
+
+// WebSocket revocation re-checks (docs/protocol.md section 11.9).
+func (q *Queries) IsDeviceRevoked(ctx context.Context, id string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, isDeviceRevoked, id)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const listContactDevices = `-- name: ListContactDevices :many
 SELECT u.id AS user_id, u.display_name, u.is_admin, d.last_seen_at, d.checklist_status
 FROM devices d
@@ -314,6 +327,44 @@ func (q *Queries) ListPushTargets(ctx context.Context) ([]ListPushTargetsRow, er
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRevokedAmong = `-- name: ListRevokedAmong :many
+SELECT id FROM devices WHERE revoked_at IS NOT NULL AND id IN (/*SLICE:ids*/?)
+`
+
+// The 5 s sweep: which of the connected devices have been revoked, in one query.
+func (q *Queries) ListRevokedAmong(ctx context.Context, ids []string) ([]string, error) {
+	query := listRevokedAmong
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

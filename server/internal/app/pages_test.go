@@ -141,7 +141,7 @@ func TestRestartWhileRinging(t *testing.T) {
 	clk2 := clock.NewFake(start.Add(40 * time.Second))
 	a2, d2 := boot(t, path, clk2, fake)
 	t.Cleanup(func() { a2.Close(t.Context()); _ = d2.Close() })
-	clk2.BlockUntil(2) // the scheduler's first pass is done and the cleanup's daily wait is set
+	clk2.BlockUntil(3) // the scheduler's first pass is done; the cleanup's daily wait and the WebSocket sweep are set
 	a2.pageSvc.Wait()
 	if got := summarize(fake); !equal(got, []string{"page->tok-sam", "page_state:not_delivered->tok-alex"}) {
 		t.Fatalf("pushes after restart = %v", got)
@@ -157,7 +157,7 @@ func TestRestartWhileRinging(t *testing.T) {
 		t.Fatalf("answer pushes = %v", got)
 	}
 	clk2.Advance(15 * time.Minute)
-	clk2.BlockUntil(2) // scheduler tick and the cleanup's daily wait
+	clk2.BlockUntil(3) // scheduler tick, the cleanup's daily wait and the WebSocket sweep
 	var n int
 	if err := d2.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM active_pages`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("active pages after the answered expiry = %d, %v", n, err)

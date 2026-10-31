@@ -138,7 +138,9 @@ func TestAnsweredPageExpires(t *testing.T) {
 	if f.state(id) != StateEnded || f.count(`SELECT COUNT(*) FROM active_pages`) != 0 {
 		t.Errorf("state = %s", f.state(id))
 	}
-	f.wantPushes() // protocol section 8 lists no push for this expiry
+	// The 15-minute cap is an "idle" session end (protocol sections 8 and 11.5): a sender
+	// with no live socket is told by FCM.
+	f.wantPushes("page_state:ended -> tok-A [normal 900s]")
 }
 
 func TestOverdueAfterDowntimeSkipsRepush(t *testing.T) {

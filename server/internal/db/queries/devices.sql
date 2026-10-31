@@ -79,3 +79,11 @@ WHERE id = ?;
 -- registered while the push was in flight.
 -- name: ClearFCMToken :exec
 UPDATE devices SET fcm_token = NULL WHERE id = ? AND fcm_token = ?;
+
+-- WebSocket revocation re-checks (docs/protocol.md section 11.9).
+-- name: IsDeviceRevoked :one
+SELECT COUNT(*) FROM devices WHERE id = ? AND revoked_at IS NOT NULL;
+
+-- The 5 s sweep: which of the connected devices have been revoked, in one query.
+-- name: ListRevokedAmong :many
+SELECT id FROM devices WHERE revoked_at IS NOT NULL AND id IN (sqlc.slice('ids'));

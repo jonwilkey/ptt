@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/jonwilkey/ptt/server/internal/auth"
 	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 	"github.com/jonwilkey/ptt/server/internal/ratelimit"
 )
@@ -18,11 +19,9 @@ const (
 	// enrollLimit is POST /v1/enroll's budget per client IP (docs/protocol.md section 1).
 	enrollLimit  = 5
 	enrollWindow = time.Hour
-	// authFailAuditWindow spaces the auth_failure audit rows: a flood of bad tokens writes one
-	// row per window, not one per request.
-	authFailAuditWindow = time.Minute
-	// lastSeenInterval is the most often a device's last_seen_at is written.
-	lastSeenInterval = time.Minute
+	// wsUpgradeLimit is GET /v1/ws upgrades per client IP (docs/protocol.md section 11.10).
+	wsUpgradeLimit  = 30
+	wsUpgradeWindow = time.Minute
 	// offlineAfter is how long without contact before a person shows as offline.
 	offlineAfter = 48 * time.Hour
 )
@@ -37,26 +36,32 @@ type api struct {
 	notifier RosterNotifier
 	pages    PageService // nil: the page endpoints are not served
 
-	enrollLimiter   *ratelimit.Limiter
-	authFailLimiter *ratelimit.Limiter
+	auth          *auth.Authenticator
+	onRevoke      func(deviceID string)
+	wsLimiter     *ratelimit.Limiter
+	enrollLimiter *ratelimit.Limiter
 }
 
-func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time, notifier RosterNotifier, pages PageService) *api {
+func newAPI(db *sql.DB, logger *slog.Logger, now func() time.Time, authn *auth.Authenticator, notifier RosterNotifier, pages PageService) *api {
 	if notifier == nil {
 		notifier = NopRosterNotifier{}
 	}
 	if now == nil {
 		now = time.Now
 	}
+	if authn == nil {
+		authn = auth.NewAuthenticator(db, logger, now)
+	}
 	return &api{
-		db:              db,
-		q:               sqlcdb.New(db),
-		logger:          logger,
-		now:             now,
-		notifier:        notifier,
-		pages:           pages,
-		enrollLimiter:   ratelimit.New(enrollLimit, enrollWindow, now),
-		authFailLimiter: ratelimit.New(1, authFailAuditWindow, now),
+		db:            db,
+		q:             sqlcdb.New(db),
+		logger:        logger,
+		now:           now,
+		notifier:      notifier,
+		pages:         pages,
+		auth:          authn,
+		enrollLimiter: ratelimit.New(enrollLimit, enrollWindow, now),
+		wsLimiter:     ratelimit.New(wsUpgradeLimit, wsUpgradeWindow, now),
 	}
 }
 

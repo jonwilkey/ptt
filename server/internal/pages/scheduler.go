@@ -20,7 +20,9 @@ const (
 	SecondRepush = 2 * time.Minute
 	// MissedAfter is how long a normal page may go unanswered. Urgent pages never time out.
 	MissedAfter = 15 * time.Minute
-	// AnsweredTTL is how long an answered page lives (the milestone-2 stand-in for a session).
+	// AnsweredTTL is the 15-minute cap on an answered page whose two participants never joined
+	// its session together (protocol sections 8 and 11.5). Once they have, the WebSocket idle
+	// timer bounds the session instead and the scheduler leaves the page alone (Notifier.Held).
 	AnsweredTTL = 15 * time.Minute
 
 	// maxTick caps the scheduler's sleep, so it also notices pages created while it sleeps.
@@ -156,6 +158,9 @@ func (s *Service) RunDue(ctx context.Context) (next time.Time, ok bool, err erro
 				if !ok || at.Before(next) {
 					next, ok = at, true
 				}
+			case st == stepExpire && s.notify.Held(row.ID):
+				// The idle timer of a joined session (or the restart grace) owns this page. Checked
+				// here, outside any transaction, so a held page costs no write per tick.
 			default:
 				did, err := s.runStep(ctx, row.ID)
 				if err != nil {
@@ -221,13 +226,15 @@ func (s *Service) runStep(ctx context.Context, id string) (bool, error) {
 		s.dispatch(func(ctx context.Context) { s.repush(ctx, id) })
 	case stepMissed:
 		s.metrics.Ended.WithLabelValues(metrics.EndMissed).Inc()
+		live := s.notify.Ended(Ending{PageID: id, SessionID: p.SessionID, Sender: p.FromDevice, Reason: ReasonMissed})
 		s.dispatch(func(ctx context.Context) {
 			s.sendTo(ctx, recipientsOf(p), cancelMsg(id, "missed"))
-			s.sendTo(ctx, []string{p.FromDevice}, stateMsg(id, "missed"))
+			if !live.Sender {
+				s.sendTo(ctx, []string{p.FromDevice}, stateMsg(id, "missed"))
+			}
 		})
 	case stepExpire:
-		// Protocol section 8 lists no push for this expiry.
-		s.metrics.Ended.WithLabelValues(metrics.EndExpired).Inc()
+		s.afterIdle(p)
 	}
 	return true, nil
 }
@@ -256,5 +263,7 @@ func (s *Service) repush(ctx context.Context, id string) {
 		s.failPage(ctx, p.ID, p.FromDevice)
 		return
 	}
-	s.sendTo(ctx, []string{p.FromDevice}, stateMsg(p.ID, "not_delivered"))
+	if !s.notify.Progress(p.SessionID, p.FromDevice, p.ID, "not_delivered") {
+		s.sendTo(ctx, []string{p.FromDevice}, stateMsg(p.ID, "not_delivered"))
+	}
 }

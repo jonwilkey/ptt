@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/jonwilkey/ptt/server/internal/auth"
 )
 
 // healthTimeout bounds a /healthz check so a wedged database reports unhealthy instead of
@@ -54,6 +56,16 @@ type PublicOptions struct {
 	RosterNotifier RosterNotifier
 	// Pages serves the /v1/pages endpoints; without it they are not registered.
 	Pages PageService
+	// Auth resolves device tokens. Share the one the WebSocket hub uses, so both throttle
+	// auth_failure audit rows together; defaults to a private one.
+	Auth *auth.Authenticator
+	// WS serves GET /v1/ws (docs/protocol.md section 11); without it the route is not
+	// registered. The upgrade is rate limited per client IP here; the handler authenticates
+	// in-band, so the route is outside the bearer-token middleware.
+	WS http.Handler
+	// OnRevoke is called with the device id after POST /v1/devices/{id}/revoke succeeds (also
+	// when the device was already revoked), so the WebSocket hub can close its socket at once.
+	OnRevoke func(deviceID string)
 }
 
 // NewPublic returns the public API handler.
@@ -82,7 +94,12 @@ func NewPublic(opts PublicOptions) http.Handler {
 	r.Head("/healthz", health)
 
 	if opts.DB != nil {
-		newAPI(opts.DB, logger, opts.Now, opts.RosterNotifier, opts.Pages).routes(r)
+		a := newAPI(opts.DB, logger, opts.Now, opts.Auth, opts.RosterNotifier, opts.Pages)
+		a.onRevoke = opts.OnRevoke
+		a.routes(r)
+		if opts.WS != nil {
+			r.Method(http.MethodGet, "/v1/ws", a.upgradeLimit(opts.WS))
+		}
 	}
 	return r
 }

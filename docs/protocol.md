@@ -62,6 +62,7 @@ Every error is an HTTP status plus a JSON body of exactly one field:
 | `already_answered` | 409 | `answer` on a page another device already answered |
 | `page_ended` | 410 | Any action on a page that has ended (except `cancel` → `204`), or `delivered` on a page another device answered |
 | `rate_limited` | 429 | Too many requests; `Retry-After` header in seconds |
+| `unavailable` | 503 | The server cannot take the request now (the WebSocket upgrade cap, §11.10); `Retry-After` header in seconds |
 
 `code_invalid` deliberately gives no oracle: the server does not distinguish unknown, used, and
 expired codes.
@@ -717,7 +718,7 @@ last_seq}` (client → server), `listener_gap {transmission_id}` (server → tal
 
 1. The client sends `hello {protocol, token, app_version}` within **10 s** of the upgrade; the
    server closes with `4408` otherwise. Before `hello` the server accepts nothing else, at most 512
-   bytes, and caps unauthenticated sockets at 64 (more upgrades → `503`). A binary frame before
+   bytes, and caps unauthenticated sockets at 64 (more upgrades → `503 unavailable`, §1). A binary frame before
    `hello` is `4400`.
 2. **Not valid strict JSON, wrong keys or types, `protocol` not an integer ≥ 1, or an invalid
    `app_version` → close `4400`, no audit row.**
@@ -915,7 +916,7 @@ and do not count as messages.
 | What | Limit | Over the limit |
 | --- | --- | --- |
 | Upgrades | 30 / minute per client IP | `429`, `Retry-After`, as §1 |
-| Unauthenticated sockets | 64 at once | `503` on upgrade |
+| Unauthenticated sockets | 64 at once | `503 unavailable` on upgrade (`Retry-After`, §1) |
 | Text messages | 20 / s sustained, burst 40, per socket | close `4429` |
 | Binary frames | 100 / s sustained, burst 200 (a talker sends 50 / s), per socket | close `4429` |
 | Text frame / binary frame size | 1024 / 1312 bytes | close `4413` |
