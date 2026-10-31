@@ -32,4 +32,14 @@ class SessionKeysTest {
         assertArrayEquals(ByteArray(32), old)
         assertArrayEquals(ByteArray(32) { 2 }, keys.get("a"))
     }
+
+    @Test(timeout = 60_000)
+    fun copyIsIndependentOfLaterClear() {
+        val keys = SessionKeys()
+        keys.put("a", ByteArray(32) { 5 })
+        val copy = keys.copy("a")!!
+        keys.clear("a")
+        assertArrayEquals(ByteArray(32) { 5 }, copy)
+        assertNull(keys.copy("a"))
+    }
 }

@@ -4,7 +4,7 @@ import java.io.File
 
 /** Loads the shared `testdata/protocol-vectors.json` (path from the `ptt.protocolVectors` system property). */
 object VectorFile {
-    private val root: JsonValue.Obj by lazy {
+    internal val root: JsonValue.Obj by lazy {
         val path = requireNotNull(System.getProperty("ptt.protocolVectors")) { "ptt.protocolVectors is not set" }
         StrictJson.parse(File(path).readBytes()).asObject("vectors")
     }
