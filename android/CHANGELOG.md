@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/jonwilkey/ptt/compare/android-v0.2.0...android-v0.3.0) (2026-11-01)
+
+
+### Features
+
+* **android:** let the family widget shrink to 3x1 ([#37](https://github.com/jonwilkey/ptt/issues/37)) ([92b6557](https://github.com/jonwilkey/ptt/commit/92b6557aa99b83ed27afa0ff1409eb858501ae2e))
+* **android:** live talk screen with hold-to-talk and first-talker rule ([#47](https://github.com/jonwilkey/ptt/issues/47)) ([1975871](https://github.com/jonwilkey/ptt/commit/1975871a76fa40b6bc4893a91c0cabc368bcb182))
+* **android:** Opus capture and playback for live talk ([#45](https://github.com/jonwilkey/ptt/issues/45)) ([d7f77e5](https://github.com/jonwilkey/ptt/commit/d7f77e59be0c0be87da28e5082128a5484291500))
+* **android:** per-frame audio encryption ([#43](https://github.com/jonwilkey/ptt/issues/43)) ([45fd6eb](https://github.com/jonwilkey/ptt/commit/45fd6ebe0d865ec352912c705f2e8fbb46755ea2))
+* **android:** WebSocket client and TalkService for live talk ([#44](https://github.com/jonwilkey/ptt/issues/44)) ([2aac313](https://github.com/jonwilkey/ptt/commit/2aac313f5fd8309bc5e013c965c83505b65ec418))
+
 ## [0.2.0](https://github.com/jonwilkey/ptt/compare/android-v0.1.1...android-v0.2.0) (2026-10-30)
 
 
