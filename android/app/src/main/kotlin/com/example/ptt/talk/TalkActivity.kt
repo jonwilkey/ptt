@@ -8,10 +8,12 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.annotation.VisibleForTesting
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import dagger.hilt.android.AndroidEntryPoint
@@ -21,7 +23,7 @@ import kotlinx.coroutines.launch
 
 /**
  * The intent contract of [TalkActivity]. Every notification and full-screen intent that opens the talk
- * screen is built with [intent], so the real screen (a later PR) only has to read these extras.
+ * screen is built with [intent], so the screen only has to read these extras.
  *
  * - [EXTRA_PAGE_ID]: the page this screen is about (always present).
  * - [EXTRA_MODE]: [MODE_ANSWER] (the receiver tapped the notification: answer the page), [MODE_INCOMING]
@@ -63,14 +65,14 @@ object TalkIntents {
 }
 
 /**
- * The placeholder talk screen (live talk arrives in milestone 4). It shows over the lock screen
- * (the manifest and the calls below both ask for it) and holds nothing but this conversation: it has its own
- * task, so Back and End return to the lock screen. What it does for each [TalkIntents] mode is in
- * [TalkViewModel].
+ * The talk screen: the page's progress or the incoming page, then the live conversation with its hold-to-talk
+ * button ([TalkScreen]). It shows over the lock screen (the manifest and the calls below both ask for it) and holds
+ * nothing but this conversation: it has its own task, so Back and End return to the lock screen. What it does for
+ * each [TalkIntents] mode is in [TalkViewModel].
  */
 @AndroidEntryPoint
 class TalkActivity : ComponentActivity() {
-    internal val viewModel: TalkViewModel by viewModels()
+    internal val viewModel: TalkViewModel by viewModels { viewModelFactory ?: defaultViewModelProviderFactory }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,9 +96,29 @@ class TalkActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 val state by viewModel.state.collectAsState()
-                TalkScreen(state, viewModel::answerPressed, viewModel::end, ::finishAndRemoveTask)
+                val live by viewModel.live.collectAsState()
+                TalkScreen(
+                    state,
+                    viewModel::answerPressed,
+                    viewModel::end,
+                    ::finishAndRemoveTask,
+                    live,
+                    { viewModel.pressTalk() },
+                    viewModel::releaseTalk
+                )
             }
         }
+    }
+
+    /** A hold must never outlive the screen being visible and focused (lock, shade, another window, app switch). */
+    override fun onStop() {
+        viewModel.releaseTalk()
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        if (!hasFocus) viewModel.releaseTalk()
+        super.onWindowFocusChanged(hasFocus)
     }
 
     public override fun onNewIntent(intent: Intent) {
@@ -117,5 +139,12 @@ class TalkActivity : ComponentActivity() {
             intent.getStringExtra(TalkIntents.EXTRA_MODE).orEmpty(),
             intent.getStringExtra(TalkIntents.EXTRA_CALLER_NAME)
         )
+    }
+
+    companion object {
+        /** Test hook: builds the view model in place of Hilt, so a test can give it fake live-talk seams. */
+        @VisibleForTesting
+        @Volatile
+        var viewModelFactory: ViewModelProvider.Factory? = null
     }
 }

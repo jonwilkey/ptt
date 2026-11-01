@@ -36,6 +36,8 @@ import com.example.ptt.push.SocketPageEvents
 import com.example.ptt.setup.RosterSync
 import com.example.ptt.talk.AndroidTalkServiceControl
 import com.example.ptt.talk.PageSender
+import com.example.ptt.talk.ServiceTalkAudioSource
+import com.example.ptt.talk.TalkAudioSource
 import com.example.ptt.talk.TalkHosting
 import com.example.ptt.talk.TalkServiceControl
 import com.example.ptt.talk.TalkSessionController
@@ -131,6 +133,10 @@ object AlertModule {
 
     @Provides
     fun talkSessions(controller: TalkSessionController): TalkSessions = controller
+
+    @Provides
+    @Singleton
+    fun talkAudioSource(): TalkAudioSource = ServiceTalkAudioSource()
 
     @Provides
     @Singleton

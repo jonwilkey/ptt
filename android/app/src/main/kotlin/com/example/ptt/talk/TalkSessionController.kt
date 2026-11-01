@@ -101,7 +101,12 @@ data class TalkSessionState(
     val peerPresent: Boolean = false,
     val floor: TalkFloor = TalkFloor.IDLE,
     val rttMillis: Long? = null,
-    val pageProgress: WsPageState? = null
+    val pageProgress: WsPageState? = null,
+    /**
+     * The sender may not talk yet: the receiver speaks first (see [FirstTalkerRule]). A fact about the session,
+     * kept here so that recreating the screen cannot lose it. Never true for the receiver.
+     */
+    val firstTalkerLocked: Boolean = false
 )
 
 /** One decrypted 20 ms Opus packet of the peer's transmission; [seq] orders it for the jitter buffer. */
@@ -139,6 +144,12 @@ sealed interface TalkEvent {
 interface TalkSessions {
     /** False for a page that never has a live session (the setup Test alert). */
     fun eligible(pageId: String): Boolean
+
+    /** The session's observable state; it may belong to another page than the one shown (check its `pageId`). */
+    val state: StateFlow<TalkSessionState>
+
+    /** One-shot events (chirps, buzz, session end); lost while nobody collects, so durable UI uses [state]. */
+    val events: SharedFlow<TalkEvent>
 
     /**
      * End was pressed: sends the WebSocket `session_end` if the socket is joined (true when queued). It only ends
@@ -185,12 +196,12 @@ class TalkSessionController(
     private val mutableState = MutableStateFlow(TalkSessionState())
 
     /** The session's observable state. */
-    val state: StateFlow<TalkSessionState> = mutableState.asStateFlow()
+    override val state: StateFlow<TalkSessionState> = mutableState.asStateFlow()
 
     private val mutableEvents = MutableSharedFlow<TalkEvent>(extraBufferCapacity = EVENT_BUFFER)
 
     /** One-shot events (chirps, buzz, capture stop, session end). */
-    val events: SharedFlow<TalkEvent> = mutableEvents.asSharedFlow()
+    override val events: SharedFlow<TalkEvent> = mutableEvents.asSharedFlow()
 
     private val opus = MutableSharedFlow<IncomingOpus>(
         extraBufferCapacity = OPUS_BUFFER,
@@ -323,6 +334,8 @@ class TalkSessionController(
         private var outstanding: String? = null
 
         private var audio: AudioSession? = null
+        private var firstTalker: FirstTalkerRule? = null
+        private var lockTimer: Job? = null
         private var role = PageRole.SENDER
         private var sessionId = ""
         private var peerDevice: String? = null
@@ -337,10 +350,12 @@ class TalkSessionController(
             try {
                 val row = activePage.current()?.takeIf { it.pageId == pageId }
                 if (row == null || !eligible(pageId)) return
+                firstTalker = if (row.role == PageRole.SENDER) FirstTalkerRule() else null
                 mutableState.value = TalkSessionState(
                     pageId = pageId,
                     stage = stageOf(row),
-                    connection = TalkConnection.CONNECTING
+                    connection = TalkConnection.CONNECTING,
+                    firstTalkerLocked = firstTalker != null
                 )
                 if (!prepare(row)) {
                     unavailable()
@@ -429,6 +444,36 @@ class TalkSessionController(
         private fun conversation() = mutableState.update {
             if (it.stage == SessionStage.WAITING) it.copy(stage = SessionStage.CONVERSATION) else it
         }
+
+        /**
+         * Applies [block] to the first-talker rule (senders only) and publishes the result in the state, with a timer
+         * that publishes it again when the 10 s of silence run out. Called from the socket's handlers and the timer;
+         * the rule's monitor orders them. A Run that is no longer the current one publishes nothing.
+         */
+        private fun withRule(block: (FirstTalkerRule, Long) -> Unit = { _, _ -> }) {
+            val rule = firstTalker ?: return
+            synchronized(rule) {
+                val now = nowMs()
+                block(rule, now)
+                val locked = rule.isLocked(now)
+                mutableState.update {
+                    if (run === this && it.pageId == pageId) it.copy(firstTalkerLocked = locked) else it
+                }
+                lockTimer?.cancel()
+                val due = rule.deadline()
+                lockTimer = if (locked && due != null && !ended) {
+                    scope.launch {
+                        delay(due - now)
+                        withRule()
+                    }
+                } else {
+                    null
+                }
+            }
+        }
+
+        /** The floor left [TalkFloor.PEER_TALKING], by any route: for the rule their first transmission is over. */
+        private fun peerStoppedTalking() = withRule { rule, _ -> rule.onPeerStoppedTalking() }
 
         /** The page is over for reasons found locally (no server message): wind down. */
         fun localEnd() {
@@ -524,8 +569,10 @@ class TalkSessionController(
         /** The socket closed: before anything else the audio state is told (never recreated on reconnect). */
         private fun socketLost() {
             var wasTalking = false
+            var peerWasTalking = false
             synchronized(audioLock) {
                 audio?.onSocketClosed()
+                peerWasTalking = mutableState.value.floor == TalkFloor.PEER_TALKING
                 wasTalking = sealer != null || mutableState.value.floor == TalkFloor.YOU
                 sealer = null
                 joined = false
@@ -540,6 +587,8 @@ class TalkSessionController(
                     floor = TalkFloor.IDLE
                 )
             }
+            // Nothing replays the end of a transmission cut off by the drop: for the rule it is over now.
+            if (peerWasTalking) peerStoppedTalking()
             if (wasTalking) {
                 // The own transmission is lost with the socket: capture must stop (a new request needs a new id).
                 mutableEvents.tryEmit(TalkEvent.StopCapture)
@@ -588,6 +637,9 @@ class TalkSessionController(
             if (audio?.onPeerJoined(device) != true) return
             peerDevice = device
             mutableState.update { it.copy(peerPresent = true) }
+            // Also the join snapshot's: a peer already there when this phone joined, or replayed after a reconnect
+            // (which cannot restart the window).
+            withRule { rule, now -> rule.onPeerPresent(now) }
             mutableEvents.tryEmit(TalkEvent.PeerJoined)
         }
 
@@ -615,6 +667,7 @@ class TalkSessionController(
                 GrantOutcome.Listen -> {
                     floorId = m.transmissionId
                     mutableState.update { it.copy(floor = TalkFloor.PEER_TALKING) }
+                    withRule { rule, now -> rule.onPeerStartedTalking(now) }
                     mutableEvents.tryEmit(TalkEvent.PeerStartedTalking)
                 }
 
@@ -647,6 +700,7 @@ class TalkSessionController(
                 sealer = null
                 mutableState.update { it.copy(floor = TalkFloor.IDLE) }
             }
+            if (!yours) peerStoppedTalking()
             mutableEvents.tryEmit(TalkEvent.FloorReleased(yours))
         }
 
@@ -681,7 +735,11 @@ class TalkSessionController(
             if (ended && mutableState.value.stage == SessionStage.ENDED) return
             ended = true
             // No more sealing from here on, whatever the database write below takes.
-            synchronized(audioLock) { sealer = null }
+            val peerWasTalking = synchronized(audioLock) {
+                sealer = null
+                mutableState.value.floor == TalkFloor.PEER_TALKING
+            }
+            if (peerWasTalking) peerStoppedTalking()
             mutableState.update { it.copy(stage = SessionStage.ENDED, floor = TalkFloor.IDLE, peerPresent = false) }
             sessionKeys.clear(pageId)
             withContext(NonCancellable) { pageEvents.sessionEnded(pageId, role, reason) }
@@ -759,6 +817,7 @@ class TalkSessionController(
         private fun cleanup(byStopNow: Boolean) {
             ended = true
             joinRetry?.cancel()
+            firstTalker?.let { synchronized(it) { lockTimer?.cancel() } }
             sealer = null
             audio?.close()
             socket?.close()

@@ -183,6 +183,26 @@
     <string name="talk_answered">Answered</string>
     <string name="talk_live_unavailable">Live talk is not available yet.</string>
     <string name="talk_end">End</string>
+    <string name="talk_hold_to_talk">Hold to talk</string>
+    <string name="talk_talking">Talking</string>
+    <string name="talk_you_talking">You are talking</string>
+    <string name="talk_peer_talking">%1$s is talking</string>
+    <string name="talk_connecting">Connecting…</string>
+    <string name="talk_live">Live</string>
+    <string name="talk_live_quality">Live · %1$s</string>
+    <string name="talk_quality_good">good connection</string>
+    <string name="talk_quality_fair">fair connection</string>
+    <string name="talk_quality_poor">poor connection</string>
+    <string name="talk_live_talk_unavailable">Live talk unavailable</string>
+    <string name="talk_waiting_for">Waiting for %1$s</string>
+    <string name="talk_speaks_first">%1$s speaks first</string>
+    <string name="talk_capture_cap">60 s limit — press again</string>
+    <string name="talk_capture_mic">Microphone unavailable</string>
+    <string name="talk_capture_codec">Audio encoder unavailable</string>
+    <string name="talk_capture_focus">Interrupted</string>
+    <string name="talk_capture_refused">Could not send — press again</string>
+    <string name="talk_ended_idle">Ended — nobody talking</string>
+    <string name="talk_ended_by_peer">%1$s ended</string>
     <string name="talk_page_ended">Page ended</string>
     <string name="talk_answered_elsewhere">Answered on another phone</string>
     <!-- Family and Test alert -->

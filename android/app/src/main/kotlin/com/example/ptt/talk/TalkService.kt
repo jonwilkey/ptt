@@ -27,8 +27,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -97,6 +99,7 @@ class TalkService : Service() {
         }
         pageId = page
         current = this
+        hostedChanges.update { it + 1 }
         hosting.host(page)
         watch(page, fallbackName)
         controller.open(page)
@@ -169,6 +172,7 @@ class TalkService : Service() {
         audio = null
         hosting.host(null)
         if (current === this) current = null
+        hostedChanges.update { it + 1 }
         // The waiting notification of a page that is still waiting comes back.
         senderWaiting.refresh()
         super.onDestroy()
@@ -183,6 +187,9 @@ class TalkService : Service() {
         @Volatile
         var current: TalkService? = null
             private set
+
+        /** Bumped whenever the hosted page or its audio changes, so that observers need not poll [current]. */
+        internal val hostedChanges = MutableStateFlow(0)
 
         /** True when the microphone permission is held, so the service may be started. */
         fun canStart(context: Context): Boolean =
