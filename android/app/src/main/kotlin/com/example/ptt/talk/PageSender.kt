@@ -136,6 +136,7 @@ class PageSender(
                 if (keepKey) {
                     sessionKeys.put(pageId, built.sessionKey)
                     sessionKeys.putPeers(pageId, built.payload.keys.keys)
+                    sessionKeys.putSenderKey(pageId, built.senderKey)
                 } else {
                     selfPages.add(pageId)
                 }

@@ -1,6 +1,8 @@
 package com.example.ptt.net
 
+import com.example.ptt.crypto.B64u
 import com.example.ptt.crypto.ProtocolException
+import com.example.ptt.crypto.SignedObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -28,6 +30,30 @@ class TalkCodecTest {
         )
         assertEquals("""{"type":"session_end"}""", TalkCodec.encode(ClientMessage.SessionEnd))
         assertEquals("""{"type":"ping","t":123}""", TalkCodec.encode(ClientMessage.Ping(123)))
+    }
+
+    @Test(timeout = 60_000)
+    fun senderKeyIsEncodedWithExactlyTheFieldsOfSection13Point2() {
+        val payload = ByteArray(250) { it.toByte() }
+        val sig = ByteArray(64) { 9 }
+        val key = SignedObject(payload, ID, sig)
+        val text = TalkCodec.encode(ClientMessage.SenderKey(key))
+        assertEquals(
+            """{"type":"sender_key","key":{"payload":"${B64u.encode(
+                payload
+            )}","signer":"$ID","sig":"${B64u.encode(sig)}"}}""",
+            text
+        )
+        assertTrue(text.length < TalkCodec.MAX_TEXT_BYTES)
+        assertThrows(ProtocolException::class.java) {
+            TalkCodec.encode(ClientMessage.SenderKey(SignedObject(payload, "x", sig)))
+        }
+        assertThrows(ProtocolException::class.java) {
+            TalkCodec.encode(ClientMessage.SenderKey(SignedObject(payload, ID, ByteArray(63))))
+        }
+        assertThrows(ProtocolException::class.java) {
+            TalkCodec.encode(ClientMessage.SenderKey(SignedObject(ByteArray(0), ID, sig)))
+        }
     }
 
     @Test(timeout = 60_000)

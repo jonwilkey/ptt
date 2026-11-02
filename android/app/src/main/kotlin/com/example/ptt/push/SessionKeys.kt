@@ -1,5 +1,6 @@
 package com.example.ptt.push
 
+import com.example.ptt.crypto.SignedObject
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -10,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 class SessionKeys {
     private val keys = ConcurrentHashMap<String, ByteArray>()
     private val peers = ConcurrentHashMap<String, Set<String>>()
+    private val senderKeys = ConcurrentHashMap<String, SignedObject>()
 
     /**
      * The device ids that may be the other end of [pageId]'s live session, from the signed envelope: for a page
@@ -18,6 +20,16 @@ class SessionKeys {
     fun putPeers(pageId: String, devices: Set<String>) {
         peers[pageId] = devices.toSet()
     }
+
+    /**
+     * The signed sender key of a page this phone sent (the session key wrapped for itself, docs/protocol.md
+     * section 7), kept to resend after each join. Cleared with the key.
+     */
+    fun putSenderKey(pageId: String, senderKey: SignedObject) {
+        senderKeys[pageId] = senderKey
+    }
+
+    fun senderKey(pageId: String): SignedObject? = senderKeys[pageId]
 
     fun peers(pageId: String): Set<String> = peers[pageId].orEmpty()
 
@@ -45,6 +57,7 @@ class SessionKeys {
 
     fun clear(pageId: String) {
         peers.remove(pageId)
+        senderKeys.remove(pageId)
         keys.computeIfPresent(pageId) { _, v ->
             v.fill(0)
             null
@@ -53,5 +66,7 @@ class SessionKeys {
 
     fun clearAll() {
         keys.keys.toList().forEach(::clear)
+        peers.clear()
+        senderKeys.clear()
     }
 }

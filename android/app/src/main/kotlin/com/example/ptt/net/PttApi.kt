@@ -35,6 +35,12 @@ interface PttApi {
     /** `POST /v1/pages` -> 201, or 200 for an idempotent retry. */
     suspend fun createPage(request: CreatePageRequest): ApiResult<CreatePageResponse>
 
+    /**
+     * `GET /v1/pages/{id}` (sender only): the page's signed envelope and sender key, parsed strictly. 404, 410 and
+     * 403 are [ApiResult.Final].
+     */
+    suspend fun getPage(pageId: String): ApiResult<PageRecoveryResponse>
+
     /** `POST /v1/pages/{id}/delivered` -> 200 with the page state. */
     suspend fun delivered(pageId: String): ApiResult<DeliveredResponse>
 

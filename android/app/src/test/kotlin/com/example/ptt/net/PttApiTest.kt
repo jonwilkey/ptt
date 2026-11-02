@@ -1,5 +1,6 @@
 package com.example.ptt.net
 
+import com.example.ptt.crypto.B64u
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -10,6 +11,7 @@ import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -237,6 +239,61 @@ class PttApiTest {
     fun getRosterNotFoundIsFinal() = runBlocking {
         reply(404, """{"error":"not_found"}""")
         assertEquals(ApiResult.Final(404, "not_found"), api.getRoster())
+    }
+
+    private val sig64 = B64u.encode(ByteArray(64) { 3 })
+
+    private fun signedJson(extra: String = "", signer: String = DEVICE, sig: String = sig64) =
+        """{"payload":"cGF5","signer":"$signer","sig":"$sig"$extra}"""
+
+    @Test
+    fun getPageParsesTheEnvelopeAndTheSenderKey() = runBlocking {
+        reply(200, """{"envelope":${signedJson()},"sender_key":${signedJson(signer = USER)}}""")
+        val result = api.getPage(SESSION) as ApiResult.Success
+        val http = take()
+        assertEquals("GET /v1/pages/$SESSION", "${http.method} ${http.url.encodedPath}")
+        assertEquals(DEVICE, result.body.envelope.signer)
+        assertEquals(USER, result.body.senderKey.signer)
+        assertArrayEquals("pay".toByteArray(), result.body.senderKey.payload)
+        assertEquals(64, result.body.senderKey.sig.size)
+    }
+
+    @Test
+    fun getPageRefusesAnythingButExactlyTheDocumentedShape() = runBlocking {
+        val good = signedJson()
+        val bodies = listOf(
+            """{"envelope":$good}""",
+            """{"envelope":$good,"sender_key":$good,"extra":1}""",
+            """{"envelope":$good,"sender_key":${signedJson(extra = ""","x":1""")}}""",
+            """{"envelope":$good,"sender_key":${signedJson(sig = "c2ln")}}""",
+            """{"envelope":$good,"sender_key":${signedJson(signer = "NOT-A-UUID")}}""",
+            """{"envelope":$good,"sender_key":$good,"envelope":$good}""",
+            """{"envelope":$good,"sender_key":null}""",
+            """[]""",
+            ""
+        )
+        for (body in bodies) {
+            reply(200, body)
+            assertEquals(body, ApiResult.Final(200, ErrorCode.BAD_RESPONSE), api.getPage(SESSION))
+        }
+    }
+
+    @Test
+    fun getPageAcceptsOnly200() = runBlocking {
+        reply(204)
+        assertEquals(ApiResult.Final(204, ErrorCode.BAD_RESPONSE), api.getPage(SESSION))
+        reply(202, signedJson().let { """{"envelope":$it,"sender_key":$it}""" })
+        assertEquals(ApiResult.Final(202, ErrorCode.BAD_RESPONSE), api.getPage(SESSION))
+    }
+
+    @Test
+    fun getPageStatusesAreFinalOrRetryable() = runBlocking {
+        for ((status, code) in listOf(404 to "not_found", 410 to "page_ended", 403 to "forbidden")) {
+            reply(status, """{"error":"$code"}""")
+            assertEquals(ApiResult.Final(status, code), api.getPage(SESSION))
+        }
+        reply(503)
+        assertEquals(ApiResult.Retryable(503), api.getPage(SESSION))
     }
 
     @Test
