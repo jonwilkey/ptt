@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.workflow_sha }}
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: true
           persist-credentials: false
@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.workflow_sha }}
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: true
           persist-credentials: false
@@ -113,15 +113,17 @@ jobs:
           REPO: ${{ steps.meta.outputs.repo }}
         run: |
           set -euo pipefail
-          if ! docker pull --quiet "${REPO}:deployed" > /dev/null; then
+          # One lookup of the tag: the label and expect_previous both come from this digest, so a
+          # tag moved meanwhile cannot pair an older release with the newer image's digest.
+          if ! digest="$(docker buildx imagetools inspect "${REPO}:deployed" --format '{{json .Manifest}}' | jq -er .digest)"; then
             echo "::error::${REPO}:deployed does not exist. Deploy a release through deploy-prod.yml first (or seed the tag; docs/runbooks/github-setup.md)."
             exit 1
           fi
-          label="$(docker image inspect "${REPO}:deployed" \
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::${REPO}:deployed has digest '${digest}'."; exit 1; }
+          docker pull --quiet "${REPO}@${digest}" > /dev/null
+          label="$(docker image inspect "${REPO}@${digest}" \
             --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
           .github/scripts/deployed-release.sh "$label" | tee -a "$GITHUB_OUTPUT"
-          digest="$(docker buildx imagetools inspect "${REPO}:deployed" --format '{{json .Manifest}}' | jq -er .digest)"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::${REPO}:deployed has digest '${digest}'."; exit 1; }
           echo "expect_previous=${REPO}@${digest}" | tee -a "$GITHUB_OUTPUT"
           echo "Production runs ${label}." | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -148,7 +150,7 @@ jobs:
       # The scripts come from main: the tag may predate them.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.workflow_sha }}
           path: _main
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: true
@@ -219,7 +221,7 @@ jobs:
       # after T was released applies.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.workflow_sha }}
           sparse-checkout: .trivyignore.yaml
           sparse-checkout-cone-mode: false
           persist-credentials: false
@@ -417,7 +419,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.workflow_sha }}
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: true
           persist-credentials: false

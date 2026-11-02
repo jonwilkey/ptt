@@ -111,18 +111,19 @@ jobs:
           ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
 
-      # deploy/ and infra/ come from the tag; the pipeline scripts come from main, so a deploy of
-      # an older tag (weekly rebuilds, the drill, redeploys) still has every script this workflow
-      # calls.
+      # deploy/ and infra/ come from the tag; the pipeline scripts come from the commit this
+      # workflow file was loaded from (main for release-please, weekly and drill runs; the tag for a
+      # tag push), so a deploy of an older tag still has every script this workflow calls and the
+      # scripts always match the workflow.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.workflow_sha }}
           path: _main
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: true
           persist-credentials: false
 
-      - name: Use main's pipeline scripts
+      - name: Use the workflow's pipeline scripts
         run: |
           set -euo pipefail
           rm -rf .github/scripts
