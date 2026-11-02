@@ -130,7 +130,7 @@ func TestProtocol2MessagesOnProtocol1SocketAreProtocolErrors(t *testing.T) {
 	}
 }
 
-func TestHeardAndResumeAreValidatedAndIgnored(t *testing.T) {
+func TestHeardAndResumeAreValidated(t *testing.T) {
 	f := newFixture(t)
 	p := f.page()
 	tx := uuid.NewString()
@@ -149,11 +149,13 @@ func TestHeardAndResumeAreValidatedAndIgnored(t *testing.T) {
 	for _, ok := range []string{
 		`{"type":"heard","transmission_id":"` + tx + `","last_seq":0}`,
 		`{"type":"heard","transmission_id":"` + tx + `","last_seq":4095}`,
-		`{"type":"resume","transmission_id":"` + tx + `"}`,
 	} {
 		c.sendRaw([]byte(ok))
 		c.ping() // a pong and no close: accepted, no reply
 	}
+	c.sendRaw([]byte(`{"type":"resume","transmission_id":"` + tx + `"}`))
+	c.want("error", "code", "bad_transmission_id")
+	c.ping()
 	for _, bad := range []string{
 		`{"type":"heard","transmission_id":"` + tx + `","last_seq":4096}`,
 		`{"type":"heard","transmission_id":"` + tx + `","last_seq":-1}`,

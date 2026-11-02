@@ -347,7 +347,7 @@ func (c *conn) onText(data []byte) {
 	case joined && m.typ == typeHeard:
 		c.onHeard(m.transmissionID, m.lastSeq)
 	case joined && m.typ == typeResume:
-		// Parsed and validated (protocol 2 only); resume is a later change.
+		c.onResume(m.transmissionID)
 	case joined && m.typ == typeSenderKey:
 		c.onSenderKey(m.senderKey)
 	case joined && m.typ == typeSessionEnd:
