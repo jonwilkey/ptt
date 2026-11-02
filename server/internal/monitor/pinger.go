@@ -5,7 +5,9 @@ package monitor
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -51,16 +53,27 @@ func (p *Pinger) Ping(ctx context.Context, slug string, fail bool, body string) 
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	resp, err := p.client.Do(req)
 	if err != nil {
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		p.warn(ctx, slug, err.Error())
+		p.warn(ctx, slug, sendClass(err))
 		return
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		p.warn(ctx, slug, "HTTP "+resp.Status)
+	}
+}
+
+// sendClass names a send failure by kind only: error text can carry the URL and so the key.
+func sendClass(err error) string {
+	var ne net.Error
+	var oe *net.OpError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return "timeout"
+	case errors.As(err, &oe):
+		return "connect"
+	default:
+		return "other"
 	}
 }
 

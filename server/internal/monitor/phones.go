@@ -88,11 +88,21 @@ func Evaluate(devs []Device, now, procStart time.Time, restart bool, version str
 		if since.IsZero() {
 			since = d.Created
 		}
-		if restart && since.Before(procStart) {
+		fromRestart := restart && since.Before(procStart)
+		if fromRestart {
 			since = procStart
 		}
 		if now.Sub(since) > SilentAfter {
-			f.reasons = append(f.reasons, fmt.Sprintf("silent since %s (%d h)", stamp(since), int(now.Sub(since)/time.Hour)))
+			hours := int(now.Sub(since) / time.Hour)
+			if fromRestart {
+				last := "never"
+				if !d.LastSeen.IsZero() {
+					last = stamp(d.LastSeen)
+				}
+				f.reasons = append(f.reasons, fmt.Sprintf("silent since server restart %s (%d h); last seen %s", stamp(since), hours, last))
+			} else {
+				f.reasons = append(f.reasons, fmt.Sprintf("silent since %s (%d h)", stamp(since), hours))
+			}
 			pairs[Pair{d.ID, reasonSilent}] = struct{}{}
 		}
 		if keys := redItems(d.Checklist); len(keys) > 0 {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -212,7 +213,10 @@ func TestRunSchedule(t *testing.T) {
 
 func TestRunWithoutPingerOnlySendsCheckIn(t *testing.T) {
 	clk := clock.NewFake(t0)
-	o := opts(t, clk, "http://unused", push.NewFake(), newDB(t))
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	t.Cleanup(srv.Close)
+	o := opts(t, clk, srv.URL, push.NewFake(), newDB(t))
 	o.Pinger = nil
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -220,6 +224,9 @@ func TestRunWithoutPingerOnlySendsCheckIn(t *testing.T) {
 	clk.BlockUntil(1)
 	cancel()
 	<-done
+	if n := requests.Load(); n != 0 {
+		t.Errorf("HTTP requests = %d, want 0 without a pinger", n)
+	}
 }
 
 func TestRunDisabledSenderSkipsCheckIn(t *testing.T) {
@@ -312,6 +319,23 @@ func TestPhoneJob(t *testing.T) {
 	j.run(t.Context())
 	if a, b := next(t, hits), next(t, hits); a.path != "/key/ptt-phones" || a.body != "re-alert follows; not resolved" || b.path != "/key/ptt-phones/fail" {
 		t.Errorf("new pair: got %s %q then %s", a.path, a.body, b.path)
+	}
+}
+
+func TestPhoneJobListFailurePingsFail(t *testing.T) {
+	clk := clock.NewFake(t0)
+	base, hits := stampedHC(t, clk)
+	d := newDB(t)
+	j := phoneJobFor(t, clk, base, d)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	j.run(t.Context())
+	if h := next(t, hits); h.path != "/key/ptt-phones/fail" || h.body != "pttd could not list devices" {
+		t.Errorf("ping = %s %q", h.path, h.body)
+	}
+	if j.tracker.last != nil {
+		t.Error("tracker state changed by a failed list")
 	}
 }
 

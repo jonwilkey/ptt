@@ -254,3 +254,18 @@ func TestTracker(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluateRestartShowsRealLastSeen(t *testing.T) {
+	start := now.Add(-72 * time.Hour)
+	seen := dev("a", func(d *Device) { d.LastSeen = now.Add(-200 * time.Hour) })
+	never := dev("b", func(d *Device) { d.LastSeen = time.Time{} })
+	r := Evaluate([]Device{seen, never}, now, start, true, "0.6.0")
+	for _, w := range []string{
+		"silent since server restart 2026-10-30 18:00 UTC (72 h); last seen 2026-10-25 10:00 UTC",
+		"(72 h); last seen never",
+	} {
+		if !strings.Contains(r.Body, w) {
+			t.Errorf("body lacks %q:\n%s", w, r.Body)
+		}
+	}
+}

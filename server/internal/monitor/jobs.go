@@ -143,6 +143,7 @@ func (j *phoneJob) run(ctx context.Context) {
 	devs, err := j.devices(ctx)
 	if err != nil {
 		j.Logger.LogAttrs(ctx, slog.LevelWarn, "phone heartbeat: list devices failed", slog.String("error", err.Error()))
+		j.Pinger.Ping(ctx, SlugPhones, true, "pttd could not list devices")
 		return
 	}
 	res := Evaluate(devs, j.Clock.Now(), j.procStart, j.restart, j.Version)
