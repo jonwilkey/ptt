@@ -31,7 +31,7 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `internal/cleanup/` | The nightly retention sweep |
 | `internal/clock/` | Injectable clock (and a deterministic fake) for the scheduler and the cleanup |
 | `internal/auth/` | Device-token and enrollment-code generation and hashing; the `Authenticator` shared by the REST middleware and the WebSocket `hello` |
-| `internal/ws/` | The live-talk WebSocket (`GET /v1/ws`, `docs/protocol.md` section 11): `hello`, `join`, sessions and their timers, ping/pong, revocation, the per-socket ordered send queue. Floor control and frame relay plug in at `floor.go` |
+| `internal/ws/` | The live-talk WebSocket (`GET /v1/ws`, `docs/protocol.md` section 11): `hello`, `join`, sessions and their timers, ping/pong, revocation, the per-socket ordered send queue. Floor control and frame relay plug in at `floor.go`. The server answers `protocol = min(client, 2)`; protocol 2 adds the `clip` flag of `floor_request`, `sender_key`, and the (so far no-op) `heard` and `resume`. Binary frames are limited to 250 / s, burst 500 |
 | `migrations/` | goose SQL migrations, embedded in the binary |
 
 ## Make targets
@@ -143,6 +143,13 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
       with the current state; same id after it ended `200 ended` (never re-pushed); same id,
       different body `409 conflict`. If every addressed device is revoked the page is
       tombstoned at once (`201 ended`, no push).
+    - `GET /v1/pages/{id}` (the page's sender only; protocol sections 6 and 13.7): `200
+      {"envelope","sender_key"}`, the two signed objects as stored. Checked in order: unknown id
+      `404 not_found`, tombstoned `410 page_ended` (any caller), caller is not the sender
+      `403 forbidden`, no sender key stored yet `404 not_found`. It changes nothing. The sender key
+      arrives over the protocol-2 WebSocket (`sender_key`, `internal/ws/senderkey.go`), is checked
+      for shape and for naming the joined page, session and sender, but not verified; the first
+      one is kept with the page row (`sender_key` column, migration `00005`) and deleted with it.
     - `POST /v1/pages/{id}/delivered`: `200 {"state":"ringing"|"acknowledged"|"answered"}` (the
       phone alerts only on `ringing`); `410 page_ended` if the page ended or another device
       answered it. The sender hears `page_state delivered` only if the page is still ringing.

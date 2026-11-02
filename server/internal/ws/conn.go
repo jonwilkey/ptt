@@ -222,11 +222,12 @@ func (c *conn) serve() {
 	_ = c.sock.CloseNow()
 }
 
-// state returns whether hello and join have completed.
-func (c *conn) state() (authed, joined bool) {
+// state returns whether hello and join have completed, and the negotiated protocol (0 before
+// hello).
+func (c *conn) state() (authed, joined bool, protocol int64) {
 	c.h.mu.Lock()
 	defer c.h.mu.Unlock()
-	return c.authed, c.joined
+	return c.authed, c.joined, c.protocol
 }
 
 // watch enforces the deadlines of protocol sections 11.1, 11.3 and 11.8 with the hub's clock:
@@ -274,7 +275,7 @@ func (c *conn) readLoop() {
 		if err != nil {
 			return
 		}
-		authed, _ := c.state()
+		authed, _, _ := c.state()
 		if typ == websocket.MessageBinary && !authed {
 			c.closeNow(codeProtocol) // nothing but hello before hello
 			return
@@ -319,12 +320,12 @@ func (c *conn) readLoop() {
 // onText dispatches one control message by the connection's state (protocol sections 11.3 and
 // 11.4): anything wrong for the state is 4400.
 func (c *conn) onText(data []byte) {
-	m, err := parseClient(data)
+	authed, joined, protocol := c.state()
+	m, err := parseClient(data, max(protocol, 1))
 	if err != nil {
 		c.closeNow(codeProtocol)
 		return
 	}
-	authed, joined := c.state()
 	switch {
 	case !authed:
 		if m.typ != typeHello {
@@ -337,9 +338,14 @@ func (c *conn) onText(data []byte) {
 	case m.typ == typeJoin && !joined:
 		c.onJoin(m.sessionID)
 	case joined && m.typ == typeFloorRequest:
-		c.onFloorRequest(m.transmissionID)
+		c.onFloorRequest(m.transmissionID, m.clip)
 	case joined && m.typ == typeFloorRelease:
 		c.onFloorRelease(m.transmissionID)
+	case joined && (m.typ == typeHeard || m.typ == typeResume):
+		// Parsed and validated (protocol 2 only); the transmission buffer that acts on them is
+		// a later change.
+	case joined && m.typ == typeSenderKey:
+		c.onSenderKey(m.senderKey)
 	case joined && m.typ == typeSessionEnd:
 		c.onSessionEnd()
 	default:
@@ -350,7 +356,7 @@ func (c *conn) onText(data []byte) {
 
 // onBinary handles an audio frame from an authenticated socket.
 func (c *conn) onBinary(frame []byte) {
-	_, joined := c.state()
+	_, joined, _ := c.state()
 	if !joined {
 		return // dropped silently (protocol section 11.7)
 	}

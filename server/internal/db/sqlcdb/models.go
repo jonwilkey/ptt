@@ -22,6 +22,7 @@ type ActivePage struct {
 	Recipients   sql.NullString
 	AnsweredBy   sql.NullString
 	AnsweredAt   sql.NullInt64
+	SenderKey    []byte
 }
 
 type AuditLog struct {

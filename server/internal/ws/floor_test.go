@@ -529,7 +529,7 @@ func TestRelayDropsPast25FramesButControlStillArrivesInOrder(t *testing.T) {
 	h, s, a, b := queueSession(t)
 	tx := uuid.NewString()
 	h.mu.Lock()
-	s.grantLocked(a, tx, uuid.MustParse(tx))
+	s.grantLocked(a, tx, uuid.MustParse(tx), false)
 	h.mu.Unlock()
 	for i := range 40 {
 		h.relayFrame(a, audioframe.Header{TransmissionID: s.floor.txRaw}, frameFor(tx, uint32(i), byte(i)))

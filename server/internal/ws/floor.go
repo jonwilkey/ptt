@@ -60,6 +60,8 @@ type floorState struct {
 	// same as the 16 bytes a frame header carries.
 	txID  string
 	txRaw [audioframe.IDSize]byte
+	// clip is the clip flag of the granting floor_request (protocol 2; false on protocol 1).
+	clip bool
 	// gen counts grants. A timer callback carries the generation it was armed for and does
 	// nothing if the floor has moved on, so a firing that was already past its timer's
 	// cancellation when the floor was released or re-granted is harmless.
@@ -101,14 +103,14 @@ func (s *session) floorDetachLocked(c *conn) {
 }
 
 // grantLocked gives the floor to c under tx. The caller has checked everything.
-func (s *session) grantLocked(c *conn, tx string, raw [audioframe.IDSize]byte) {
+func (s *session) grantLocked(c *conn, tx string, raw [audioframe.IDSize]byte, clip bool) {
 	f := &s.floor
 	now := s.h.clk.Now()
 	if f.used == nil {
 		f.used = map[[audioframe.IDSize]byte]struct{}{}
 	}
 	f.used[raw] = struct{}{}
-	f.talker, f.txID, f.txRaw = c, tx, raw
+	f.talker, f.txID, f.txRaw, f.clip = c, tx, raw, clip
 	f.gen++
 	f.grantedAt, f.lastFrame, f.hasFrame = now, time.Time{}, false
 	gen := f.gen
@@ -182,7 +184,7 @@ func (h *Hub) maxLengthFired(s *session, gen uint64) {
 // onFloorRequest handles floor_request. The order of the checks is part of the contract: a
 // revoked device is closed first, a bad id is bad_transmission_id, an absent peer (or a self
 // page) is no_peer; only then is the floor considered.
-func (c *conn) onFloorRequest(transmissionID string) {
+func (c *conn) onFloorRequest(transmissionID string, clip bool) {
 	h := c.h
 	ctx, cancel := context.WithTimeout(c.ctx, dbTimeout)
 	defer cancel()
@@ -217,7 +219,7 @@ func (c *conn) onFloorRequest(transmissionID string) {
 	case f.talker != nil:
 		c.send(floorBusyMsg{Type: "floor_busy"})
 	default:
-		s.grantLocked(c, transmissionID, raw)
+		s.grantLocked(c, transmissionID, raw, clip)
 	}
 }
 

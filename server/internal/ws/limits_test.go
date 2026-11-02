@@ -103,11 +103,11 @@ func TestBinaryRateLimitAndFrameValidation(t *testing.T) {
 	b.wantClose(4400, "protocol_error")
 
 	c, _ := f.joined("A", p)
-	for i := range 200 { // burst 200
+	for i := range 500 { // burst 500
 		c.sendBinary(validFrame(uint32(i)))
 	}
 	c.ping()
-	for range 201 {
+	for range 501 {
 		c.sendBinary(validFrame(1))
 	}
 	c.wantClose(4429, "rate_limited")
@@ -131,4 +131,21 @@ func TestUnauthenticatedSocketCap(t *testing.T) {
 	held[0].send(hello(f.tokens["A"]))
 	held[0].want("hello")
 	_ = f.dial().ws.CloseNow()
+}
+
+func TestBinaryRateRefillsAt250PerSecond(t *testing.T) {
+	f := newFixture(t)
+	p := f.page()
+	c, _ := f.joinedProto("A", p, 2)
+	for i := range 500 { // burst 500 (hello and join were text)
+		c.sendBinary(validFrame(uint32(i)))
+	}
+	c.ping()
+	f.clk.Advance(time.Second) // 250 tokens
+	for i := range 250 {
+		c.sendBinary(validFrame(uint32(i)))
+	}
+	c.ping()
+	c.sendBinary(validFrame(1))
+	c.wantClose(4429, "rate_limited")
 }
