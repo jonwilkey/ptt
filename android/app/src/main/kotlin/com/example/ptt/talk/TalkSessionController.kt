@@ -128,6 +128,8 @@ data class TalkSessionState(
     val peerPresent: Boolean = false,
     val floor: TalkFloor = TalkFloor.IDLE,
     val rttMillis: Long? = null,
+    /** The last RTT sample was a ping that went unanswered, so [rttMillis] is only the timeout. */
+    val rttTimedOut: Boolean = false,
     val pageProgress: WsPageState? = null,
     /**
      * The sender may not talk yet: the receiver speaks first (see [FirstTalkerRule]). A fact about the session,
@@ -627,7 +629,9 @@ class TalkSessionController(
 
         private fun rtt(sample: RttSample) {
             if (protocol2 && joined) clipMode.onSample(sample)
-            mutableState.update { it.copy(rttMillis = sample.millis, clipMode = protocol2 && clipMode.on) }
+            mutableState.update {
+                it.copy(rttMillis = sample.millis, rttTimedOut = sample.timedOut, clipMode = protocol2 && clipMode.on)
+            }
         }
 
         /**

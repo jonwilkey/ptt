@@ -2,4 +2,9 @@
 <resources>
     <string name="paste_qr_label">Pasted QR text (debug)</string>
     <string name="paste_qr_button">Enroll from pasted text</string>
+    <string name="debug_impairment">Impairment: %1$d ms each way, %2$d%% frame loss</string>
+    <string name="debug_impairment_off">Impairment: off</string>
+    <string name="debug_rtt">Last RTT: %1$d ms</string>
+    <string name="debug_rtt_timed_out">Last RTT: timed out</string>
+    <string name="debug_rtt_none">Last RTT: none yet</string>
 </resources>
