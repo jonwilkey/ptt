@@ -34,7 +34,7 @@ import (
 )
 
 // ProtocolVersion is the highest protocol this server speaks (protocol section 11.1).
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // Limits and timers of protocol sections 8 and 11.
 const (
@@ -67,7 +67,7 @@ const (
 	maxQueuedFrames = 25
 
 	textRate, textBurst     = 20, 40
-	binaryRate, binaryBurst = 100, 200
+	binaryRate, binaryBurst = 250, 500
 )
 
 // Close codes (protocol section 11.1) with their fixed reason tokens.

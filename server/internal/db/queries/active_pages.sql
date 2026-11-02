@@ -3,7 +3,7 @@ SELECT COUNT(*) FROM active_pages;
 
 -- name: GetActivePage :one
 SELECT id, session_id, from_device, to_user, level, envelope, state, created_at, delivered_at,
-       push_attempts, recipients, answered_by, answered_at
+       push_attempts, recipients, answered_by, answered_at, sender_key
 FROM active_pages
 WHERE id = ?;
 
@@ -31,6 +31,10 @@ UPDATE active_pages SET state = 'acknowledged' WHERE id = ? AND state = 'ringing
 UPDATE active_pages SET state = 'answered', answered_by = ?, answered_at = ?
 WHERE id = ? AND state IN ('ringing', 'acknowledged');
 
+-- The first sender key wins; later ones are ignored (protocol section 13.7).
+-- name: SetPageSenderKey :execrows
+UPDATE active_pages SET sender_key = ? WHERE id = ? AND sender_key IS NULL;
+
 -- name: SetPagePushAttempts :exec
 UPDATE active_pages SET push_attempts = ? WHERE id = ?;
 
@@ -45,6 +49,6 @@ DELETE FROM page_tombstones WHERE expires_at <= ?;
 -- The WebSocket join: the active page that uses a session id (unique among active pages).
 -- name: GetActivePageBySession :one
 SELECT id, session_id, from_device, to_user, level, envelope, state, created_at, delivered_at,
-       push_attempts, recipients, answered_by, answered_at
+       push_attempts, recipients, answered_by, answered_at, sender_key
 FROM active_pages
 WHERE session_id = ?;

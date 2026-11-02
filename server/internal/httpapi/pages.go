@@ -14,6 +14,7 @@ import (
 // handlers only translate: parsing, authorization and every state decision live there.
 type PageService interface {
 	Create(ctx context.Context, caller pages.Caller, req pages.CreateRequest) (pages.CreateResult, error)
+	SenderRecovery(ctx context.Context, deviceID, pageID string) (pages.Recovery, error)
 	Delivered(ctx context.Context, deviceID, pageID string) (string, error)
 	Acknowledge(ctx context.Context, deviceID, pageID string) error
 	Answer(ctx context.Context, deviceID, pageID string) error
@@ -29,6 +30,7 @@ type PageResponse struct {
 // pageRoutes registers the page endpoints (docs/protocol.md section 6); they need only a device.
 func (a *api) pageRoutes(r chi.Router) {
 	r.Post("/v1/pages", a.createPage)
+	r.Get("/v1/pages/{id}", a.recoverPage)
 	r.Post("/v1/pages/{id}/delivered", a.delivered)
 	r.Post("/v1/pages/{id}/acknowledge", a.pageAction(a.pages.Acknowledge))
 	r.Post("/v1/pages/{id}/answer", a.pageAction(a.pages.Answer))
@@ -51,6 +53,22 @@ func (a *api) createPage(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, PageResponse{ID: req.ID, State: res.State})
+}
+
+// recoverPage is GET /v1/pages/{id}: the sender's envelope and sender key (protocol section 6).
+func (a *api) recoverPage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if !validUUID(id) {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	c, _ := CallerFrom(r.Context())
+	rec, err := a.pages.SenderRecovery(r.Context(), c.DeviceID, id)
+	if err != nil {
+		a.pageError(w, r, "recover page", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
 }
 
 // DeliveredResponse is the body of a successful delivered call.

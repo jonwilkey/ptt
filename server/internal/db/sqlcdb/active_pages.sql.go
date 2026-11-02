@@ -47,7 +47,7 @@ func (q *Queries) DeleteExpiredPageTombstones(ctx context.Context, expiresAt int
 
 const getActivePage = `-- name: GetActivePage :one
 SELECT id, session_id, from_device, to_user, level, envelope, state, created_at, delivered_at,
-       push_attempts, recipients, answered_by, answered_at
+       push_attempts, recipients, answered_by, answered_at, sender_key
 FROM active_pages
 WHERE id = ?
 `
@@ -69,13 +69,14 @@ func (q *Queries) GetActivePage(ctx context.Context, id string) (ActivePage, err
 		&i.Recipients,
 		&i.AnsweredBy,
 		&i.AnsweredAt,
+		&i.SenderKey,
 	)
 	return i, err
 }
 
 const getActivePageBySession = `-- name: GetActivePageBySession :one
 SELECT id, session_id, from_device, to_user, level, envelope, state, created_at, delivered_at,
-       push_attempts, recipients, answered_by, answered_at
+       push_attempts, recipients, answered_by, answered_at, sender_key
 FROM active_pages
 WHERE session_id = ?
 `
@@ -98,6 +99,7 @@ func (q *Queries) GetActivePageBySession(ctx context.Context, sessionID string) 
 		&i.Recipients,
 		&i.AnsweredBy,
 		&i.AnsweredAt,
+		&i.SenderKey,
 	)
 	return i, err
 }
@@ -265,4 +267,22 @@ type SetPagePushAttemptsParams struct {
 func (q *Queries) SetPagePushAttempts(ctx context.Context, arg SetPagePushAttemptsParams) error {
 	_, err := q.db.ExecContext(ctx, setPagePushAttempts, arg.PushAttempts, arg.ID)
 	return err
+}
+
+const setPageSenderKey = `-- name: SetPageSenderKey :execrows
+UPDATE active_pages SET sender_key = ? WHERE id = ? AND sender_key IS NULL
+`
+
+type SetPageSenderKeyParams struct {
+	SenderKey []byte
+	ID        string
+}
+
+// The first sender key wins; later ones are ignored (protocol section 13.7).
+func (q *Queries) SetPageSenderKey(ctx context.Context, arg SetPageSenderKeyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setPageSenderKey, arg.SenderKey, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

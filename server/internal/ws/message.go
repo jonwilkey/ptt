@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jonwilkey/ptt/server/internal/signed"
 	"github.com/jonwilkey/ptt/server/internal/wire"
 )
 
@@ -22,7 +23,15 @@ const (
 	typeFloorRelease = "floor_release"
 	typeSessionEnd   = "session_end"
 	typePing         = "ping"
+
+	// Protocol 2 (section 13.2): unknown types on a protocol-1 socket.
+	typeHeard     = "heard"
+	typeResume    = "resume"
+	typeSenderKey = "sender_key"
 )
+
+// maxHeardSeq is the largest last_seq of a heard message (section 13.2).
+const maxHeardSeq = 4095
 
 // errMalformed is any violation of the strict client-message rules; it closes with 4400.
 var errMalformed = errors.New("malformed client message")
@@ -37,7 +46,11 @@ type clientMsg struct {
 
 	sessionID string // join
 
-	transmissionID string // floor_request, floor_release
+	transmissionID string // floor_request, floor_release, heard, resume
+	clip           bool   // floor_request, protocol 2
+	lastSeq        int64  // heard
+
+	senderKey signed.Object // sender_key
 
 	t int64 // ping
 }
@@ -46,8 +59,10 @@ type clientMsg struct {
 // object, no duplicate or null members, case-sensitive keys, a string type, and for each type
 // exactly its keys. IDs are checked here only for being canonical lowercase UUIDs where the
 // message cannot be answered with an error message instead (floor_request's own id is
-// checked by the floor logic, which answers bad_transmission_id).
-func parseClient(data []byte) (clientMsg, error) {
+// checked by the floor logic, which answers bad_transmission_id). protocol is the socket's
+// negotiated protocol (1 until hello completes): the protocol-2 types are unknown on a
+// protocol-1 socket, and floor_request carries clip exactly when the protocol is 2 (section 13.2).
+func parseClient(data []byte, protocol int64) (clientMsg, error) {
 	members, err := wire.StrictMap(data, func(string) bool { return true })
 	if err != nil {
 		return clientMsg{}, errMalformed
@@ -62,8 +77,28 @@ func parseClient(data []byte) (clientMsg, error) {
 		keys = []string{"protocol", "token", "app_version"}
 	case typeJoin:
 		keys = []string{"session_id"}
-	case typeFloorRequest, typeFloorRelease:
+	case typeFloorRequest:
 		keys = []string{"transmission_id"}
+		if protocol >= 2 {
+			keys = append(keys, "clip")
+		}
+	case typeFloorRelease:
+		keys = []string{"transmission_id"}
+	case typeHeard:
+		if protocol < 2 {
+			return clientMsg{}, errMalformed
+		}
+		keys = []string{"transmission_id", "last_seq"}
+	case typeResume:
+		if protocol < 2 {
+			return clientMsg{}, errMalformed
+		}
+		keys = []string{"transmission_id"}
+	case typeSenderKey:
+		if protocol < 2 {
+			return clientMsg{}, errMalformed
+		}
+		keys = []string{"key"}
 	case typeSessionEnd:
 	case typePing:
 		keys = []string{"t"}
@@ -100,8 +135,24 @@ func parseClient(data []byte) (clientMsg, error) {
 		if m.transmissionID, err = stringOf(members["transmission_id"]); err != nil {
 			return clientMsg{}, errMalformed
 		}
-	case typeFloorRelease:
+		if protocol >= 2 {
+			if m.clip, err = boolOf(members["clip"]); err != nil {
+				return clientMsg{}, errMalformed
+			}
+		}
+	case typeFloorRelease, typeResume:
 		if m.transmissionID, err = stringOf(members["transmission_id"]); err != nil || !wire.ValidUUID(m.transmissionID) {
+			return clientMsg{}, errMalformed
+		}
+	case typeHeard:
+		if m.transmissionID, err = stringOf(members["transmission_id"]); err != nil || !wire.ValidUUID(m.transmissionID) {
+			return clientMsg{}, errMalformed
+		}
+		if m.lastSeq, err = intOf(members["last_seq"], maxHeardSeq); err != nil {
+			return clientMsg{}, errMalformed
+		}
+	case typeSenderKey:
+		if m.senderKey, err = signedOf(members["key"]); err != nil {
 			return clientMsg{}, errMalformed
 		}
 	case typePing:
@@ -123,6 +174,36 @@ func stringOf(raw json.RawMessage) (string, error) {
 		return "", errMalformed
 	}
 	return s, nil
+}
+
+// boolOf decodes a JSON boolean literal.
+func boolOf(raw json.RawMessage) (bool, error) {
+	switch string(raw) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, errMalformed
+}
+
+// signedOf decodes a signed object (section 3) with exactly payload, signer and sig, all strings.
+func signedOf(raw json.RawMessage) (signed.Object, error) {
+	members, err := wire.StrictObject(raw, "payload", "signer", "sig")
+	if err != nil {
+		return signed.Object{}, errMalformed
+	}
+	var w signed.Wire
+	for name, dst := range map[string]*string{"payload": &w.Payload, "signer": &w.Signer, "sig": &w.Sig} {
+		if *dst, err = stringOf(members[name]); err != nil {
+			return signed.Object{}, errMalformed
+		}
+	}
+	obj, err := signed.Decode(w)
+	if err != nil {
+		return signed.Object{}, errMalformed
+	}
+	return obj, nil
 }
 
 // intOf decodes a JSON integer literal in [0, limit]: digits only, no sign, fraction, exponent

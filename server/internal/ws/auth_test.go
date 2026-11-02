@@ -104,10 +104,10 @@ func TestHelloAuditIsThrottledLikeREST(t *testing.T) {
 
 func TestHelloSuccessAndNegotiation(t *testing.T) {
 	f := newFixture(t)
-	for _, proto := range []int{1, 2, 99} {
+	for _, tc := range []struct{ announced, replied int }{{1, 1}, {2, 2}, {3, 2}, {99, 2}} {
 		c := f.dial()
-		c.send(map[string]any{"type": "hello", "protocol": proto, "token": f.tokens["A"], "app_version": "9.9.9"})
-		m := c.want("hello", "protocol", "1", "device_id", f.ids["A"], "server_time", strconv.FormatInt(t0.UnixMilli(), 10))
+		c.send(map[string]any{"type": "hello", "protocol": tc.announced, "token": f.tokens["A"], "app_version": "9.9.9"})
+		m := c.want("hello", "protocol", strconv.Itoa(tc.replied), "device_id", f.ids["A"], "server_time", strconv.FormatInt(t0.UnixMilli(), 10))
 		if len(m) != 4 {
 			t.Errorf("hello reply has keys %v, want exactly type, protocol, device_id, server_time", m)
 		}
