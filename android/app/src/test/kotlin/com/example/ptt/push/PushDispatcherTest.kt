@@ -71,6 +71,7 @@ class PushDispatcherTest {
     private val sessionKeys = SessionKeys()
     private val selfPages = SelfPages()
     private var rosterSyncs = 0
+    private var checkIns = 0
     private lateinit var engine: AlertEngine
     private lateinit var outbox: Outbox
 
@@ -118,7 +119,8 @@ class PushDispatcherTest {
         clock,
         timeoutMs,
         useSelfPages,
-        useHosting
+        useHosting,
+        { checkIns++ }
     )
 
     private fun build(level: String = "normal", pageId: String = UUID.randomUUID().toString()): BuiltEnvelope =
@@ -729,14 +731,24 @@ class PushDispatcherTest {
         assertEquals(listOf("test"), notices.events)
     }
 
-    @Test
-    fun checkInAndUnknownTypesDoNothing() = runBlocking {
+    @Test(timeout = 60_000)
+    fun aCheckInPushSchedulesTheReplyAndNothingElse() = runBlocking {
         val d = dispatcher()
         d.dispatch(mapOf("type" to "check_in"))
+        assertEquals(1, checkIns)
+        assertTrue(notices.events.isEmpty())
+        assertEquals(0, rosterSyncs)
+        assertEquals(0, f.fake.requests.size)
+    }
+
+    @Test(timeout = 60_000)
+    fun unknownTypesDoNothing() = runBlocking {
+        val d = dispatcher()
         d.dispatch(mapOf("type" to "from_the_future", "page_id" to "x"))
         d.dispatch(emptyMap())
         assertTrue(notices.events.isEmpty())
         assertEquals(0, rosterSyncs)
+        assertEquals(0, checkIns)
         assertEquals(0, f.fake.requests.size)
     }
 

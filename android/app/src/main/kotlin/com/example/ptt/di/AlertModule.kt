@@ -29,6 +29,8 @@ import com.example.ptt.net.TalkAuth
 import com.example.ptt.net.TalkTransport
 import com.example.ptt.net.impairTransport
 import com.example.ptt.outbox.Outbox
+import com.example.ptt.push.CheckInScheduler
+import com.example.ptt.push.CheckInWorker
 import com.example.ptt.push.PageEvent
 import com.example.ptt.push.PushDispatcher
 import com.example.ptt.push.RosterSyncScheduler
@@ -216,6 +218,11 @@ object AlertModule {
 
     @Provides
     @Singleton
+    fun checkInScheduler(@ApplicationContext context: Context): CheckInScheduler =
+        CheckInWorker.WorkManagerScheduler(context)
+
+    @Provides
+    @Singleton
     fun pushDispatcher(
         rosterSync: RosterSync,
         tokens: DeviceTokenStore,
@@ -228,7 +235,8 @@ object AlertModule {
         scheduler: RosterSyncScheduler,
         clock: Clock,
         selfPages: SelfPages,
-        hosting: TalkHosting
+        hosting: TalkHosting,
+        checkIns: CheckInScheduler
     ) = PushDispatcher(
         rosterSync,
         tokens,
@@ -241,7 +249,8 @@ object AlertModule {
         scheduler,
         clock,
         selfPages = selfPages,
-        hosting = hosting
+        hosting = hosting,
+        checkInScheduler = checkIns
     )
 
     @Provides

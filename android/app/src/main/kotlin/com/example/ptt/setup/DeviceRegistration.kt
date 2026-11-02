@@ -42,18 +42,51 @@ class DeviceRegistration(
             checklist = currentChecklist?.takeIf { it != (last?.checklist ?: emptyMap<String, Boolean>()) }
         )
         if (request.isEmpty()) return@withLock true
-        val ok = api.updateDevice(request) is ApiResult.Success
-        if (ok) {
+        put(request, profile.deviceName, hash, currentChecklist, last) is ApiResult.Success
+    }
+
+    /**
+     * The reply to a `check_in` push: re-reads the checklist and sends every field this phone has, whether or not it
+     * changed since the last registration, then records them as sent.
+     */
+    suspend fun checkIn(): CheckInResult = lock.withLock {
+        val profile = settings.profile() ?: return@withLock CheckInResult.Failed
+        val last = settings.lastRegistration()
+        val token = fcm.token()
+        val hash = token?.let { hashOf(it) }
+        val currentChecklist = currentChecklist()
+        val request = UpdateDeviceRequest(
+            fcmToken = token,
+            appVersion = appVersion,
+            deviceName = profile.deviceName,
+            checklist = currentChecklist
+        )
+        when (put(request, profile.deviceName, hash, currentChecklist, last)) {
+            is ApiResult.Success -> CheckInResult.Sent
+            is ApiResult.Retryable -> CheckInResult.Retry
+            is ApiResult.Final, is ApiResult.NotEnrolled -> CheckInResult.Failed
+        }
+    }
+
+    private suspend fun put(
+        request: UpdateDeviceRequest,
+        deviceName: String,
+        hash: String?,
+        currentChecklist: Map<String, Boolean>?,
+        last: RegistrationValues?
+    ): ApiResult<*> {
+        val result = api.updateDevice(request)
+        if (result is ApiResult.Success) {
             settings.setLastRegistration(
                 RegistrationValues(
                     appVersion,
-                    profile.deviceName,
+                    deviceName,
                     hash ?: last?.fcmTokenHash,
                     currentChecklist ?: last?.checklist.orEmpty()
                 )
             )
         }
-        ok
+        return result
     }
 
     /** The checklist is best effort: if it cannot be read, nothing is reported and the FCM token still goes out. */
@@ -80,3 +113,6 @@ class DeviceRegistration(
                 .joinToString("") { "%02x".format(it) }
     }
 }
+
+/** How a [DeviceRegistration.checkIn] attempt ended. */
+enum class CheckInResult { Sent, Retry, Failed }
