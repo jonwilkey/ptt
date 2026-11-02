@@ -47,7 +47,7 @@ func fixture(t *testing.T) string {
 }
 
 func TestCode(t *testing.T) {
-	for v, want := range map[string]int64{"0.0.0": 0, "0.5.0": 5000, "1.2.3": 1_002_003, "999.999.999": 999_999_999} {
+	for v, want := range map[string]int64{"0.0.0": 1, "0.5.0": 5000, "1.2.3": 1_002_003, "999.999.999": 999_999_999} {
 		if got, ok := Code(v); !ok || got != want {
 			t.Errorf("Code(%q) = %d, %v; want %d", v, got, ok, want)
 		}

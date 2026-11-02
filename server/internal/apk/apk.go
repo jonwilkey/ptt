@@ -58,7 +58,8 @@ func ValidVersion(s string) bool { return versionRE.MatchString(s) }
 // FileName is the APK file name for a version name.
 func FileName(version string) string { return "ptt-" + version + ".apk" }
 
-// Code is the version code of a valid version name: X*1_000_000 + Y*1_000 + Z.
+// Code is the version code of a valid version name: X*1_000_000 + Y*1_000 + Z, at least 1
+// (0.0.0 builds as 1, as in android/app/build.gradle.kts).
 func Code(version string) (int64, bool) {
 	m := versionRE.FindStringSubmatch(version)
 	if m == nil {
@@ -69,7 +70,7 @@ func Code(version string) (int64, bool) {
 		n, _ := strconv.ParseInt(part, 10, 64)
 		code = code*1000 + n
 	}
-	return code, true
+	return max(code, 1), true
 }
 
 // Store serves the APK directory. The zero directory means nothing is published.
@@ -107,6 +108,9 @@ func (s *Store) Latest() (Latest, error) {
 	key := info.ModTime().UTC().Format(time.RFC3339Nano)
 
 	m, err := readMeta(path)
+	if err == nil && !ValidVersion(m.VersionName) {
+		err = fmt.Errorf("version_name %q is not a version", m.VersionName)
+	}
 	if err == nil {
 		key += "/" + m.File
 		var apkInfo fs.FileInfo
