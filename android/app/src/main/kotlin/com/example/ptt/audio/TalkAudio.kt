@@ -2,7 +2,7 @@ package com.example.ptt.audio
 
 import android.content.Context
 import android.os.SystemClock
-import com.example.ptt.talk.IncomingOpus
+import com.example.ptt.talk.Incoming
 import com.example.ptt.talk.SessionStage
 import com.example.ptt.talk.TalkConnection
 import com.example.ptt.talk.TalkEvent
@@ -50,7 +50,7 @@ enum class CaptureStatus {
 interface TalkLink {
     val state: StateFlow<TalkSessionState>
     val events: SharedFlow<TalkEvent>
-    val incomingOpus: SharedFlow<IncomingOpus>
+    val incoming: SharedFlow<Incoming>
 
     fun pressTalk(): Boolean
 
@@ -62,7 +62,7 @@ interface TalkLink {
 class ControllerLink(private val controller: TalkSessionController) : TalkLink {
     override val state get() = controller.state
     override val events get() = controller.events
-    override val incomingOpus get() = controller.incomingOpus
+    override val incoming get() = controller.incoming
 
     override fun pressTalk() = controller.pressTalk()
 
@@ -78,7 +78,8 @@ class ControllerLink(private val controller: TalkSessionController) : TalkLink {
  *   stopped by [release], StopCapture, FloorReleased(yours), SessionEnded, the connection leaving LIVE, the floor
  *   leaving YOU, `sendOpus` refusing, the 59.5 s cap (which also gives the floor back), or losing audio focus;
  * - playback ([Player]): fed by a collector that only enqueues; the floor leaving PEER_TALKING (or the connection
- *   leaving LIVE) lets the buffer play out, and the session ending flushes it;
+ *   leaving LIVE) lets the buffer play out, and the session ending flushes it. While this phone holds the floor,
+ *   clips and newly granted transmissions wait (docs/protocol.md section 13.8);
  * - routing ([AudioRouting]): active from the start of the conversation until the session ends.
  *
  * 14g wires the hold-to-talk button to [press] and [release]. Both are cheap and safe from the main thread.
@@ -114,7 +115,7 @@ class TalkAudio(
 
     init {
         player.start()
-        scope.launch(start = CoroutineStart.UNDISPATCHED) { link.incomingOpus.collect(player::enqueue) }
+        scope.launch(start = CoroutineStart.UNDISPATCHED) { link.incoming.collect(player::enqueue) }
         scope.launch(start = CoroutineStart.UNDISPATCHED) { link.state.collect(::onState) }
         scope.launch(start = CoroutineStart.UNDISPATCHED) { link.events.collect(::onEvent) }
     }
@@ -178,6 +179,8 @@ class TalkAudio(
             else -> Unit
         }
         if (peerStoppedTalking(before, s)) player.release()
+        val talking = s.floor == TalkFloor.YOU
+        if (talking != (before.floor == TalkFloor.YOU)) player.busy(talking)
         if (s.floor == TalkFloor.PEER_TALKING && before.floor != TalkFloor.PEER_TALKING) routing.ensureFocus()
         if (!live || captureOver(s)) stopRecorder()
     }

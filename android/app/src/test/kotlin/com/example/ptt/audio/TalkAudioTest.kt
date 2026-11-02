@@ -1,6 +1,7 @@
 package com.example.ptt.audio
 
 import com.example.ptt.net.SessionEndReason
+import com.example.ptt.talk.Incoming
 import com.example.ptt.talk.IncomingOpus
 import com.example.ptt.talk.SessionStage
 import com.example.ptt.talk.TalkConnection
@@ -25,7 +26,7 @@ private const val PAGE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 private class FakeLink(private val sent: SentLog) : TalkLink {
     override val state = MutableStateFlow(TalkSessionState())
     override val events = MutableSharedFlow<TalkEvent>(extraBufferCapacity = 64)
-    override val incomingOpus = MutableSharedFlow<IncomingOpus>(extraBufferCapacity = 64)
+    override val incoming = MutableSharedFlow<Incoming>(extraBufferCapacity = 64)
     var pressResult = true
     val presses = AtomicInteger()
     val releases = AtomicInteger()
@@ -312,11 +313,11 @@ class TalkAudioTest {
     @Test(timeout = 60_000)
     fun incomingFramesArePlayedAndTheFloorLeavingPeerTalkingLetsTheBufferDrain() {
         conversation(TalkFloor.PEER_TALKING)
-        for (i in 0..2) link.incomingOpus.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
+        for (i in 0..2) link.incoming.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
         await("played") { sinks.isNotEmpty() && sinks.single().writes.size == 3 }
         assertEquals(listOf(1, 2, 3), sinks.single().writes.toList())
         link.set(floor = TalkFloor.IDLE)
-        link.incomingOpus.tryEmit(IncomingOpus("t1", 3, byteArrayOf(4)))
+        link.incoming.tryEmit(IncomingOpus("t1", 3, byteArrayOf(4)))
         Thread.sleep(250)
         assertEquals(3, sinks.single().writes.size)
         await("decoder freed") { decoders.single().closed }
@@ -325,7 +326,7 @@ class TalkAudioTest {
     @Test(timeout = 60_000)
     fun sessionEndFlushesPlayback() {
         conversation(TalkFloor.PEER_TALKING)
-        link.incomingOpus.tryEmit(IncomingOpus("t1", 0, byteArrayOf(1)))
+        link.incoming.tryEmit(IncomingOpus("t1", 0, byteArrayOf(1)))
         link.events.tryEmit(TalkEvent.SessionEnded(SessionEndReason.ENDED_BY_PEER))
         // The playout thread makes the decoder when it reaches the frame, which can be after this thread gets here.
         await("decoder made and freed") { decoders.size == 1 && decoders[0].closed }
@@ -437,10 +438,10 @@ class TalkAudioTest {
                 stage = SessionStage.CONVERSATION,
                 pageId = PAGE
             )
-            for (i in 0..2) link2.incomingOpus.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
+            for (i in 0..2) link2.incoming.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
             await("played") { sink.writes.size == 3 }
             link2.set(floor = TalkFloor.IDLE)
-            link2.incomingOpus.tryEmit(IncomingOpus("t1", 3, byteArrayOf(4)))
+            link2.incoming.tryEmit(IncomingOpus("t1", 3, byteArrayOf(4)))
             link2.events.tryEmit(TalkEvent.SessionEnded(SessionEndReason.ENDED_BY_PEER))
             await("restored") { platform2.calls.contains("restore") }
             Thread.sleep(200)
@@ -453,10 +454,10 @@ class TalkAudioTest {
     @Test(timeout = 60_000)
     fun afterFocusLossTheRestOfThePeersTransmissionStaysSilent() {
         conversation(TalkFloor.PEER_TALKING)
-        link.incomingOpus.tryEmit(IncomingOpus("t1", 0, byteArrayOf(1)))
+        link.incoming.tryEmit(IncomingOpus("t1", 0, byteArrayOf(1)))
         await("played") { sinks.isNotEmpty() && sinks.single().writes.size == 1 }
         platform.focusLost!!.invoke()
-        for (i in 1..4) link.incomingOpus.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
+        for (i in 1..4) link.incoming.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
         Thread.sleep(300)
         assertEquals(listOf(1), sinks.single().writes.toList())
     }

@@ -30,8 +30,10 @@ sealed interface GrantOutcome {
  * `on...` method; on [GrantOutcome.SendRelease] send `floor_release`; on [GrantOutcome.Transmit] seal
  * each 20 ms Opus packet with [FrameSealer.seal] and send it as a binary frame; on button up send
  * `floor_release` for [buttonReleased]'s result; on every binary frame call [onFrame] and play only
- * [FrameVerdict.Accepted]; call [onSocketClosed] when the socket closes. Thread-safe.
+ * [FrameVerdict.Accepted]; call [onSocketClosed] when the socket closes. Protocol 2 adds [onClip] and the `heard`
+ * values returned by [onFrame] and [onFloorReleased]. Thread-safe.
  */
+@Suppress("TooManyFunctions")
 class AudioSession private constructor(
     sessionKey: ByteArray,
     private val sessionId: String,
@@ -132,6 +134,11 @@ class AudioSession private constructor(
         }
         return when (val grant = floor.onGranted(transmissionId)) {
             is SelfGrant.Transmit -> {
+                if (receiver.onOwnGranted(ownDeviceId, grant.transmissionId) == GrantVerdict.REFUSED) {
+                    // Another transmission holds the floor (section 12.4 rule 4): give this grant back, send nothing.
+                    floor.onReleased(grant.transmissionId)
+                    return GrantOutcome.SendRelease(grant.transmissionId)
+                }
                 endSealer()
                 val tk = FrameCipher.deriveKey(key, sessionId, ownDeviceId, grant.transmissionId)
                 val s = FrameSealer(grant.transmissionId, tk)
@@ -145,13 +152,42 @@ class AudioSession private constructor(
         }
     }
 
-    /** `floor_released {transmission_id}`. */
+    /**
+     * `floor_released {transmission_id}`. Returns the `last_seq` of the `heard` to send for it (protocol 2,
+     * section 13.5), or null.
+     */
     @Synchronized
-    fun onFloorReleased(transmissionId: String) {
-        receiver.onReleased(transmissionId)
+    fun onFloorReleased(transmissionId: String): Int? {
+        val heard = receiver.onReleased(transmissionId)
         floor.onReleased(transmissionId)
         if (sealer?.transmissionId == transmissionId) endSealer()
+        return heard
     }
+
+    /**
+     * `clip {talker, transmission_id, last_seq}` (protocol 2). Section 13.7 first: the answerer accepts only the
+     * envelope's `from_device`; the sender only a device in the envelope's `keys` and, once it has a peer, only
+     * that peer (an accepted clip pins it, like `peer_joined`); a clip naming this phone is refused (section 13.8
+     * step 1). Then the receiver's steps 2 to 4.
+     */
+    @Synchronized
+    @Suppress("ReturnCount")
+    fun onClip(talker: String, transmissionId: String, lastSeq: Int): ClipVerdict {
+        if (closed || talker == ownDeviceId) return ClipVerdict.Refused
+        val pinned = fixedPeer ?: senderPeer
+        if (pinned != null && talker != pinned) return ClipVerdict.Refused
+        if (pinned == null && talker !in envelopeKeyDevices) return ClipVerdict.Refused
+        val verdict = receiver.onClip(talker, transmissionId, lastSeq)
+        if (verdict is ClipVerdict.Accepted && pinned == null) {
+            senderPeer = talker
+            receiver.setExpectedPeer(talker)
+        }
+        return verdict
+    }
+
+    /** The peer device this phone has accepted, if any (fixed for the answerer). */
+    @get:Synchronized
+    val peer: String? get() = fixedPeer ?: senderPeer
 
     /** `floor_busy` or `error` answering the request for [transmissionId]. */
     @Synchronized
@@ -167,6 +203,9 @@ class AudioSession private constructor(
 
     /** A binary frame from the server. */
     fun onFrame(frame: ByteArray): FrameVerdict = receiver.onFrame(frame)
+
+    /** The `last_seq` a `heard` for [transmissionId] would carry now, or null (for the shared vectors). */
+    internal fun heardValue(transmissionId: String): Int? = receiver.heardValue(transmissionId)
 
     /** Zeroes the session key and every derived key and drops all state. Idempotent. */
     @Synchronized

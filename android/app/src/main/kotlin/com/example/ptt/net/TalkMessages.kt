@@ -1,5 +1,6 @@
 package com.example.ptt.net
 
+import com.example.ptt.crypto.AudioFrame
 import com.example.ptt.crypto.B64u
 import com.example.ptt.crypto.SignedObject
 import com.example.ptt.crypto.Validation
@@ -39,6 +40,9 @@ sealed interface ClientMessage {
 
     /** `sender_key` (protocol 2, section 13.2): the sender's signed copy of the session key. */
     class SenderKey(val key: SignedObject) : ClientMessage
+
+    /** `heard` (protocol 2, section 13.5): every frame 0 .. [lastSeq] of [transmissionId] was accepted. */
+    data class Heard(val transmissionId: String, val lastSeq: Int) : ClientMessage
 
     data class Ping(val t: Long) : ClientMessage
 }
@@ -116,6 +120,12 @@ sealed interface ServerMessage {
     data class Error(val code: WsErrorCode) : ServerMessage
 
     data class Pong(val t: Long, val serverTime: Long) : ServerMessage
+
+    /** Protocol 2 (section 13.2): the frames of [transmissionId] that follow are a replay, ending at [lastSeq]. */
+    data class Clip(val talker: String, val transmissionId: String, val lastSeq: Int) : ServerMessage
+
+    /** Protocol 2, to the talker only: the listener did not get [transmissionId] live (section 13.4). */
+    data class ListenerGap(val transmissionId: String) : ServerMessage
 }
 
 /**
@@ -129,6 +139,9 @@ object TalkCodec {
     const val MAX_TEXT_BYTES = 1024
     private const val MAX_SAFE_INT = 9_007_199_254_740_991L
     private const val TOKEN_LENGTH = 43
+
+    /** A transmission has at most 3000 frames (section 13.10), so a `clip.last_seq` is 0 to 2999. */
+    private const val MAX_CLIP_SEQ = 2999L
     private val json = Json
 
     @Suppress("CyclomaticComplexMethod")
@@ -177,6 +190,14 @@ object TalkCodec {
                             put("sig", B64u.encode(message.key.sig))
                         }
                     )
+                }
+
+                is ClientMessage.Heard -> {
+                    Validation.requireUuid(message.transmissionId, "transmission id")
+                    ensure(message.lastSeq in 0..AudioFrame.MAX_SEQ) { "last_seq out of range" }
+                    put("type", "heard")
+                    put("transmission_id", message.transmissionId)
+                    put("last_seq", message.lastSeq)
                 }
 
                 is ClientMessage.Ping -> {
@@ -229,6 +250,14 @@ object TalkCodec {
             "error" -> ServerMessage.Error(WsErrorCode.of(obj.str("code") ?: return null))
 
             "pong" -> ServerMessage.Pong(obj.long("t") ?: return null, obj.long("server_time") ?: return null)
+
+            "clip" -> ServerMessage.Clip(
+                obj.uuid("talker") ?: return null,
+                obj.uuid("transmission_id") ?: return null,
+                obj.long("last_seq")?.takeIf { it <= MAX_CLIP_SEQ }?.toInt() ?: return null
+            )
+
+            "listener_gap" -> ServerMessage.ListenerGap(obj.uuid("transmission_id") ?: return null)
 
             else -> null
         }
