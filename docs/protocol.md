@@ -673,8 +673,9 @@ table), never with text derived from client input. After a `session_end` (§11.5
 
 ### 11.2 Messages
 
-IDs are canonical UUIDs; `t` and `server_time` are integers in unix milliseconds (`t` is the
-client's clock and is 0 to 2^53−1); `protocol` is an integer of at least 1.
+IDs are canonical UUIDs; `server_time` is an integer in unix milliseconds; `t` is an opaque client
+clock value (an integer, 0 to 2^53−1; monotonic milliseconds on Android) that the server echoes
+unchanged and never interprets; `protocol` is an integer of at least 1.
 
 **Client → server**
 
@@ -895,8 +896,8 @@ past 256 entries in total (a peer that is not reading) is closed `4408`.
 
 The client sends `ping {t}` every **10 s** while connected (and may send one right after `hello`).
 The server answers at once with `pong {t, server_time}`, echoing `t` unchanged; the client computes
-RTT as `now − t` on its own clock. The server closes a socket `4408` that has sent no message at
-all (text or binary) for **30 s**. WebSocket protocol-level ping/pong frames are not used by the app
+RTT as `now − t` on the same clock it took `t` from; `t` is never compared with `server_time`.
+The server closes a socket `4408` that has sent no message at all (text or binary) for **30 s**. WebSocket protocol-level ping/pong frames are not used by the app
 and do not count as messages.
 
 ### 11.9 Revocation

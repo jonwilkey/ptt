@@ -105,7 +105,7 @@ func parseClient(data []byte) (clientMsg, error) {
 			return clientMsg{}, errMalformed
 		}
 	case typePing:
-		// t is the client's clock in unix ms: 0 to 2^53-1.
+		// t is an opaque client clock value (0 to 2^53-1), echoed in the pong and never interpreted.
 		if m.t, err = intOf(members["t"], 1<<53-1); err != nil {
 			return clientMsg{}, errMalformed
 		}

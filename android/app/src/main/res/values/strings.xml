@@ -181,7 +181,7 @@
     <string name="talk_urgent_page">Urgent page</string>
     <string name="talk_answer">Answer</string>
     <string name="talk_answered">Answered</string>
-    <string name="talk_live_unavailable">Live talk is not available yet.</string>
+    <string name="talk_live_unavailable">There is no live talk for a test alert.</string>
     <string name="talk_end">End</string>
     <string name="talk_hold_to_talk">Hold to talk</string>
     <string name="talk_talking">Talking</string>

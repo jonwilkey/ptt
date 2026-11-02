@@ -1,6 +1,7 @@
 package com.example.ptt.di
 
 import android.content.Context
+import android.os.SystemClock
 import com.example.ptt.BuildConfig
 import com.example.ptt.alert.AlertDevices
 import com.example.ptt.alert.AlertEngine
@@ -34,10 +35,12 @@ import com.example.ptt.push.SelfPages
 import com.example.ptt.push.SessionKeys
 import com.example.ptt.push.SocketPageEvents
 import com.example.ptt.setup.RosterSync
+import com.example.ptt.talk.AndroidTalkCues
 import com.example.ptt.talk.AndroidTalkServiceControl
 import com.example.ptt.talk.PageSender
 import com.example.ptt.talk.ServiceTalkAudioSource
 import com.example.ptt.talk.TalkAudioSource
+import com.example.ptt.talk.TalkCues
 import com.example.ptt.talk.TalkHosting
 import com.example.ptt.talk.TalkServiceControl
 import com.example.ptt.talk.TalkSessionController
@@ -140,6 +143,10 @@ object AlertModule {
 
     @Provides
     @Singleton
+    fun talkCues(@ApplicationContext context: Context): TalkCues = AndroidTalkCues(context)
+
+    @Provides
+    @Singleton
     fun socketPageEvents(dispatcher: PushDispatcher): SocketPageEvents = dispatcher
 
     @Provides
@@ -155,8 +162,7 @@ object AlertModule {
         events: SocketPageEvents,
         selfPages: SelfPages,
         service: TalkServiceControl,
-        scope: CoroutineScope,
-        clock: Clock
+        scope: CoroutineScope
     ) = TalkSessionController(
         transport,
         auth,
@@ -169,7 +175,8 @@ object AlertModule {
         selfPages,
         service,
         scope,
-        clock::millis
+        // Only durations are measured with it (first-talker rule, RTT, dead-socket timeouts), so a monotonic clock.
+        SystemClock::elapsedRealtime
     )
 
     @Provides

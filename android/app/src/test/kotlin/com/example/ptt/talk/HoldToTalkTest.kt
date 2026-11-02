@@ -32,8 +32,8 @@ class HoldToTalkTest {
                     {},
                     {},
                     live.value.copy(talkEnabled = enabled.value),
-                    { hold.press("p", enabled.value) },
-                    hold::release
+                    { hold.press(HoldSource.BUTTON, "p", enabled.value) },
+                    { hold.release(HoldSource.BUTTON) }
                 )
             }
         }
@@ -74,5 +74,48 @@ class HoldToTalkTest {
         live.value = TalkLive()
         compose.waitForIdle()
         assertEquals(listOf("press", "release"), audio.calls)
+    }
+
+    @Test
+    fun buttonAndVolumeShareOneHold() {
+        hold.press(HoldSource.BUTTON, "p", true)
+        hold.press(HoldSource.VOLUME_KEY, "p", true)
+        assertEquals("one press for both holders", listOf("press"), audio.calls)
+        hold.release(HoldSource.BUTTON)
+        assertEquals("still held by the volume key", listOf("press"), audio.calls)
+        hold.release(HoldSource.VOLUME_KEY)
+        assertEquals(listOf("press", "release"), audio.calls)
+    }
+
+    @Test
+    fun volumeAndButtonShareOneHoldInTheOtherOrder() {
+        hold.press(HoldSource.VOLUME_KEY, "p", true)
+        hold.press(HoldSource.BUTTON, "p", true)
+        assertEquals(listOf("press"), audio.calls)
+        hold.release(HoldSource.VOLUME_KEY)
+        assertEquals(listOf("press"), audio.calls)
+        hold.release(HoldSource.BUTTON)
+        assertEquals(listOf("press", "release"), audio.calls)
+    }
+
+    @Test
+    fun releaseAllEndsTheHoldWhicheverHolds() {
+        hold.press(HoldSource.BUTTON, "p", true)
+        hold.press(HoldSource.VOLUME_KEY, "p", true)
+        hold.releaseAll()
+        assertEquals(listOf("press", "release"), audio.calls)
+        hold.releaseAll()
+        hold.release(HoldSource.BUTTON)
+        assertEquals("release is idempotent", listOf("press", "release"), audio.calls)
+    }
+
+    @Test
+    fun aDisabledPressIsNotARequest() {
+        hold.press(HoldSource.BUTTON, "p", false)
+        hold.press(HoldSource.VOLUME_KEY, "p", false)
+        assertEquals(emptyList<String>(), audio.calls)
+        hold.release(HoldSource.BUTTON)
+        hold.releaseAll()
+        assertEquals("a refused press needs no release", emptyList<String>(), audio.calls)
     }
 }
