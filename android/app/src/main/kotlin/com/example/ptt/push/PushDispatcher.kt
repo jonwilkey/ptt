@@ -52,6 +52,11 @@ interface SocketPageEvents {
     suspend fun sessionEnded(pageId: String, role: PageRole, reason: SessionEndReason)
 }
 
+/** Schedules the reply to a `check_in` push (a WorkManager job that outlives the FCM service). */
+fun interface CheckInScheduler {
+    fun schedule()
+}
+
 /** Schedules a roster sync that survives the FCM service (an expedited WorkManager job). */
 fun interface RosterSyncScheduler {
     fun schedule()
@@ -78,7 +83,8 @@ class PushDispatcher(
     private val clock: Clock,
     private val deliveredTimeoutMs: Long = DELIVERED_TIMEOUT_MS,
     private val selfPages: SelfPages = SelfPages(),
-    private val hosting: TalkHosting = TalkHosting()
+    private val hosting: TalkHosting = TalkHosting(),
+    private val checkInScheduler: CheckInScheduler = CheckInScheduler {}
 ) : SocketPageEvents {
     private val rules = ActivePageRules(engine, sessionKeys, clock)
     private val eventFlow = MutableSharedFlow<PageEvent>(extraBufferCapacity = EVENT_BUFFER)
@@ -101,7 +107,9 @@ class PushDispatcher(
 
                 "test" -> notices.test()
 
-                // check_in is milestone 6; an unknown type is from a newer server.
+                "check_in" -> checkInScheduler.schedule()
+
+                // An unknown type is from a newer server.
                 else -> Unit
             }
         } catch (e: CancellationException) {
