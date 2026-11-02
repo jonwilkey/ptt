@@ -472,7 +472,7 @@ class TalkSessionController(
             }
         }
 
-        /** The floor left [TalkFloor.PEER_TALKING], by any route: for the rule their first transmission is over. */
+        /** The peer's transmission was released or the session ended: for the rule their first transmission is over. */
         private fun peerStoppedTalking() = withRule { rule, _ -> rule.onPeerStoppedTalking() }
 
         /** The page is over for reasons found locally (no server message): wind down. */
@@ -519,14 +519,19 @@ class TalkSessionController(
                 when (event) {
                     is SocketEvent.Ready -> {
                         readySince = nowMs()
-                        s.send(ClientMessage.Join(sessionId))
+                        sendJoin(s)
                     }
 
                     is SocketEvent.Message -> if (!ended) handle(s, event.message)
 
                     is SocketEvent.Frame -> if (!ended) onFrame(event.bytes)
 
-                    is SocketEvent.Rtt -> mutableState.update { it.copy(rttMillis = event.millis) }
+                    is SocketEvent.Rtt -> {
+                        mutableState.update { it.copy(rttMillis = event.millis) }
+                        // Any pong after the join's page_state answers a ping sent after the join, so the whole
+                        // snapshot is in (the server handles a socket's messages in order, section 11.8).
+                        if (joined) withRule { rule, _ -> rule.onRejoinSettled() }
+                    }
 
                     is SocketEvent.Closed -> {
                         socketLost()
@@ -535,6 +540,12 @@ class TalkSessionController(
                 }
             }
             return Pumped(closed, readySince)
+        }
+
+        /** `join`, then a `ping` whose `pong` marks the end of the join snapshot. */
+        private fun sendJoin(s: TalkSocket) {
+            s.send(ClientMessage.Join(sessionId))
+            s.send(ClientMessage.Ping(nowMs()))
         }
 
         /** Applies the close; false if the session must not reconnect. */
@@ -569,10 +580,8 @@ class TalkSessionController(
         /** The socket closed: before anything else the audio state is told (never recreated on reconnect). */
         private fun socketLost() {
             var wasTalking = false
-            var peerWasTalking = false
             synchronized(audioLock) {
                 audio?.onSocketClosed()
-                peerWasTalking = mutableState.value.floor == TalkFloor.PEER_TALKING
                 wasTalking = sealer != null || mutableState.value.floor == TalkFloor.YOU
                 sealer = null
                 joined = false
@@ -587,8 +596,8 @@ class TalkSessionController(
                     floor = TalkFloor.IDLE
                 )
             }
-            // Nothing replays the end of a transmission cut off by the drop: for the rule it is over now.
-            if (peerWasTalking) peerStoppedTalking()
+            // The peer's transmission is suspended: the rejoin snapshot either resumes it or shows it is over.
+            withRule { rule, _ -> rule.onOwnSocketLost() }
             if (wasTalking) {
                 // The own transmission is lost with the socket: capture must stop (a new request needs a new id).
                 mutableEvents.tryEmit(TalkEvent.StopCapture)
@@ -667,7 +676,7 @@ class TalkSessionController(
                 GrantOutcome.Listen -> {
                     floorId = m.transmissionId
                     mutableState.update { it.copy(floor = TalkFloor.PEER_TALKING) }
-                    withRule { rule, now -> rule.onPeerStartedTalking(now) }
+                    withRule { rule, now -> rule.onPeerStartedTalking(now, m.transmissionId) }
                     mutableEvents.tryEmit(TalkEvent.PeerStartedTalking)
                 }
 
@@ -727,7 +736,7 @@ class TalkSessionController(
             joinRetry?.cancel()
             joinRetry = scope.launch {
                 delay(JOIN_RETRY_MS)
-                s.send(ClientMessage.Join(sessionId))
+                sendJoin(s)
             }
         }
 
