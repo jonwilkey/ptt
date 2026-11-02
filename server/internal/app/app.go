@@ -158,6 +158,10 @@ func (a *App) Close(ctx context.Context) {
 // activeSessions is the number of open talk sessions, which the deploy workflow waits to drain.
 func (a *App) activeSessions() int { return a.hub.Sessions() }
 
+// errDrill is set only in the rollback drill's build (drill.go): a migrated drill server is
+// never healthy, so the deploy rolls back.
+var errDrill error
+
 // Health reports whether the database answers and the schema is fully migrated.
 func (a *App) Health(ctx context.Context) error {
 	if err := a.db.PingContext(ctx); err != nil {
@@ -169,6 +173,9 @@ func (a *App) Health(ctx context.Context) error {
 			reason = "schema_outdated"
 		}
 		return &httpapi.UnhealthyError{Reason: reason, Err: err}
+	}
+	if errDrill != nil {
+		return &httpapi.UnhealthyError{Reason: "drill", Err: errDrill}
 	}
 	return nil
 }

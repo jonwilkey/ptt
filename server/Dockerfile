@@ -22,9 +22,11 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download && go mod verify
 
 COPY . .
 ARG VERSION=dev
+# Empty for releases; only the rollback drill builds with GO_TAGS=drill.
+ARG GO_TAGS=
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/pttd ./cmd/pttd
+    go build -trimpath -tags "${GO_TAGS}" -ldflags "-s -w -X main.version=${VERSION}" -o /out/pttd ./cmd/pttd
 
 # An empty /data owned by nonroot: a fresh named volume mounted there inherits the ownership.
 RUN mkdir -p /out/data

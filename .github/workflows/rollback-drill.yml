@@ -1,0 +1,147 @@
+name: rollback-drill
+
+# Breaks production on purpose and checks that it rolls back automatically (milestone 6 exit
+# check; docs/operations.md, "Proving it: the rollback drill"). Builds the release production
+# runs (the `deployed` tag) with the Go build tag `drill`, which adds migration 99999 and makes
+# /healthz answer 503, and deploys it through deploy-prod.yml with drill: true. That job passes
+# only if the rollback restored the pre-migration snapshot and production is healthy on the
+# previous image and schema.
+#
+# Production is down for a few minutes and both admins get a "down" and an "up" email: run it at
+# a quiet time, announced to the family. The deploy needs an admin's approval like any deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "break production" to run the drill'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: rollback-drill
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build the drill image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push the drill image
+    outputs:
+      image: ${{ steps.meta.outputs.repo }}@${{ steps.push.outputs.digest }}
+      tag: ${{ steps.deployed.outputs.tag }}
+    steps:
+      - name: Check the request
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::The drill runs only from main, not ${GITHUB_REF}."
+            exit 1
+          fi
+          if [ "$CONFIRM" != "break production" ]; then
+            echo "::error::confirm must be exactly 'break production'."
+            exit 1
+          fi
+
+      - name: Image name
+        id: meta
+        run: echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}/pttd" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Find the deployed release
+        id: deployed
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+        run: |
+          set -euo pipefail
+          if ! docker pull --quiet "${REPO}:deployed" > /dev/null; then
+            echo "::error::${REPO}:deployed does not exist. Deploy a release through deploy-prod.yml first (or seed the tag; docs/runbooks/github-setup.md)."
+            exit 1
+          fi
+          label="$(docker image inspect "${REPO}:deployed" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
+          if [[ ! "$label" =~ ^([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)(\+.*)?$ ]]; then
+            echo "::error::The deployed image's version label '${label}' is not a release version."
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          {
+            echo "tag=server-v${version}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Production runs ${label} (server-v${version})."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.deployed.outputs.tag }}
+          persist-credentials: false
+
+      - name: The release contains the drill build
+        env:
+          TAG: ${{ steps.deployed.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for f in server/internal/db/drill/99999_drill.sql server/internal/db/drill.go server/internal/app/drill.go; do
+            if [ ! -f "$f" ]; then
+              echo "::error::${TAG} has no ${f}: deploy a release that contains the drill build first."
+              exit 1
+            fi
+          done
+          if ! grep -q '^ARG GO_TAGS=' server/Dockerfile; then
+            echo "::error::${TAG}'s Dockerfile has no GO_TAGS: deploy a release that contains the drill build first."
+            exit 1
+          fi
+
+      - name: Tagged commit
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Built like a release, plus GO_TAGS=drill. Unsigned, never given a version tag; the
+      # drill-<run id> tag only makes it easy to find and delete.
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server
+          file: server/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.deployed.outputs.version }}+drill.${{ github.run_id }}
+            GO_TAGS=drill
+          outputs: type=image,name=${{ steps.meta.outputs.repo }}:drill-${{ github.run_id }},push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.deployed.outputs.version }}+drill.${{ github.run_id }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+            org.opencontainers.image.licenses=MIT
+          pull: true
+          no-cache: true
+          provenance: false
+          sbom: false
+
+  deploy:
+    name: deploy
+    needs: build
+    permissions:
+      contents: read
+      packages: write # granted to deploy-prod's deployed job, which a drill skips
+    uses: ./.github/workflows/deploy-prod.yml
+    with:
+      image: ${{ needs.build.outputs.image }}
+      tag: ${{ needs.build.outputs.tag }}
+      environment: production
+      drill: true

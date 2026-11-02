@@ -13,6 +13,8 @@
 #   - any other failure (SSH, timeout, HTTP error): retry until the deadline.
 #   - a successful response whose active_sessions is not an integer: fail at once.
 # On the deadline it fails; the caller must not change the host.
+# With STATUS_OUT set, the last /internal/status body is written there when it reports no active
+# sessions (the deploy reads before_schema from it); the file is absent if pttd was not running.
 
 set -euo pipefail
 
@@ -31,6 +33,7 @@ while :; do
 			exit 1
 		fi
 		if [ "$active" -eq 0 ]; then
+			[ -z "${STATUS_OUT:-}" ] || printf '%s\n' "$status" > "$STATUS_OUT"
 			if [ "$waited" -gt 0 ]; then
 				echo "::notice::Waited ${waited} s for active sessions to end."
 			else

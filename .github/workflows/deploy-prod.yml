@@ -1,0 +1,326 @@
+name: deploy-prod
+
+# Deploys a pttd image to production and rolls back automatically if it fails
+# (docs/operations.md, "Server deploys and automatic rollback"). Called by server-release (and by
+# weekly-maintenance with environment: maintenance, and rollback-drill with drill: true).
+#
+#   1. Records the deployed image, waits for no active sessions, and records before_schema and
+#      deploy_start (the host's UTC time, in the snapshot timestamp format).
+#   2. Runs the tag's deploy.yml with the image, then /healthz within 2 minutes and the smoke test.
+#   3. If either fails and something was deployed before: rollback-prod.sh restores the
+#      pre-migration snapshot (when this deploy migrated), redeploys the previous image with its
+#      own release's deploy files, checks health again, and fails the job loudly.
+#   4. After a successful deploy, the deployed job moves the GHCR tag `deployed` to the image.
+#
+# With drill: true the Ansible and health failures are expected: the job passes only if the
+# rollback ran, restored a snapshot taken at or after deploy_start (now restored-*), and
+# production is healthy on the previous image at before_schema. A drill build that passes health
+# is rolled back anyway, and the drill fails.
+#
+# The caller grants contents: read and packages: write (for the deployed job); the deploy job
+# keeps packages: read, because its token is handed to the host for `docker login`. Environment
+# secrets come from the environment named by the input, never from the caller. The domain is a
+# secret (masked) and ssh-setup.sh masks the tailnet address.
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: "Image to deploy, pinned by digest (<registry>/<name>@sha256:<64 hex>)"
+        required: true
+        type: string
+      tag:
+        description: "Release tag whose deploy/ and infra/ansible/ to use, e.g. server-v1.2.3"
+        required: true
+        type: string
+      environment:
+        description: "production (needs an admin's approval) or maintenance (ADR 0012)"
+        required: false
+        type: string
+        default: production
+      drill:
+        description: "Rollback drill: expect the deploy to fail and check the rollback instead"
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      previous_image:
+        description: "Image that was deployed before this run (empty on the first deploy)"
+        value: ${{ jobs.deploy.outputs.previous_image }}
+      deployed:
+        description: "true when the image passed the health check and smoke test (never for a drill)"
+        value: ${{ jobs.deploy.outputs.deployed }}
+      rolled_back:
+        description: "true when the deploy failed and production is healthy on the previous image"
+        value: ${{ jobs.deploy.outputs.rolled_back }}
+
+permissions: {}
+
+env:
+  # renovate: datasource=github-releases depName=tailscale/tailscale extractVersion=^v(?<version>.+)$
+  TAILSCALE_VERSION: 1.104.1
+  # Same pins as the ci workflow's ansible job. The rollback runs older releases' deploy.yml with
+  # this ansible-core too.
+  ANSIBLE_CORE_VERSION: 2.21.5
+
+jobs:
+  deploy:
+    name: deploy (${{ inputs.environment }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Required reviewers on production are the approval gate (docs/runbooks/github-setup.md).
+    # No environment URL: it would show the domain on the public run page.
+    environment: ${{ inputs.environment }}
+    concurrency:
+      # Shared with the infra workflow's Ansible job: one change to the host at a time.
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read # GHCR_TOKEN: the host pulls the image with this job's token
+    outputs:
+      previous_image: ${{ steps.previous.outputs.image }}
+      deployed: ${{ steps.deployed.outputs.deployed }}
+      rolled_back: ${{ steps.rollback.outputs.rolled_back }}
+    env:
+      IMAGE: ${{ inputs.image }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Check the inputs
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          DRILL: ${{ inputs.drill }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE" =~ ^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$ ]] || { echo "::error::image '$IMAGE' is not pinned by digest."; exit 1; }
+          [[ "$TAG" =~ ^server-v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "::error::'$TAG' is not a server release tag."; exit 1; }
+          case "$ENVIRONMENT/$DRILL" in
+            production/false | production/true | maintenance/false) ;;
+            *) echo "::error::environment '$ENVIRONMENT' with drill=$DRILL is not allowed."; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Connect to the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: ${{ env.TAILSCALE_VERSION }}
+
+      # The action registers the node as ephemeral; it disappears from the tailnet after the job.
+      - name: SSH access to ptt-prod
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: .github/scripts/ssh-setup.sh
+
+      - name: Record the deployed image
+        id: previous
+        run: |
+          set -euo pipefail
+          image="$(.github/scripts/deployed-image.sh)"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "Deployed now: ${image:-(nothing; first deploy)}"
+          echo "Deploying:    ${IMAGE}"
+
+      # Spec, "Server deploys" step 2: never cut off a conversation. The last status it reads
+      # gives before_schema.
+      - name: Wait until no session is active
+        if: steps.previous.outputs.image != ''
+        env:
+          STATUS_OUT: ${{ runner.temp }}/status-before.json
+        run: .github/scripts/wait-no-sessions.sh
+
+      - name: Install Ansible
+        working-directory: infra/ansible
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install --quiet "ansible-core==${ANSIBLE_CORE_VERSION}"
+          echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r requirements.yml
+
+      # The app role decrypts app_secrets on this runner (community.sops).
+      - name: Install sops
+        run: .github/scripts/install-sops.sh
+
+      # before_schema: /internal/status when pttd answered with db_ok; otherwise `migrate status`
+      # (read-only, safe while pttd runs); unknown when both fail (the rollback then restores the
+      # image only). deploy_start is taken last, right before Ansible.
+      - name: Record the schema version and the deploy start
+        id: before
+        if: steps.previous.outputs.image != ''
+        env:
+          STATUS: ${{ runner.temp }}/status-before.json
+        run: |
+          set -euo pipefail
+          schema=""
+          if [ -s "$STATUS" ]; then
+            schema="$(jq -r 'if .db_ok == true and (.schema_version | type) == "number" then .schema_version else empty end' "$STATUS")" || schema=""
+          fi
+          if [ -z "$schema" ] && ! schema="$(ssh ptt-prod 'sudo -n bash -s -- schema' < .github/scripts/rollback-host.sh)"; then
+            schema=""
+          fi
+          [[ "$schema" =~ ^[0-9]+$ ]] || schema=""
+          start="$(ssh ptt-prod date -u +%Y%m%dT%H%M%S.000Z)"
+          {
+            echo "schema=${schema}"
+            echo "start=${start}"
+          } >> "$GITHUB_OUTPUT"
+          echo "before_schema: ${schema:-unknown}; deploy_start: ${start}"
+
+      - name: Deploy with Ansible (deploy.yml)
+        id: ansible
+        continue-on-error: ${{ inputs.drill }}
+        working-directory: infra/ansible
+        env:
+          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
+          GHCR_TOKEN: ${{ github.token }}
+          # Decrypts the app_secrets files; required. Only this step and the rollback see it.
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          set -euo pipefail
+          vars="$RUNNER_TEMP/deploy-vars.json"
+          # Extra vars from a file, so the domain is never on a command line.
+          (umask 077 && jq -n --arg d "$PTT_DOMAIN" '{ptt_domain: $d}' > "$vars")
+          ansible-playbook -i inventory/prod.yml deploy.yml -u deploy \
+            -e "@${vars}" -e "pttd_image=${IMAGE}"
+
+      # Spec, "Server deploys" step 5: /healthz within 2 minutes, then the smoke test.
+      - name: Health check and smoke test
+        id: health
+        if: steps.ansible.outcome == 'success'
+        continue-on-error: ${{ inputs.drill }}
+        env:
+          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
+        run: .github/scripts/check-prod.sh
+
+      - name: Summary
+        id: deployed
+        if: ${{ !inputs.drill && steps.health.outcome == 'success' }}
+        run: |
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "Deployed \`${IMAGE}\` (${TAG}) to production."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Spec, "Server deploys" step 6. Fails the job (exit 1) unless this is a drill. A drill
+      # build that unexpectedly passed health is rolled back too: production never stays on it.
+      - name: Roll back
+        id: rollback
+        if: >-
+          ${{ !cancelled() && steps.previous.outputs.image != '' &&
+          (steps.ansible.outcome == 'failure' || steps.health.outcome == 'failure' ||
+          (inputs.drill && steps.health.outcome == 'success')) }}
+        env:
+          FAILED_IMAGE: ${{ inputs.image }}
+          PREVIOUS_IMAGE: ${{ steps.previous.outputs.image }}
+          DEPLOY_START: ${{ steps.before.outputs.start }}
+          BEFORE_SCHEMA: ${{ steps.before.outputs.schema }}
+          DRILL: ${{ inputs.drill }}
+          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
+          GHCR_TOKEN: ${{ github.token }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: .github/scripts/rollback-prod.sh
+
+      - name: First deploy failed
+        if: >-
+          ${{ !cancelled() && steps.previous.outputs.image == '' &&
+          (steps.ansible.outcome == 'failure' || steps.health.outcome == 'failure') }}
+        run: |
+          {
+            echo
+            echo "## Deploy of \`${IMAGE}\` failed"
+            echo
+            echo "This was the first deploy; there is no previous image to roll back to."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Deploy of ${IMAGE} failed. Nothing was deployed before, so there is nothing to roll back to."
+          exit 1
+
+      # Only a drill gets here with the earlier failures tolerated; this step decides its result.
+      - name: Check the drill
+        if: ${{ inputs.drill && !cancelled() }}
+        env:
+          HEALTH_OUTCOME: ${{ steps.health.outcome }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
+          ROLLED_BACK: ${{ steps.rollback.outputs.rolled_back }}
+          RESTORED: ${{ steps.rollback.outputs.restored }}
+          PREVIOUS: ${{ steps.previous.outputs.image }}
+          BEFORE_SCHEMA: ${{ steps.before.outputs.schema }}
+          DEPLOY_START: ${{ steps.before.outputs.start }}
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error::Rollback drill FAILED: $*"
+            printf '\n## Rollback drill FAILED\n\n%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          if [ "$ROLLBACK_OUTCOME" != success ] || [ "$ROLLED_BACK" != true ]; then
+            fail "the rollback did not run or did not finish (outcome: ${ROLLBACK_OUTCOME:-skipped})."
+          fi
+          if [ "$HEALTH_OUTCOME" = success ]; then
+            fail "the drill build passed the health check, so it does not break /healthz; it was rolled back anyway."
+          fi
+          [[ "$BEFORE_SCHEMA" =~ ^[0-9]+$ ]] || fail "before_schema is unknown."
+          [[ "$RESTORED" =~ ^restored-pre-migrate-([0-9]{8}T[0-9]{6}\.[0-9]{3}Z)-v([0-9]+)\.db$ ]] ||
+            fail "no pre-migration snapshot was restored ('${RESTORED}')."
+          ts="${BASH_REMATCH[1]}"
+          [ "${BASH_REMATCH[2]}" = "$BEFORE_SCHEMA" ] || fail "${RESTORED} is not at schema ${BEFORE_SCHEMA}."
+          [[ "$ts" < "$DEPLOY_START" ]] && fail "${RESTORED} predates the deploy start ${DEPLOY_START}."
+          # shellcheck disable=SC2029 # RESTORED matched the pattern above
+          ssh ptt-prod "sudo -n test -f /data/snapshots/${RESTORED}" || fail "/data/snapshots/${RESTORED} does not exist."
+          now="$(.github/scripts/deployed-image.sh)"
+          [ "$now" = "$PREVIOUS" ] || fail "production runs '${now}', not the previous image ${PREVIOUS}."
+          status="$(ssh ptt-prod 'curl -fsS --max-time 5 http://127.0.0.1:9090/internal/status')" ||
+            fail "/internal/status did not answer."
+          jq -e --argjson v "$BEFORE_SCHEMA" '.db_ok == true and .schema_version == $v' <<< "$status" > /dev/null ||
+            fail "the database is not at schema ${BEFORE_SCHEMA}: $(jq -c '{db_ok, schema_version}' <<< "$status")."
+          echo "::notice::Rollback drill passed: restored ${RESTORED}; production runs ${PREVIOUS} at schema ${BEFORE_SCHEMA}."
+          {
+            echo
+            echo "## Rollback drill passed"
+            echo
+            echo "Restored \`${RESTORED}\`; production runs \`${PREVIOUS}\` at schema ${BEFORE_SCHEMA}."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the deploy vars and SSH key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/deploy-vars.json" "$RUNNER_TEMP/status-before.json" ~/.ssh/ptt-deploy
+
+  # A rolled-back deploy, a drill, and a failed first deploy never move the tag, so it always
+  # names what production runs (weekly-maintenance, nightly-security and the drill read it).
+  deployed:
+    name: tag deployed
+    needs: deploy
+    if: needs.deploy.outputs.deployed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write # move the deployed tag
+    env:
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Move the deployed tag
+        run: |
+          set -euo pipefail
+          repo="${IMAGE%@*}"
+          digest="${IMAGE#*@}"
+          # --prefer-index=false copies the single manifest as-is, so the tag names the same digest.
+          docker buildx imagetools create --prefer-index=false --tag "${repo}:deployed" "$IMAGE"
+          tagged="$(docker buildx imagetools inspect "${repo}:deployed" --format '{{json .Manifest}}' | jq -r .digest)"
+          if [ "$tagged" != "$digest" ]; then
+            echo "::error::${repo}:deployed resolves to '${tagged}', not ${digest}."
+            exit 1
+          fi
+          echo "${repo}:deployed -> ${digest}"
+          echo "Tag: \`${repo}:deployed\` -> \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
