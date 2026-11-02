@@ -15,8 +15,8 @@
 #   exists, it moves the failed database to /data/rolled-back-<deploy_start>/, installs the
 #   snapshot as /data/pttd.db, and renames the snapshot to restored-<name>. It never starts pttd;
 #   the runner redeploys the previous release. Safe to rerun: a restored database is no longer
-#   ahead of before_schema, and a run cut off between moving the failed files and installing the
-#   snapshot finishes the restore.
+#   ahead of before_schema, a run cut off between moving the failed files and installing the
+#   snapshot finishes the restore, and one cut off before renaming the snapshot renames it.
 #   Prints key=value lines on stdout for the runner: after_schema, migrated (yes, no, unknown),
 #   restored (the restored-* name, or empty), failed_db_dir, snapshots (the pre-migrate-* names),
 #   previous_version (the previous image's org.opencontainers.image.version label). Logs go to
@@ -55,13 +55,14 @@ schema_from_migrate() {
 		END { print max + 0 }' <<< "$s"
 }
 
-# The newest pre-migrate-<ts>-v<before>.db with ts >= deploy_start; names sort by time.
+# The newest <prefix>-<ts>-v<before>.db with ts >= deploy_start; names sort by time. The prefix
+# defaults to pre-migrate.
 qualifying_snapshot() {
-	local before="$1" start="$2" f name ts found=""
-	for f in "$snapdir"/pre-migrate-*-v"$before".db; do
+	local before="$1" start="$2" prefix="${3:-pre-migrate}" f name ts found=""
+	for f in "$snapdir/$prefix"-*-v"$before".db; do
 		[ -f "$f" ] || continue
 		name="${f##*/}"
-		ts="${name#pre-migrate-}"
+		ts="${name#"$prefix"-}"
 		ts="${ts%-v"$before".db}"
 		[[ $ts =~ ^[0-9]{8}T[0-9]{6}\.[0-9]{3}Z$ ]] || continue
 		[[ $ts < $start ]] && continue
@@ -104,7 +105,7 @@ restore() {
 		migrated=unknown
 	fi
 
-	local snap="" restored=""
+	local snap="" restored="" f
 	if [ "$migrated" = yes ]; then
 		snap="$(qualifying_snapshot "$before" "$start")"
 	fi
@@ -116,7 +117,6 @@ restore() {
 		done
 		install -d -m 0700 "$failed_dir"
 		install -o 65532 -g 65532 -m 0600 "${snapdir}/${snap}" "${data}/.pttd.db.restoring"
-		local f
 		for f in "${db_files[@]}"; do
 			[ -e "${data}/${f}" ] || continue
 			[ ! -e "${failed_dir}/${f}" ] || die "${failed_dir}/${f} already exists; not overwriting it"
@@ -129,11 +129,23 @@ restore() {
 		restored="restored-${snap}"
 		mv -- "${snapdir}/${snap}" "${snapdir}/${restored}"
 		log "Restored ${snap} to ${data}/pttd.db; the failed database is in ${failed_dir}."
+	elif [ -d "$failed_dir" ] && [[ $before =~ ^[0-9]+$ ]] &&
+		[ -z "$(qualifying_snapshot "$before" "$start" restored-pre-migrate)" ]; then
+		snap="$(qualifying_snapshot "$before" "$start")"
+		if [ -n "$snap" ]; then
+			for f in "$snapdir"/restored-*; do
+				[ -e "$f" ] && rm -f -- "$f"
+			done
+			restored="restored-${snap}"
+			mv -- "${snapdir}/${snap}" "${snapdir}/${restored}"
+			migrated=yes
+			log "A previous run restored ${snap} but did not rename it; renamed it to ${restored}."
+		fi
 	fi
 
 	[ -e "${data}/pttd.db" ] || die "${data}/pttd.db is missing; redeploying now would start an empty database"
 
-	local snaps="" f
+	local snaps=""
 	for f in "$snapdir"/pre-migrate-*.db; do
 		[ -f "$f" ] && snaps+="${snaps:+ }${f##*/}"
 	done

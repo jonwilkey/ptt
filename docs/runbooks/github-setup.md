@@ -1,9 +1,9 @@
 # Runbook: GitHub settings for CI/CD
 
 The repository settings, secrets, and variables that the `ci`, `release-please`,
-`server-release`, and `infra` workflows need, and the order of the first deploy. Values come from
-[infra-bootstrap.md](infra-bootstrap.md) and the steps below; keep each one in the shared
-password-manager vault, never in the repository.
+`server-release` (with `deploy-prod`), `rollback-drill`, and `infra` workflows need, and the
+order of the first deploy. Values come from [infra-bootstrap.md](infra-bootstrap.md) and the
+steps below; keep each one in the shared password-manager vault, never in the repository.
 
 The repository and its Actions logs are public, so every identifying value is a **secret**
 (GitHub masks secret values in logs), even ones that are not confidential (bucket name, domain,
@@ -50,11 +50,12 @@ Actions) can still create tags, or releases stop.
   approval and accept that one admin alone cannot ship.
 - **Deployment branches and tags: Selected branches and tags**, with two rules:
   - Branch `main`: release-please's calls of `server-release`, manual `server-release` runs
-    (they run from `main`), and the `infra` workflow.
+    (they run from `main`), `rollback-drill`, and the `infra` workflow.
   - Tag `server-v*`: `server-release` runs started by pushing a tag.
 
-Jobs that use it: `server-release` / `deploy`, `infra` / `apply`, `infra` / `ansible`. Each
-waits for an approval before it starts.
+Jobs that use it: `deploy-prod` / `deploy (production)` (called by `server-release` and
+`rollback-drill`), `infra` / `apply`, `infra` / `ansible`. Each waits for an approval before it
+starts.
 
 ## 3. Secrets and variables
 
@@ -73,12 +74,12 @@ Environment secrets are readable only by jobs that passed the approval gate.
 | `VULTR_API_KEY` | `production` secret | `infra` apply | infra-bootstrap.md step 1.2 (apply key) |
 | `AWS_TOFU_APPLY_ROLE_ARN` | `production` secret | `infra` apply | `apply_role_arn` from the bootstrap `tofu output` |
 | `TS_SERVER_AUTH_KEY` | `production` secret, **optional** | `infra` apply (`TF_VAR_tailscale_auth_key`) | A one-time `tag:ptt-server` auth key (infra-bootstrap.md step 6). Create it only just before an apply that creates or replaces the server, and delete it afterwards. |
-| `TS_OAUTH_CLIENT_ID` | `production` secret | `server-release` deploy, `infra` ansible | Section 4 |
-| `TS_OAUTH_SECRET` | `production` secret | `server-release` deploy, `infra` ansible | Section 4 |
-| `DEPLOY_SSH_KEY` | `production` secret | `server-release` deploy, `infra` ansible | Section 5 (private half) |
-| `PTT_DOMAIN` | `production` secret | `server-release` deploy (Ansible `ptt_domain`, `/healthz`, smoke test), `infra` ansible (`/healthz`, smoke test) | The server's name, the same value as `TOFU_RECORD_NAME` |
+| `TS_OAUTH_CLIENT_ID` | `production` secret | `deploy-prod` deploy, `infra` ansible | Section 4 |
+| `TS_OAUTH_SECRET` | `production` secret | `deploy-prod` deploy, `infra` ansible | Section 4 |
+| `DEPLOY_SSH_KEY` | `production` secret | `deploy-prod` deploy, `infra` ansible | Section 5 (private half) |
+| `PTT_DOMAIN` | `production` secret | `deploy-prod` deploy (Ansible `ptt_domain`, `/healthz`, smoke test), `infra` ansible (`/healthz`, smoke test) | The server's name, the same value as `TOFU_RECORD_NAME` |
 | `ANSIBLE_SITE_VARS` | `production` secret | `infra` ansible | The full YAML content of `infra/ansible/inventory/group_vars/prod/site.yml` (section 6) |
-| `SOPS_AGE_KEY` | `production` secret, **required** (prod `app_secrets` lists the FCM key) | `server-release` deploy, `infra` ansible (only the `ansible-playbook` step) | The CI age identity (section 6, "The CI age key") |
+| `SOPS_AGE_KEY` | `production` secret, **required** (prod `app_secrets` lists the FCM key) | `deploy-prod` deploy, `infra` ansible (only the `ansible-playbook` step) | The CI age identity (section 6, "The CI age key") |
 
 Repository **variables** (**Settings > Secrets and variables > Actions > Variables**):
 
@@ -255,6 +256,9 @@ production after approval.
   digest `.github/scripts/deployed-image.sh` prints (or `PTTD_IMAGE` in `/opt/ptt/.env`):
   `docker buildx imagetools create --prefer-index=false --tag ghcr.io/<owner>/<repo>/pttd:deployed
   ghcr.io/<owner>/<repo>/pttd@sha256:<digest>`.
+- If the `tag deployed` job fails after a good deploy (a GHCR hiccup), re-run that job before the
+  next `weekly-maintenance` run: until then the tag names the older release, and
+  `weekly-maintenance` would rebuild and deploy that one.
 - The rollback drill (milestone 6 exit check): **Actions > rollback-drill > Run workflow** on
   `main`, `confirm` = `break production`, then approve its deploy. Production is down for a few
   minutes and both admins get a "down" and an "up" email; run it at a quiet time. It passes only

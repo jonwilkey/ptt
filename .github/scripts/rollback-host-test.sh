@@ -138,6 +138,15 @@ o="$(run 5)"
 check "rerun after a cut-off restore: finishes it" \
 	"$(summary "$o") $(cat "$data/rolled-back-$start/pttd.db")" "migrated=yes restored=restored-$new db=$new failed"
 
+setup "$old" "$new"
+mkdir "$data/rolled-back-$start"
+mv "$data/pttd.db" "$data/pttd.db-wal" "$data/pttd.db-shm" "$data/rolled-back-$start/"
+cp "$data/snapshots/$new" "$data/pttd.db"
+o="$(FAKE_MIGRATE=5 run 5)"
+check "rerun after a restore cut off before the rename: renames the snapshot" \
+	"$(summary "$o") $(cd "$data/snapshots" && echo *)" \
+	"migrated=yes restored=restored-$new db=$new $old restored-$new"
+
 setup "$new"
 rc=0
 FAKE_STATUS="$status99999" FAKE_STOP_RC=1 run 5 > /dev/null || rc=$?

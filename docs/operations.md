@@ -238,10 +238,11 @@ The job records, besides the previous image (`deployed-image.sh`, as today):
   starts;
 - `before_schema`: the database's schema version. It is `schema_version` from `/internal/status`
   when that answers with `db_ok: true` (read in the same loop as `wait-no-sessions.sh`; the
-  internal listener answers even when `/healthz` fails). If `pttd` is not running, it is read
-  before Ansible runs with
+  internal listener answers even when `/healthz` fails). Otherwise (`pttd` is not running, or
+  answers with `db_ok: false`), it is read before Ansible runs with
   `docker compose -f /opt/ptt/compose.yaml run --rm --no-deps pttd migrate status` (the
-  highest `VERSION` whose `STATE` is `applied`). If neither works, `before_schema` is unknown.
+  highest `VERSION` whose `STATE` is `applied`; read-only, so safe while `pttd` runs). If neither
+  works, `before_schema` is unknown.
 
 ### Did this deploy migrate?
 
@@ -273,7 +274,8 @@ migrations make safe ("rollback mode", `server/README.md`).
 
 Trigger: the Ansible step or the health-and-smoke step (`check-prod.sh`, `/healthz` within 2
 minutes, then `smoke.sh`) failed, **and** there is a previous image. A first deploy has nothing to
-roll back to and only fails.
+roll back to and only fails. A cancelled or timed-out deploy job gets no rollback (intended: a
+person stopped it, or something is stuck); the runbook "Server down, VPS reachable" covers it.
 
 `.github/scripts/rollback-prod.sh` *(new)* then:
 
@@ -306,6 +308,12 @@ roll back to and only fails.
    written for. `ansible-core` stays the version this workflow pins (`ANSIBLE_CORE_VERSION`); a
    core bump that broke the old playbook would fail this step, and step 5 reports a failed
    rollback. Without the label, it uses the current tree and warns.
+
+   The sops-encrypted secrets are the exception: they come from the **failed release's** tree
+   (`-e app_secrets_src_dir=<that tree>/infra/secrets`), because secrets are current state, not
+   versioned code; a rotated key must not be rolled back with the code. So a secret file that a
+   release needs must not be removed in the release that follows it: that release's rollback
+   would find it missing.
 4. Runs `check-prod.sh` again.
 5. Writes the job summary (what failed, the image and snapshot it restored, where the failed
    database is kept) and fails the job: `::error::Deploy of <image> failed; rolled back to
@@ -355,7 +363,9 @@ workflow, `rollback-drill.yml` *(new)*:
   and rolls back: snapshot restored, previous image redeployed. With `drill: true` the last step
   inverts: the job **passes** only if the rollback ran, restored a snapshot taken at or after
   `deploy_start` and renamed it to `restored-*`, and production is healthy on the previous image
-  with schema version `before_schema`; it fails otherwise.
+  with schema version `before_schema`; it fails otherwise. A drill build that unexpectedly
+  passes the health check is rolled back all the same, so production never stays on it, and the
+  drill fails.
 
 Migration number 99999 is deliberate: if a restore ever failed and left it applied, goose would
 refuse the next real migration (00006 would be "missing") instead of silently treating it as

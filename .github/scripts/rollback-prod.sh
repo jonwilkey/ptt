@@ -11,7 +11,8 @@
 #      pre-migration snapshot, keeping the failed database for a person to inspect.
 #   2. Checks out the previous release's tag (from the previous image's version label, any
 #      +maint... suffix dropped) and runs that tree's deploy.yml with the previous image, with
-#      that tree's collections installed into a fresh ANSIBLE_COLLECTIONS_PATH.
+#      that tree's collections installed into a fresh ANSIBLE_COLLECTIONS_PATH. The sops files
+#      come from this (the failed release's) tree: secrets are current state, not versioned code.
 #   3. Runs check-prod.sh.
 #   4. Writes the job summary and exits 1 with ::error:: (the deploy failed either way). With
 #      DRILL=true it exits 0 when the rollback itself worked, so the drill can check the result.
@@ -70,7 +71,7 @@ report() {
 fail_rollback() {
 	output rolled_back false
 	report "ROLLBACK FAILED"
-	echo "::error::Deploy of ${FAILED_IMAGE} failed and the rollback failed too ($*). A person is needed (runbook: \"Server down, VPS reachable\")."
+	echo "::error::Deploy of ${FAILED_IMAGE} failed and the rollback failed too ($*). Do not re-run this job: a re-run records the failed image as the previous one. A person is needed: follow the runbook \"Server down, VPS reachable\" (docs/spec.md, Operations > Runbook)."
 	exit 1
 }
 
@@ -107,6 +108,7 @@ esac
 
 # 2. The previous release's tree and image.
 tree="$PWD"
+secrets_dir="${PWD}/infra/secrets"
 if [[ $previous_version =~ ^([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)(\+.*)?$ ]]; then
 	prev_tag="server-v${BASH_REMATCH[1]}"
 	wt="${tmp}/rollback-tree"
@@ -126,7 +128,8 @@ collections="${tmp}/rollback-collections"
 vars="${tmp}/rollback-vars.json"
 trap 'rm -f "$vars"' EXIT
 rm -rf "$collections"
-(umask 077 && jq -n --arg d "$PTT_DOMAIN" '{ptt_domain: $d}' > "$vars")
+(umask 077 && jq -n --arg d "$PTT_DOMAIN" --arg s "$secrets_dir" \
+	'{ptt_domain: $d, app_secrets_src_dir: $s}' > "$vars")
 # Chained with &&: errexit does not apply inside an if condition.
 if ! (
 	cd "${tree}/infra/ansible" &&

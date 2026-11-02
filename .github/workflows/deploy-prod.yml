@@ -14,7 +14,8 @@ name: deploy-prod
 #
 # With drill: true the Ansible and health failures are expected: the job passes only if the
 # rollback ran, restored a snapshot taken at or after deploy_start (now restored-*), and
-# production is healthy on the previous image at before_schema.
+# production is healthy on the previous image at before_schema. A drill build that passes health
+# is rolled back anyway, and the drill fails.
 #
 # The caller grants contents: read and packages: write (for the deployed job); the deploy job
 # keeps packages: read, because its token is handed to the host for `docker login`. Environment
@@ -146,9 +147,9 @@ jobs:
       - name: Install sops
         run: .github/scripts/install-sops.sh
 
-      # before_schema: /internal/status when pttd answered with db_ok; `migrate status` when pttd
-      # was not running; otherwise unknown (the rollback then restores the image only).
-      # deploy_start is taken last, right before Ansible.
+      # before_schema: /internal/status when pttd answered with db_ok; otherwise `migrate status`
+      # (read-only, safe while pttd runs); unknown when both fail (the rollback then restores the
+      # image only). deploy_start is taken last, right before Ansible.
       - name: Record the schema version and the deploy start
         id: before
         if: steps.previous.outputs.image != ''
@@ -158,8 +159,9 @@ jobs:
           set -euo pipefail
           schema=""
           if [ -s "$STATUS" ]; then
-            schema="$(jq -r 'if .db_ok == true and (.schema_version | type) == "number" then .schema_version else empty end' "$STATUS")"
-          elif ! schema="$(ssh ptt-prod 'sudo -n bash -s -- schema' < .github/scripts/rollback-host.sh)"; then
+            schema="$(jq -r 'if .db_ok == true and (.schema_version | type) == "number" then .schema_version else empty end' "$STATUS")" || schema=""
+          fi
+          if [ -z "$schema" ] && ! schema="$(ssh ptt-prod 'sudo -n bash -s -- schema' < .github/scripts/rollback-host.sh)"; then
             schema=""
           fi
           [[ "$schema" =~ ^[0-9]+$ ]] || schema=""
@@ -206,12 +208,14 @@ jobs:
             echo "Deployed \`${IMAGE}\` (${TAG}) to production."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Spec, "Server deploys" step 6. Fails the job (exit 1) unless this is a drill.
+      # Spec, "Server deploys" step 6. Fails the job (exit 1) unless this is a drill. A drill
+      # build that unexpectedly passed health is rolled back too: production never stays on it.
       - name: Roll back
         id: rollback
         if: >-
           ${{ !cancelled() && steps.previous.outputs.image != '' &&
-          (steps.ansible.outcome == 'failure' || steps.health.outcome == 'failure') }}
+          (steps.ansible.outcome == 'failure' || steps.health.outcome == 'failure' ||
+          (inputs.drill && steps.health.outcome == 'success')) }}
         env:
           FAILED_IMAGE: ${{ inputs.image }}
           PREVIOUS_IMAGE: ${{ steps.previous.outputs.image }}
@@ -241,6 +245,7 @@ jobs:
       - name: Check the drill
         if: ${{ inputs.drill && !cancelled() }}
         env:
+          HEALTH_OUTCOME: ${{ steps.health.outcome }}
           ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
           ROLLED_BACK: ${{ steps.rollback.outputs.rolled_back }}
           RESTORED: ${{ steps.rollback.outputs.restored }}
@@ -254,8 +259,12 @@ jobs:
             printf '\n## Rollback drill FAILED\n\n%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           }
-          [ "$ROLLBACK_OUTCOME" = success ] && [ "$ROLLED_BACK" = true ] ||
+          if [ "$ROLLBACK_OUTCOME" != success ] || [ "$ROLLED_BACK" != true ]; then
             fail "the rollback did not run or did not finish (outcome: ${ROLLBACK_OUTCOME:-skipped})."
+          fi
+          if [ "$HEALTH_OUTCOME" = success ]; then
+            fail "the drill build passed the health check, so it does not break /healthz; it was rolled back anyway."
+          fi
           [[ "$BEFORE_SCHEMA" =~ ^[0-9]+$ ]] || fail "before_schema is unknown."
           [[ "$RESTORED" =~ ^restored-pre-migrate-([0-9]{8}T[0-9]{6}\.[0-9]{3}Z)-v([0-9]+)\.db$ ]] ||
             fail "no pre-migration snapshot was restored ('${RESTORED}')."
