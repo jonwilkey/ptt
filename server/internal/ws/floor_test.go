@@ -14,6 +14,7 @@ import (
 
 	"github.com/jonwilkey/ptt/server/internal/audioframe"
 	"github.com/jonwilkey/ptt/server/internal/clock"
+	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 )
 
 // ---- helpers -------------------------------------------------------------------------
@@ -510,11 +511,8 @@ func TestMalformedFrameClosesTheSocket(t *testing.T) {
 func queueSession(t *testing.T) (*Hub, *session, *conn, *conn) {
 	t.Helper()
 	h := New(Options{Clock: clock.NewFake(t0)})
-	s := &session{
-		h: h, pageID: "p", members: map[string]*conn{}, idle: timer{clk: h.clk},
-		floor:  floorState{silence: timer{clk: h.clk}, maxLen: timer{clk: h.clk}},
-		sender: "a", answerer: "b",
-	}
+	s := newSession(h, sqlcdb.ActivePage{ID: "p", FromDevice: "a"})
+	s.answerer = "b"
 	h.rooms["p"] = s
 	mk := func(dev string) *conn {
 		c := newQueueConn()

@@ -62,10 +62,9 @@ func addDeviceWithID(t *testing.T, d *sql.DB, user, device string) person {
 	return person{user: user, device: device, token: tok}
 }
 
-// TestSenderKeyRoundTripFromSharedVectors sends the shared vectors' envelope and sender key
-// through POST /v1/pages, the protocol-2 WebSocket and GET /v1/pages/{id}, and checks that the
-// signed objects come back byte for byte, with the error order of protocol section 6.
-func TestSenderKeyRoundTripFromSharedVectors(t *testing.T) {
+// recoverVector is the shared vectors' "ok" envelope and sender key.
+func recoverVector(t *testing.T) (envelope, senderKey map[string]string) {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "protocol-vectors.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +81,6 @@ func TestSenderKeyRoundTripFromSharedVectors(t *testing.T) {
 	if err := json.Unmarshal(raw, &file); err != nil {
 		t.Fatal(err)
 	}
-	var envelope, senderKey map[string]string
 	for _, r := range file.SenderKeys.Recover {
 		if r.Name == "ok" {
 			if json.Unmarshal([]byte(r.Envelope), &envelope) != nil || json.Unmarshal([]byte(r.SenderKey), &senderKey) != nil {
@@ -93,6 +91,14 @@ func TestSenderKeyRoundTripFromSharedVectors(t *testing.T) {
 	if envelope == nil || senderKey == nil {
 		t.Fatal("no ok recover vector")
 	}
+	return envelope, senderKey
+}
+
+// TestSenderKeyRoundTripFromSharedVectors sends the shared vectors' envelope and sender key
+// through POST /v1/pages, the protocol-2 WebSocket and GET /v1/pages/{id}, and checks that the
+// signed objects come back byte for byte, with the error order of protocol section 6.
+func TestSenderKeyRoundTripFromSharedVectors(t *testing.T) {
+	envelope, senderKey := recoverVector(t)
 	const (
 		pageID    = "5f0c2a9e-3b1d-4c7a-9e21-6d8b0f4a7c13"
 		sessionID = "a8d4e6b2-71c9-4f30-8b5e-2c9a1d7e3f60"
@@ -206,5 +212,66 @@ func TestSenderKeyRoundTripFromSharedVectors(t *testing.T) {
 	_ = d.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM active_pages WHERE sender_key IS NOT NULL`).Scan(&rows)
 	if rows != 0 {
 		t.Errorf("%d rows still hold a sender key", rows)
+	}
+}
+
+// TestSenderKeyGoesWithThePageAtEveryEnd stores a sender key over the protocol-2 WebSocket and
+// ends the page by the WebSocket's session_end and by its 15-minute expiry: either way GET
+// answers 410 and no row holds a sender key.
+func TestSenderKeyGoesWithThePageAtEveryEnd(t *testing.T) {
+	envelope, senderKey := recoverVector(t)
+	const (
+		pageID    = "5f0c2a9e-3b1d-4c7a-9e21-6d8b0f4a7c13"
+		sessionID = "a8d4e6b2-71c9-4f30-8b5e-2c9a1d7e3f60"
+		senderDev = "c3e9a7f1-5d2b-4b84-a6e0-9f1c8d3b2a57"
+		toUser    = "5d1a9f30-2c7e-4b16-8a40-e3b9d6c25f07"
+		recvDev   = "7b2d0e94-a1c8-4f53-9d16-b5e8a3c47f20"
+		recvDev2  = "a4f6b830-9e21-4c7d-b5a8-1f0d6e2c8b93"
+	)
+	for _, end := range []string{"session_end", "expiry"} {
+		t.Run(end, func(t *testing.T) {
+			clk := clock.NewFake(time.Date(2026, 10, 24, 15, 0, 0, 0, time.UTC))
+			a, d := bootLogged(t, filepath.Join(t.TempDir(), "pttd.db"), clk, push.NewFake(), &logBuf{})
+			t.Cleanup(func() { a.Close(context.WithoutCancel(t.Context())); _ = d.Close() })
+			sender := addDeviceWithID(t, d, uuid.NewString(), senderDev)
+			addDeviceWithID(t, d, toUser, recvDev)
+			addDeviceWithID(t, d, toUser, recvDev2)
+			h := a.PublicHandler()
+			srv := httptest.NewServer(h)
+			t.Cleanup(srv.Close)
+			rec := call(t, h, sender.token, "/v1/pages", map[string]any{
+				"id": pageID, "to": toUser, "level": "normal", "session_id": sessionID, "envelope": envelope,
+			})
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create = %d %s", rec.Code, rec.Body)
+			}
+			ws := dialLive(t, srv)
+			ws.send(map[string]any{"type": "hello", "protocol": 2, "token": sender.token, "app_version": "0.0.1"})
+			ws.want("hello")
+			ws.send(map[string]any{"type": "join", "session_id": sessionID})
+			ws.want("page_state")
+			ws.send(map[string]any{"type": "sender_key", "key": senderKey})
+			ws.send(map[string]any{"type": "ping", "t": 1})
+			ws.want("pong")
+			path := "/v1/pages/" + pageID
+			if rec := getAs(t, h, sender.token, path); rec.Code != http.StatusOK {
+				t.Fatalf("GET before the end = %d", rec.Code)
+			}
+
+			if end == "session_end" {
+				ws.send(map[string]any{"type": "session_end"})
+				ws.want("session_end", "reason", "ended_by_you")
+			} else {
+				clk.Advance(15 * time.Minute)
+			}
+			waitFor(t, func() bool { return getAs(t, h, sender.token, path).Code == http.StatusGone })
+			if rec := getAs(t, h, sender.token, path); errorCode(t, rec) != "page_ended" {
+				t.Errorf("GET after the end = %s", rec.Body)
+			}
+			var rows int
+			if err := d.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM active_pages WHERE sender_key IS NOT NULL`).Scan(&rows); err != nil || rows != 0 {
+				t.Errorf("%d rows still hold a sender key (%v)", rows, err)
+			}
+		})
 	}
 }

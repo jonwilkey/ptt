@@ -1207,7 +1207,7 @@ transmission and per delivery, never per session:
 | Situation | Behaviour |
 | --- | --- |
 | The talker was granted on a protocol-1 socket | A milestone-4 transmission end to end: not buffered, never **open** (§13.3), no `listener_gap`, relayed as §11.7 to any listener. Its `floor_request` while the peer is away is `error no_peer`. |
-| The talker was granted on a protocol-2 socket, and the listener is joined on a protocol-1 socket | Relayed live as §11.7 (frames past the 25-frame queue are dropped, no `listener_gap`, no clip). The server frees the transmission when it closes. The `clip` flag of the request is ignored. |
+| The talker was granted on a protocol-2 socket, and the listener is joined on a protocol-1 socket | Relayed live as §11.7 (frames past the 25-frame queue are dropped, no `listener_gap`, no clip). The server frees the transmission when it closes. The `clip` flag of the request does not stop the live relay, and the 5 s silence allowance of §13.9 still applies. |
 | The talker is on protocol 2 and the listener is not joined | Buffered (§13.3, §13.4). If the listener next joins on a protocol-2 socket it gets the clips. If it joins on a protocol-1 socket, the `closed` transmissions held for it are removed unplayed, and a `live` or `open` one loses its held frames and is relayed as §11.7 for the rest of its life (§13.3, **unbuffered**). |
 | Both on protocol 2 | All of §13. |
 
@@ -1326,6 +1326,9 @@ is removed:
 - when it is evicted (below);
 - at session end (§11.5, §13.11).
 
+A transmission that closes with no frames is removed at once (it has nothing to replay; a
+`resume` of it gets `bad_transmission_id`).
+
 Removing frees its frames. The server still keeps the id in the session's set of granted ids
 (§11.6), so the id can never be granted again.
 
@@ -1342,7 +1345,8 @@ the silence release would fire while the talker is still talking, and the talker
 never get `released`.
 
 **Caps.** Each held transmission is **charged** its frame bytes plus a fixed **512 bytes** of
-overhead (its state, the index, the queue entry), from its grant until it is removed.
+overhead (its state, the index, the queue entry), from its grant until it is removed. A grant's
+512 bytes are charged without eviction; the next append brings the total back under the cap.
 
 | Cap | Limit |
 | --- | --- |

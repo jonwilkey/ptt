@@ -177,6 +177,9 @@ func TestPageMetricsAreExposedWithoutIdentifyingLabels(t *testing.T) {
 		"pttd_page_delivery_seconds_bucket", "pttd_page_answer_seconds_bucket",
 		`pttd_pages_ended_total{reason="missed"} 0`, `pttd_fcm_send_errors_total{kind="unregistered"} 0`,
 		"pttd_active_sessions 0",
+		// Clip fallback (protocol section 13.11): six unlabelled aggregates.
+		"\npttd_ws_transmissions_total 0", "\npttd_ws_clip_transmissions_total 0", "\npttd_ws_listener_gaps_total 0",
+		"\npttd_ws_resumes_total 0", "\npttd_ws_clip_evictions_total 0", "\npttd_ws_clip_buffer_bytes 0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("/metrics lacks %q", want)

@@ -45,6 +45,10 @@ type session struct {
 	idleGen uint64
 	ending  bool
 	floor   floorState
+	// buf holds the session's protocol-2 transmissions (section 13.3); lastProto is the protocol
+	// of each device's most recent joined socket in the session, absent before its first join.
+	buf       *txBuffer
+	lastProto map[string]int64
 }
 
 func newSession(h *Hub, p sqlcdb.ActivePage) *session {
@@ -52,6 +56,7 @@ func newSession(h *Hub, p sqlcdb.ActivePage) *session {
 		h: h, pageID: p.ID, sessionID: p.SessionID, sender: p.FromDevice,
 		members: map[string]*conn{}, idle: timer{clk: h.clk},
 		floor: floorState{silence: timer{clk: h.clk}, maxLen: timer{clk: h.clk}},
+		buf:   newTxBuffer(h.clips), lastProto: map[string]int64{},
 	}
 }
 
@@ -75,6 +80,16 @@ func (s *session) bothJoined() bool {
 func (s *session) stopTimers() {
 	s.idle.stop()
 	s.floor.stop()
+	for _, t := range s.buf.txs {
+		t.window.stop()
+	}
+}
+
+// discardLocked drops the session's in-memory state for good: its timers and every buffered
+// transmission (sections 11.5 and 13.11).
+func (s *session) discardLocked() {
+	s.stopTimers()
+	s.buf.clear()
 }
 
 // resetIdleLocked restarts the 2-minute idle timer if it is running. Task 14c calls it, with
@@ -260,7 +275,8 @@ func (c *conn) onJoin(sessionID string) {
 		peer.send(peerMsg{Type: "peer_joined", DeviceID: c.deviceID})
 	}
 	s.armIdleLocked()
-	s.floorSnapshotLocked(c) // floor_granted while the floor is held
+	s.floorSnapshotLocked(c)  // floor_granted while the floor is held
+	s.listenerJoinedLocked(c) // clips follow the snapshot (section 13.4)
 }
 
 // roleIn is the device's part in the active page: the sender at any time, the answering device
@@ -311,12 +327,13 @@ func (h *Hub) leaveLocked(c *conn, s *session) {
 	h.forgetEmptyLocked(s)
 }
 
-// forgetEmptyLocked drops a session nobody is attached to, unless its idle timer is running:
-// that one outlives its sockets so a rejoin within the window keeps the session.
+// forgetEmptyLocked drops a session nobody is attached to, unless its idle timer is running
+// or it holds transmissions: those outlive their sockets, so a rejoin within the window keeps
+// the session, and clips wait for a listener that has not joined yet (section 13.7).
 func (h *Hub) forgetEmptyLocked(s *session) {
-	if len(s.members) == 0 && !s.everBoth && h.rooms[s.pageID] == s {
+	if len(s.members) == 0 && !s.everBoth && len(s.buf.txs) == 0 && h.rooms[s.pageID] == s {
 		delete(h.rooms, s.pageID)
-		s.stopTimers()
+		s.discardLocked()
 	}
 }
 
@@ -333,6 +350,7 @@ func (h *Hub) detachLocked(c *conn) {
 	}
 	h.leaveLocked(c, s)
 	if wasJoined {
+		s.listenerLeftLocked(c.deviceID)
 		for _, m := range s.members {
 			if m.joined {
 				m.send(peerMsg{Type: "peer_left", DeviceID: c.deviceID})
@@ -396,7 +414,7 @@ func (h *Hub) Ended(e pages.Ending) pages.Liveness {
 		Answerer: e.Answerer != "" && s.members[e.Answerer] != nil && s.members[e.Answerer].liveLocked(now),
 	}
 	delete(h.rooms, e.PageID)
-	s.stopTimers()
+	s.discardLocked()
 	for dev, m := range s.members {
 		reason := e.Reason
 		if e.Initiator != "" {
