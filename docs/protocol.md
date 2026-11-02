@@ -934,7 +934,9 @@ request processed wins**. The **talker mints the `transmission_id`** (§12.4).
   (the grant must answer its own outstanding `floor_request`).
 - A `floor_granted` that names the phone itself **without an outstanding `floor_request` of its
   own** (a lying or replayed grant, or one surviving the phone's own restart) → the phone sends
-  `floor_release` for that id and sends **no audio**.
+  `floor_release` for that id and sends **no audio**. A `floor_granted` naming the phone itself
+  that §12.4 rule 4 refuses (another transmission is current) is answered the same way:
+  `floor_release` for that id and no audio.
 - The receiver-side rule about repeated ids (including the rejoin snapshot) is §12.4 rule 4.
 
 ### 11.7 Frame relay and the send queue
@@ -1447,8 +1449,11 @@ minute after it is fully heard. It sends `heard`:
 
 1. when it receives `floor_released` for a transmission whose grant it accepted, or when an
    accepted `clip` ends such a transmission (§13.8 step 3, which counts as its release);
-2. when it accepts the frame that makes k equal an accepted clip's `last_seq`;
-3. each time k has grown by 250 (5 s of audio) since its last `heard` for that transmission.
+2. when it accepts the frame that makes k equal an accepted clip's `last_seq`, or accepts a `clip`
+   whose `last_seq` k already reaches (its frames were accepted on an earlier socket, whose `heard`
+   may have been lost);
+3. each time k has grown by 250 (5 s of audio) since its last `heard` for that transmission (the
+   first when k reaches 249).
 
 It never sends `heard` for its own transmission, before it has accepted seq 0, or with a k lower
 than one it already sent for that id. `heard` is cumulative: a later one covers every earlier one.
@@ -1604,10 +1609,11 @@ can be replayed an old clip.
 
 **Playback.** Frames accepted from a clip go to a clip player, not to the live jitter buffer.
 The phone plays each clip in seq order, from memory, automatically. It plays clips in the order of
-their `clip` messages. A live transmission whose grant arrives while a clip is playing or waiting
-is held in memory and played after the clips before it, as a clip, in grant order (the server
-delivers both in grant order, §13.4); its `heard` is still sent as frames are accepted (§13.5),
-not after it plays. A phone that is capturing, or still sending an open transmission, plays
+their `clip` messages. A live transmission whose first frame arrives while a clip is playing or
+waiting is held in memory and played after the clips before it, as a clip (its `floor_granted`
+alone does not place it: the join snapshot's `floor_granted` comes before the clips of earlier
+transmissions, §13.4); its `heard` is still sent as frames are accepted (§13.5), not after it
+plays. A phone that is capturing, or still sending an open transmission, plays
 nothing; incoming audio waits as a clip and plays after it. It may start a clip before its last
 frame arrives. A clip counts as **finished** when the next `clip` arrives, or when no frame for it
 has arrived for 3 s: from then on the player skips the seqs it is missing instead of waiting for

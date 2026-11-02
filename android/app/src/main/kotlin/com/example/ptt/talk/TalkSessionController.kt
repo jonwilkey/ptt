@@ -1,6 +1,7 @@
 package com.example.ptt.talk
 
 import com.example.ptt.crypto.AudioSession
+import com.example.ptt.crypto.ClipVerdict
 import com.example.ptt.crypto.FrameSealer
 import com.example.ptt.crypto.FrameVerdict
 import com.example.ptt.crypto.GrantOutcome
@@ -26,12 +27,12 @@ import com.example.ptt.push.ActivePageRules
 import com.example.ptt.push.SelfPages
 import com.example.ptt.push.SessionKeys
 import com.example.ptt.push.SocketPageEvents
+import java.util.BitSet
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -109,8 +110,20 @@ data class TalkSessionState(
     val firstTalkerLocked: Boolean = false
 )
 
-/** One decrypted 20 ms Opus packet of the peer's transmission; [seq] orders it for the jitter buffer. */
-class IncomingOpus(val transmissionId: String, val seq: Int, val opus: ByteArray)
+/** What the player learns from the session, in socket order ([TalkSessionController.incoming]). */
+sealed interface Incoming
+
+/** One decrypted 20 ms Opus packet of the peer's (live or clip) transmission; [seq] orders it. */
+class IncomingOpus(val transmissionId: String, val seq: Int, val opus: ByteArray) : Incoming
+
+/** The peer's live transmission ended: its `floor_released`, or a `clip` that ended it (section 13.8). */
+data class LiveEnded(val transmissionId: String) : Incoming
+
+/**
+ * An accepted `clip` (protocol 2, section 13.8): the frames of [transmissionId] up to [lastSeq] that follow are a
+ * replay, played after what is already waiting. [acceptedBefore] holds the seqs accepted before it.
+ */
+class ClipStarted(val transmissionId: String, val lastSeq: Int, val acceptedBefore: BitSet) : Incoming
 
 /** One-shot happenings, for chirps and buzzes (14g). */
 sealed interface TalkEvent {
@@ -174,7 +187,7 @@ interface TalkSessions {
  * It ends on `session_end`, when the active-page row says the page is over, on a refused join, and on [stop];
  * only then is the [AudioSession] closed (zeroing its key).
  *
- * API for the audio and screen code: [state], [events], [incomingOpus], [pressTalk]/[releaseTalk], [sendOpus],
+ * API for the audio and screen code: [state], [events], [incoming], [pressTalk]/[releaseTalk], [sendOpus],
  * [requestEnd]. All are safe to call from any thread.
  */
 @Suppress("LongParameterList", "TooManyFunctions", "LargeClass")
@@ -204,16 +217,15 @@ class TalkSessionController(
     /** One-shot events (chirps, buzz, capture stop, session end). */
     override val events: SharedFlow<TalkEvent> = mutableEvents.asSharedFlow()
 
-    private val opus = MutableSharedFlow<IncomingOpus>(
-        extraBufferCapacity = OPUS_BUFFER,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST
-    )
+    private val playback = MutableSharedFlow<Incoming>(extraBufferCapacity = Channel.UNLIMITED)
 
     /**
-     * Decrypted Opus packets of the peer's transmission with their transmission id and seq: only frames the
-     * [AudioSession] accepted. Packets can be missing (the server drops under load) or out of order.
+     * For the player, in socket order: decrypted Opus packets of the peer's transmissions (only frames the
+     * [AudioSession] accepted; packets can be missing or out of order), the end of the peer's live transmissions,
+     * and accepted clips (protocol 2). Nothing is dropped: a replay arrives faster than real time and its frames
+     * were already reported `heard` (section 13.5); the server bounds what a replay holds (section 13.10).
      */
-    val incomingOpus: SharedFlow<IncomingOpus> = opus.asSharedFlow()
+    val incoming: SharedFlow<Incoming> = playback.asSharedFlow()
 
     /** Pages whose live talk ended in a way the page survives (unavailable, replaced, unauthorized, no key). */
     private val noTalkPages = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -542,7 +554,7 @@ class TalkSessionController(
 
                     is SocketEvent.Message -> if (!ended) handle(s, event.message)
 
-                    is SocketEvent.Frame -> if (!ended) onFrame(event.bytes)
+                    is SocketEvent.Frame -> if (!ended) onFrame(s, event.bytes)
 
                     is SocketEvent.Rtt -> {
                         mutableState.update { it.copy(rttMillis = event.millis) }
@@ -635,13 +647,26 @@ class TalkSessionController(
         private suspend fun handle(s: TalkSocket, m: ServerMessage) {
             when (m) {
                 is ServerMessage.PageState -> pageState(s, m)
+
                 is ServerMessage.PeerJoined -> peerJoined(m.deviceId)
+
                 is ServerMessage.PeerLeft -> peerLeft(m.deviceId)
+
                 is ServerMessage.FloorGranted -> granted(s, m)
+
                 ServerMessage.FloorBusy -> busy()
-                is ServerMessage.FloorReleased -> released(m)
+
+                is ServerMessage.FloorReleased -> released(s, m)
+
                 is ServerMessage.SessionEnd -> endSession(m.reason)
+
                 is ServerMessage.Error -> error(s, m.code)
+
+                is ServerMessage.Clip -> if (protocol2) clip(s, m)
+
+                // For the talker's screen (task 15c3); a protocol-1 server never sends it.
+                is ServerMessage.ListenerGap -> Unit
+
                 is ServerMessage.Hello, is ServerMessage.Pong -> Unit
             }
         }
@@ -650,6 +675,7 @@ class TalkSessionController(
             if (m.pageId != pageId) return
             if (!joined) {
                 joined = true
+                s.joined()
                 joinRetry?.cancel()
                 mutableState.update { it.copy(connection = TalkConnection.LIVE) }
                 sendSenderKey(s)
@@ -723,10 +749,10 @@ class TalkSessionController(
             outstanding = null
         }
 
-        private fun released(m: ServerMessage.FloorReleased) {
+        private fun released(s: TalkSocket, m: ServerMessage.FloorReleased) {
             var yours = false
             synchronized(audioLock) {
-                audio?.onFloorReleased(m.transmissionId)
+                audio?.onFloorReleased(m.transmissionId)?.let { sendHeard(s, m.transmissionId, it) }
                 if (outstanding == m.transmissionId) outstanding = null
                 if (m.transmissionId != floorId) return
                 yours = mutableState.value.floor == TalkFloor.YOU
@@ -735,7 +761,34 @@ class TalkSessionController(
                 mutableState.update { it.copy(floor = TalkFloor.IDLE) }
             }
             if (!yours) peerStoppedTalking()
+            if (!yours) playback.tryEmit(LiveEnded(m.transmissionId))
             mutableEvents.tryEmit(TalkEvent.FloorReleased(yours))
+        }
+
+        /** An accepted `clip` (section 13.8); one that ends the peer's current transmission counts as its release. */
+        private fun clip(s: TalkSocket, m: ServerMessage.Clip) {
+            var endedFloor = false
+            val verdict = synchronized(audioLock) {
+                val v = audio?.onClip(m.talker, m.transmissionId, m.lastSeq) as? ClipVerdict.Accepted ?: return
+                if (peerDevice == null) peerDevice = audio?.peer
+                v.heard?.let { sendHeard(s, m.transmissionId, it) }
+                if (v.endedCurrent && floorId == m.transmissionId) {
+                    endedFloor = true
+                    floorId = null
+                    mutableState.update { it.copy(floor = TalkFloor.IDLE) }
+                }
+                v
+            }
+            // A clip is a finished transmission of the peer's, so it satisfies the first-talker rule (section 13.7).
+            peerStoppedTalking()
+            if (verdict.endedCurrent) playback.tryEmit(LiveEnded(m.transmissionId))
+            playback.tryEmit(ClipStarted(m.transmissionId, m.lastSeq, verdict.acceptedBefore))
+            if (endedFloor) mutableEvents.tryEmit(TalkEvent.FloorReleased(yours = false))
+        }
+
+        /** `heard` exists only on a joined protocol-2 socket (section 13.5). */
+        private fun sendHeard(s: TalkSocket, transmissionId: String, lastSeq: Int) {
+            if (protocol2 && joined) s.send(ClientMessage.Heard(transmissionId, lastSeq))
         }
 
         private suspend fun error(s: TalkSocket, code: WsErrorCode) {
@@ -781,13 +834,12 @@ class TalkSessionController(
             socket?.close()
         }
 
-        private fun onFrame(bytes: ByteArray) {
+        private fun onFrame(s: TalkSocket, bytes: ByteArray) {
             val verdict = audio?.onFrame(bytes) ?: return
             // Only authenticated, first-time frames are played; everything else is dropped silently.
             if (verdict is FrameVerdict.Accepted) {
-                opus.tryEmit(
-                    IncomingOpus(verdict.transmissionId, verdict.seq, verdict.opus)
-                )
+                playback.tryEmit(IncomingOpus(verdict.transmissionId, verdict.seq, verdict.opus))
+                verdict.heard?.let { sendHeard(s, verdict.transmissionId, it) }
             }
         }
 
@@ -882,7 +934,6 @@ class TalkSessionController(
         private const val CODE_PROTOCOL = 4400
         private const val CODE_TOO_LARGE = 4413
         private const val EVENT_BUFFER = 32
-        private const val OPUS_BUFFER = 64
         private const val ACCEPTED_MEMORY = 16
         private const val PROTOCOL_CLIP = 2
         private const val STATE_ENDED = "ended"

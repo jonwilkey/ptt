@@ -1,6 +1,9 @@
 package com.example.ptt.audio
 
+import com.example.ptt.talk.ClipStarted
+import com.example.ptt.talk.Incoming
 import com.example.ptt.talk.IncomingOpus
+import com.example.ptt.talk.LiveEnded
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -20,9 +23,11 @@ interface AudioSink : AutoCloseable {
 }
 
 /**
- * Plays the peer's transmission: [enqueue] (called from a fast collector, only queues) feeds one dedicated playout
- * thread that owns the [JitterBuffer], the decoder and the sink. Nothing is written to disk and nothing about frames
- * is logged.
+ * Plays the peer's transmissions: [enqueue] (called from a fast collector, only queues) feeds one dedicated playout
+ * thread that owns the [JitterBuffer] (live audio), the [ClipQueue] (clips, and live transmissions held behind them
+ * or behind this phone's own talking, docs/protocol.md section 13.8), the decoder and the sink. Live audio plays
+ * first; the queue plays once the live transmission has played out. Nothing is written to disk and nothing about
+ * frames is logged.
  *
  * Per transmission it creates a fresh decoder (a fresh Opus stream pairs with a fresh decoder, so the pre-skip is
  * applied once and no state leaks between talkers), eagerly on the transmission's first packet so the codec start
@@ -43,6 +48,10 @@ class Player(
     private sealed interface Msg {
         class Frame(val frame: IncomingOpus) : Msg
 
+        class Event(val event: Incoming) : Msg
+
+        class Busy(val on: Boolean) : Msg
+
         data object Release : Msg
 
         data object Flush : Msg
@@ -54,6 +63,10 @@ class Player(
 
     private val inbox = LinkedBlockingQueue<Msg>()
     private val jitter = JitterBuffer()
+    private val clips = ClipQueue()
+
+    /** The queued transmission whose packets the decoder is playing, if any (else the decoder is the live one's). */
+    private var clipPlaying: String? = null
     private var decoder: OpusDecoder? = null
     private var decoderFailures = 0
     private var sink: AudioSink? = null
@@ -70,9 +83,18 @@ class Player(
     /** Names of the threads that ran playout work, for the "one playout thread" test. */
     internal val playoutThread: Thread? get() = thread
 
-    /** Queues a packet; never blocks. Drops it if the playout thread is far behind (a stall, not normal operation). */
-    fun enqueue(frame: IncomingOpus) {
-        if (!closed && inbox.size < MAX_QUEUED) inbox.add(Msg.Frame(frame))
+    /**
+     * Queues what the session reported; never blocks and never drops. A clip frame was already reported `heard`, so
+     * the server will not send it again (docs/protocol.md section 13.5); the server bounds a replay (section 13.10).
+     */
+    fun enqueue(event: Incoming) {
+        if (closed) return
+        inbox.add(if (event is IncomingOpus) Msg.Frame(event) else Msg.Event(event))
+    }
+
+    /** This phone is capturing or sending: queued audio waits (section 13.8). */
+    fun busy(on: Boolean) {
+        if (!closed) inbox.add(Msg.Busy(on))
     }
 
     /** The peer's floor was released: what is buffered plays out, later packets of that transmission are dropped. */
@@ -118,7 +140,8 @@ class Player(
         try {
             while (!closed) {
                 // Idle (nothing buffered): sleep until a message arrives; otherwise wake for the next slot.
-                var msg = if (jitter.drained) inbox.take() else inbox.poll(TICK_MS, TimeUnit.MILLISECONDS)
+                val idle = jitter.drained && clips.isEmpty
+                var msg = if (idle) inbox.take() else inbox.poll(TICK_MS, TimeUnit.MILLISECONDS)
                 while (msg != null) {
                     handle(msg, clock())
                     msg = inbox.poll()
@@ -137,21 +160,24 @@ class Player(
 
     private fun handle(msg: Msg, now: Long) {
         when (msg) {
-            is Msg.Frame -> {
-                val f = msg.frame
-                if (jitter.push(f.transmissionId, f.seq, f.opus, now)) newTransmission()
-            }
+            is Msg.Frame -> frame(msg.frame, now)
+
+            is Msg.Event -> event(msg.event, now)
+
+            is Msg.Busy -> clips.busy(msg.on)
 
             Msg.Release -> jitter.release()
 
             Msg.Flush -> {
                 jitter.flush()
+                clips.clear()
                 discardSink()
                 endTransmission()
             }
 
             Msg.DropCurrent -> {
                 jitter.dropCurrent()
+                if (clipPlaying != null) clips.dropHead()
                 discardSink()
                 endTransmission()
             }
@@ -160,7 +186,34 @@ class Player(
         }
     }
 
+    /** A packet goes to the queue when its transmission is a clip or held there, else it plays live. */
+    private fun frame(f: IncomingOpus, now: Long) {
+        if (clips.offer(f.transmissionId, f.seq, f.opus, now)) return
+        if (jitter.transmissionId != f.transmissionId && clips.hold(f.transmissionId, now)) {
+            clips.offer(f.transmissionId, f.seq, f.opus, now)
+            return
+        }
+        if (jitter.push(f.transmissionId, f.seq, f.opus, now)) newTransmission()
+    }
+
+    private fun event(e: Incoming, now: Long) {
+        when (e) {
+            is LiveEnded -> {
+                clips.liveEnded(e.transmissionId)
+                if (jitter.transmissionId == e.transmissionId) jitter.release()
+            }
+
+            is ClipStarted -> clips.clip(e.transmissionId, e.lastSeq, e.acceptedBefore, now)
+
+            is IncomingOpus -> frame(e, now)
+        }
+    }
+
     internal fun handleFrame(frame: IncomingOpus, now: Long) = handle(Msg.Frame(frame), now)
+
+    internal fun handleEvent(event: Incoming, now: Long) = handle(Msg.Event(event), now)
+
+    internal fun handleBusy(on: Boolean) = handle(Msg.Busy(on), 0)
 
     internal fun handleRelease() = handle(Msg.Release, 0)
 
@@ -168,16 +221,36 @@ class Player(
 
     internal fun handleFlush() = handle(Msg.Flush, 0)
 
-    /** Plays everything that is due at [now]. */
+    /** Plays everything that is due at [now]: the live transmission, and once it has played out, the queue. */
     internal fun tick(now: Long) {
         while (true) {
             when (val out = jitter.poll(now)) {
                 null -> break
-                is JitterOutput.Packet -> play(out)
+                is JitterOutput.Packet -> play(out.opus)
                 is JitterOutput.Gap -> repeat(out.count) { conceal() }
             }
         }
-        if (jitter.drained && decoder != null) endTransmission()
+        if (!jitter.drained) return
+        if (clipPlaying == null && decoder != null) endTransmission()
+        tickClips(now)
+    }
+
+    private fun tickClips(now: Long) {
+        while (true) {
+            when (val out = clips.poll(now)) {
+                null -> break
+
+                is ClipOutput.Packet -> {
+                    if (out.transmissionId != clipPlaying) {
+                        newTransmission()
+                        clipPlaying = out.transmissionId
+                    }
+                    play(out.opus)
+                }
+
+                is ClipOutput.Done -> if (out.transmissionId == clipPlaying) endTransmission()
+            }
+        }
     }
 
     private fun newTransmission() {
@@ -197,6 +270,7 @@ class Player(
     }
 
     private fun endTransmission() {
+        clipPlaying = null
         stopSink()
         closeQuietly(decoder)
         decoder = null
@@ -205,14 +279,14 @@ class Player(
     }
 
     @Suppress("ReturnCount")
-    private fun play(packet: JitterOutput.Packet) {
+    private fun play(opus: ByteArray) {
         val d = decoder
         if (d == null) {
             conceal()
             return
         }
         val pcm = try {
-            d.decode(packet.opus)
+            d.decode(opus)
         } catch (_: IOException) {
             return failed()
         } catch (_: IllegalStateException) {
@@ -305,6 +379,7 @@ class Player(
         closeQuietly(sink)
         sink = null
         jitter.flush()
+        clips.clear()
         inbox.clear()
     }
 
@@ -321,7 +396,6 @@ class Player(
     private companion object {
         const val TICK_MS = 10L
         const val JOIN_MS = 1_000L
-        const val MAX_QUEUED = 256
         const val MAX_CONCEALED = 3
         const val MAX_DECODER_FAILURES = 5
         const val MS_PER_SECOND = 1000

@@ -906,7 +906,7 @@ class TalkSessionControllerTest {
         val ws = rig.connect()
         rig.joined(ws)
         val got = mutableListOf<IncomingOpus>()
-        backgroundScope.launch { rig.controller.incomingOpus.collect { got += it } }
+        backgroundScope.launch { rig.controller.incoming.collect { if (it is IncomingOpus) got += it } }
         runCurrent()
 
         val peer = AudioSession.forAnswerer(KEY.copyOf(), SESSION, PEER_DEVICE, OWN)
@@ -946,6 +946,162 @@ class TalkSessionControllerTest {
         ws.serverBinary(frame0)
         runCurrent()
         assertEquals("nothing after the release", 1, got.size)
+    }
+
+    // ---- protocol 2: clips and heard (section 13) ----
+
+    private class PeerTalker {
+        private val phone = AudioSession.forAnswerer(KEY.copyOf(), SESSION, PEER_DEVICE, OWN)
+        val id = phone.requestFloor()
+        private val sealer = (phone.onFloorGranted(PEER_DEVICE, id) as GrantOutcome.Transmit).sealer
+        fun frame(): ByteArray = sealer.seal(ByteArray(20) { 1 })
+    }
+
+    private fun FakeWs.clip(id: String, last: Int, talker: String = PEER_DEVICE) =
+        serverText("""{"type":"clip","talker":"$talker","transmission_id":"$id","last_seq":$last}""")
+
+    private fun FakeWs.heards(): List<String> = texts.filter { "\"type\":\"heard\"" in it }
+
+    @Test(timeout = 60_000)
+    fun onProtocolTwoAnAcceptedClipReachesThePlayerAndItsLastFrameIsHeard() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.controller.open(PAGE)
+        rig.accepted(OutboxKind.ANSWER)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws)
+        val got = mutableListOf<Incoming>()
+        backgroundScope.launch { rig.controller.incoming.collect { got += it } }
+        runCurrent()
+        val pingsAtJoin = ws.types().count { it == "ping" }
+        advanceTimeBy(2_000)
+        runCurrent()
+        assertEquals("pings every 2 s once joined on protocol 2", pingsAtJoin + 1, ws.types().count { it == "ping" })
+
+        val t = PeerTalker()
+        ws.clip(t.id, 1)
+        ws.serverBinary(t.frame())
+        runCurrent()
+        assertTrue(ws.heards().isEmpty())
+        ws.serverBinary(t.frame())
+        runCurrent()
+        assertEquals(listOf("""{"type":"heard","transmission_id":"${t.id}","last_seq":1}"""), ws.heards())
+        val clip = got[0] as ClipStarted
+        assertEquals(t.id, clip.transmissionId)
+        assertEquals(1, clip.lastSeq)
+        assertEquals(listOf(0, 1), got.drop(1).map { (it as IncomingOpus).seq })
+        // a clip naming another talker is refused: its frames never reach the player
+        val other = PeerTalker()
+        ws.clip(other.id, 0, talker = STRANGER)
+        ws.serverBinary(other.frame())
+        runCurrent()
+        assertEquals(3, got.size)
+    }
+
+    @Test(timeout = 60_000)
+    fun onProtocolTwoAClipEndingThePeersTransmissionFreesTheFloorAndReportsWhatWasHeard() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.controller.open(PAGE)
+        rig.accepted(OutboxKind.ANSWER)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws)
+        val events = mutableListOf<TalkEvent>()
+        val got = mutableListOf<Incoming>()
+        backgroundScope.launch { rig.controller.events.collect { events += it } }
+        backgroundScope.launch { rig.controller.incoming.collect { got += it } }
+        runCurrent()
+        val t = PeerTalker()
+        ws.grant(PEER_DEVICE, t.id)
+        ws.serverBinary(t.frame())
+        runCurrent()
+        assertEquals(TalkFloor.PEER_TALKING, rig.controller.state.value.floor)
+        ws.clip(t.id, 1)
+        runCurrent()
+        assertEquals(TalkFloor.IDLE, rig.controller.state.value.floor)
+        assertTrue(events.contains(TalkEvent.FloorReleased(yours = false)))
+        assertEquals(listOf("""{"type":"heard","transmission_id":"${t.id}","last_seq":0}"""), ws.heards())
+        assertTrue(got.contains(LiveEnded(t.id)))
+        assertTrue(got.last() is ClipStarted)
+    }
+
+    @Test(timeout = 60_000)
+    fun onProtocolTwoAClipReplayFasterThanThePlayerCollectsLosesNothing() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.controller.open(PAGE)
+        rig.accepted(OutboxKind.ANSWER)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws)
+        val got = mutableListOf<Incoming>()
+        backgroundScope.launch { rig.controller.incoming.collect { got += it } }
+        runCurrent()
+        val first = PeerTalker()
+        val second = PeerTalker()
+        ws.clip(first.id, 1199)
+        repeat(1200) { ws.serverBinary(first.frame()) }
+        ws.clip(second.id, 1)
+        repeat(2) { ws.serverBinary(second.frame()) }
+        runCurrent()
+        val expected = listOf("clip ${first.id}") + (0..1199).map { "${first.id} $it" } +
+            "clip ${second.id}" + (0..1).map { "${second.id} $it" }
+        val seen = got.map {
+            when (it) {
+                is ClipStarted -> "clip ${it.transmissionId}"
+                is IncomingOpus -> "${it.transmissionId} ${it.seq}"
+                is LiveEnded -> "ended ${it.transmissionId}"
+            }
+        }
+        assertEquals(expected, seen)
+    }
+
+    /** As the answerer: a grant, a frame and its release, then a clip of a later transmission with its frame. */
+    private suspend fun TestScope.releaseThenClip(protocol: Int): Pair<FakeWs, List<String>> {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.controller.open(PAGE)
+        rig.accepted(OutboxKind.ANSWER)
+        val ws = rig.connect(protocol = protocol)
+        rig.joined(ws)
+        val t = PeerTalker()
+        ws.grant(PEER_DEVICE, t.id)
+        ws.serverBinary(t.frame())
+        ws.serverText(
+            """{"type":"floor_released","talker":"$PEER_DEVICE","transmission_id":"${t.id}","reason":"released"}"""
+        )
+        val later = PeerTalker()
+        ws.clip(later.id, 0)
+        ws.serverBinary(later.frame())
+        runCurrent()
+        return ws to listOf(t.id, later.id)
+    }
+
+    @Test(timeout = 60_000)
+    fun onProtocolTwoAReleaseAndACompletedClipAreHeard() = runTest {
+        val (ws, ids) = releaseThenClip(protocol = 2)
+        assertEquals(
+            ids.map { """{"type":"heard","transmission_id":"$it","last_seq":0}""" },
+            ws.heards()
+        )
+    }
+
+    @Test(timeout = 60_000)
+    fun onProtocolOneThereIsNoHeardAndAClipIsIgnored() = runTest {
+        val (ws, _) = releaseThenClip(protocol = 1)
+        assertTrue(ws.heards().isEmpty())
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipFromThePeerSatisfiesTheSendersFirstTalkerRule() = runTest {
+        val rig = Rig(this)
+        rig.sender(state = "answered")
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws, state = "answered", peer = false)
+        assertTrue(rig.controller.state.value.firstTalkerLocked)
+        ws.clip(PeerTalker().id, 0)
+        runCurrent()
+        assertFalse(rig.controller.state.value.firstTalkerLocked)
     }
 
     @Test(timeout = 60_000)
