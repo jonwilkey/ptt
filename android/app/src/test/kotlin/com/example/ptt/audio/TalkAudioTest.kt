@@ -327,7 +327,8 @@ class TalkAudioTest {
         conversation(TalkFloor.PEER_TALKING)
         link.incomingOpus.tryEmit(IncomingOpus("t1", 0, byteArrayOf(1)))
         link.events.tryEmit(TalkEvent.SessionEnded(SessionEndReason.ENDED_BY_PEER))
-        await("decoder freed") { decoders.single().closed }
+        // The playout thread makes the decoder when it reaches the frame, which can be after this thread gets here.
+        await("decoder made and freed") { decoders.size == 1 && decoders[0].closed }
         Thread.sleep(200)
         assertTrue(sinks.isEmpty() || sinks.single().writes.isEmpty())
     }
