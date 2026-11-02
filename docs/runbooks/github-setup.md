@@ -245,9 +245,20 @@ production after approval.
   `deploy-production`, so they never change the host at the same time. GitHub keeps at most one
   waiting job per group: if a third arrives while one runs and one waits, the waiting one is
   cancelled. Re-run it if it was the one you wanted.
-- A failed production health check or smoke test leaves the new release running and prints the
-  manual rollback command (the previous digest) in the job summary. Automatic rollback is
-  milestone 6.
+- A failed deploy (Ansible, or the health check and smoke test) rolls back automatically:
+  `deploy-prod` restores the deploy's pre-migration snapshot if it migrated, redeploys the
+  previous image with its own release's deploy files, checks health again, and fails the job with
+  a summary of what it did ([docs/operations.md](../operations.md#the-rollback)). A failed first
+  deploy has nothing to roll back to and only fails.
+- After each successful deploy, `deploy-prod` moves the GHCR tag `pttd:deployed` to the deployed
+  digest. If no release has been deployed through `deploy-prod` yet, seed it by hand from the
+  digest `.github/scripts/deployed-image.sh` prints (or `PTTD_IMAGE` in `/opt/ptt/.env`):
+  `docker buildx imagetools create --prefer-index=false --tag ghcr.io/<owner>/<repo>/pttd:deployed
+  ghcr.io/<owner>/<repo>/pttd@sha256:<digest>`.
+- The rollback drill (milestone 6 exit check): **Actions > rollback-drill > Run workflow** on
+  `main`, `confirm` = `break production`, then approve its deploy. Production is down for a few
+  minutes and both admins get a "down" and an "up" email; run it at a quiet time. It passes only
+  if production rolled back to the previous image and schema with the snapshot restored.
 - The deploy job, and the `infra` Ansible job when a release is deployed, wait up to 10 minutes
   for active sessions to end and fail without changing the host if they do not; re-run the job
   later. A refused connection to pttd's internal port (pttd not running) does not block them.

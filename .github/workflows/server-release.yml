@@ -1,7 +1,8 @@
 name: server-release
 
 # Builds, scans, signs, and smoke-tests the pttd image for a server-vX.Y.Z tag, then deploys it
-# to production after either admin approves the `production` environment.
+# to production with deploy-prod.yml after either admin approves the `production` environment,
+# rolling back automatically if the deploy fails.
 #
 # Entry points (ADR 0005), all running the same jobs against the tag's tree:
 #   - release-please.yml calls this workflow (workflow_call) right after it creates a release;
@@ -53,10 +54,6 @@ env:
   COSIGN_VERSION: v3.1.3
   # renovate: datasource=github-releases depName=anchore/syft
   SYFT_VERSION: v1.54.1
-  # renovate: datasource=github-releases depName=tailscale/tailscale extractVersion=^v(?<version>.+)$
-  TAILSCALE_VERSION: 1.104.1
-  # Same pins as the ci workflow's ansible job.
-  ANSIBLE_CORE_VERSION: 2.21.5
 
 jobs:
   build:
@@ -354,131 +351,15 @@ jobs:
           echo "${REPO}:${VERSION} -> ${DIGEST}"
           echo "Tag: \`${REPO}:${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
 
+  # deploy-prod.yml: the production approval, the deploy-production concurrency group, the
+  # automatic rollback, and the deployed tag.
   deploy:
-    name: deploy (production)
+    name: deploy
     needs: [build, scan, smoke, sign]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    # Required reviewers on this environment are the approval gate (docs/runbooks/github-setup.md).
-    # No environment URL: it would show the domain on the public run page.
-    environment: production
-    concurrency:
-      # Shared with the infra workflow's Ansible job: one change to the host at a time.
-      group: deploy-production
-      cancel-in-progress: false
     permissions:
       contents: read
-      packages: read # GHCR_TOKEN: the host pulls the image with this job's token
-    outputs:
-      # For rollback automation (milestone 6): what was running before this deploy.
-      previous_image: ${{ steps.previous.outputs.image }}
-    env:
-      IMAGE: ${{ needs.build.outputs.image }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: refs/tags/${{ needs.build.outputs.tag }}
-          persist-credentials: false
-
-      - name: Connect to the tailnet
-        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-          version: ${{ env.TAILSCALE_VERSION }}
-
-      # The action registers the node as ephemeral; it disappears from the tailnet after the job.
-      - name: SSH access to ptt-prod
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: .github/scripts/ssh-setup.sh
-
-      - name: Record the deployed image
-        id: previous
-        run: |
-          set -euo pipefail
-          image="$(.github/scripts/deployed-image.sh)"
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
-          echo "Deployed now: ${image:-(nothing; first deploy)}"
-          echo "Deploying:    ${IMAGE}"
-
-      # Spec, "Server deploys" step 2: never cut off a conversation.
-      - name: Wait until no session is active
-        if: steps.previous.outputs.image != ''
-        run: .github/scripts/wait-no-sessions.sh
-
-      - name: Install Ansible
-        working-directory: infra/ansible
-        run: |
-          python3 -m venv "$RUNNER_TEMP/ansible-venv"
-          "$RUNNER_TEMP/ansible-venv/bin/pip" install --quiet "ansible-core==${ANSIBLE_CORE_VERSION}"
-          echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r requirements.yml
-
-      # The app role decrypts app_secrets on this runner (community.sops).
-      - name: Install sops
-        run: .github/scripts/install-sops.sh
-
-      - name: Deploy with Ansible (deploy.yml)
-        id: ansible
-        working-directory: infra/ansible
-        env:
-          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
-          GHCR_TOKEN: ${{ github.token }}
-          # Decrypts the app_secrets files; required. Only this step can see it.
-          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
-        run: |
-          set -euo pipefail
-          vars="$RUNNER_TEMP/deploy-vars.json"
-          # Extra vars from a file, so the domain is never on a command line.
-          (umask 077 && jq -n --arg d "$PTT_DOMAIN" '{ptt_domain: $d}' > "$vars")
-          ansible-playbook -i inventory/prod.yml deploy.yml -u deploy \
-            -e "@${vars}" -e "pttd_image=${IMAGE}"
-
-      # Spec, "Server deploys" step 5: /healthz within 2 minutes, then the smoke test.
-      - name: Health check and smoke test
-        id: health
-        env:
-          PTT_DOMAIN: ${{ secrets.PTT_DOMAIN }}
-        run: .github/scripts/check-prod.sh
-
-      - name: Summary
-        env:
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          {
-            echo
-            echo "Deployed pttd ${VERSION} (\`${IMAGE}\`) to production."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # Automatic rollback is milestone 6; until then a person rolls back from a laptop.
-      - name: Manual rollback instructions
-        if: failure() && (steps.ansible.outcome == 'success' || steps.ansible.outcome == 'failure')
-        env:
-          PREVIOUS: ${{ steps.previous.outputs.image }}
-        run: |
-          {
-            echo
-            echo "## Deploy of \`${IMAGE}\` failed after Ansible started"
-            echo
-            if [ -n "$PREVIOUS" ]; then
-              echo "Previously deployed: \`${PREVIOUS}\`. To roll back, from \`infra/ansible/\` on a"
-              echo "machine in the tailnet:"
-              echo
-              echo '```sh'
-              echo "GHCR_TOKEN=<token with read:packages> ansible-playbook -i inventory/prod.yml deploy.yml \\"
-              echo "  -e pttd_image=${PREVIOUS}"
-              echo '```'
-              echo
-              echo "If the new release ran a migration, restore its pre-migration snapshot first"
-              echo "(deploy/README.md, \"Restoring a SQLite snapshot\")."
-            else
-              echo "This was the first deploy; there is no previous image to roll back to."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::Deploy failed. Previous image: ${PREVIOUS:-none}. See the job summary for the rollback command."
-
-      - name: Remove the deploy vars and SSH key
-        if: always()
-        run: rm -f "$RUNNER_TEMP/deploy-vars.json" ~/.ssh/ptt-deploy
+      packages: write # the deployed tag; the deploy job itself keeps packages: read
+    uses: ./.github/workflows/deploy-prod.yml
+    with:
+      image: ${{ needs.build.outputs.image }}
+      tag: ${{ needs.build.outputs.tag }}

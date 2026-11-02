@@ -110,10 +110,17 @@ After a deploy, from anywhere: `deploy/smoke.sh https://<domain>`. Add
 
 ### Restoring a SQLite snapshot
 
-`pttd` writes a snapshot to `/data/snapshots/` before every migration. To restore one: stop
-`pttd` (`docker compose stop pttd`), copy the snapshot over `/data/pttd.db`, delete
-`/data/pttd.db-wal` and `/data/pttd.db-shm`, keep the files owned by 65532:65532, and start the
-image that matches the snapshot's schema. Details are in
+`pttd` writes a snapshot to `/data/snapshots/` before every migration. A failed deploy restores
+its own pre-migration snapshot automatically (`.github/scripts/rollback-prod.sh`;
+[docs/operations.md](../docs/operations.md#the-rollback)): the failed database moves to
+`/data/rolled-back-<deploy start>/`, and the snapshot it restored is renamed
+`restored-pre-migrate-…` so `pttd` never reuses it. The job summary says when it restored the image
+only (no snapshot taken during that deploy, or the schema could not be read); then a person
+decides about the database.
+
+To restore one by hand: stop `pttd` (`docker compose stop pttd`), copy the snapshot over
+`/data/pttd.db`, delete `/data/pttd.db-wal` and `/data/pttd.db-shm`, keep the files owned by
+65532:65532, and start the image that matches the snapshot's schema. Details are in
 [`server/README.md`](../server/README.md#migrations-and-snapshots).
 
 ## smoke.sh

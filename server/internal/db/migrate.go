@@ -23,9 +23,13 @@ type Migrator struct {
 	logger   *slog.Logger
 }
 
+// migrationsFS is what NewMigrator applies. The rollback drill's build adds one migration to it
+// (drill.go, docs/operations.md "Proving it: the rollback drill").
+var migrationsFS fs.FS = migrations.FS
+
 // NewMigrator returns a Migrator for db using the migrations embedded in the binary.
 func NewMigrator(db *sql.DB, logger *slog.Logger) (*Migrator, error) {
-	return newMigrator(db, migrations.FS, logger)
+	return newMigrator(db, migrationsFS, logger)
 }
 
 // newMigrator lets tests supply extra migrations to simulate a database from an older release.

@@ -65,6 +65,11 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      # The rollback drill's build (docs/operations.md, "Proving it: the rollback drill"). Only
+      # the drill tests: with the tag, /healthz is never 200, so the normal suite would fail.
+      - name: Test the drill build
+        run: go test -race -tags drill -run Drill ./internal/db/ ./internal/app/
+
       - uses: sqlc-dev/setup-sqlc@bac53b7fb28c039a6c7f5736fd1e89744021bdd6 # v5.0.0
         with:
           sqlc-version: ${{ env.SQLC_VERSION }}
@@ -213,6 +218,11 @@ jobs:
       # The runner image ships shellcheck, so run: blocks are checked too.
       - name: actionlint
         run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}" -color
+
+      # The deploy rollback's snapshot and "did this deploy migrate?" decisions, against a
+      # temporary /data with fake docker and curl.
+      - name: Rollback decision tests
+        run: .github/scripts/rollback-host-test.sh
 
   osv-scanner:
     name: osv-scanner
