@@ -28,6 +28,7 @@ Released by release-please with tags `server-vX.Y.Z`.
 | `internal/signed/` | Signed objects (`{payload, signer, sig}`): decode, sign, verify under `ptt-roster-v1` / `ptt-envelope-v1` |
 | `internal/roster/` | Roster payload parser and the server acceptance rules (`Publish`) |
 | `internal/pages/` | The page lifecycle: strict envelope parser, `Create` and the delivered/acknowledge/answer/cancel transitions, the DB-driven scheduler (re-push, missed, answered expiry), and the bounded async FCM fan-out |
+| `internal/monitor/` | Self-reporting (`docs/operations.md`, "Monitoring"): the Healthchecks.io pinger, the uptime, FCM-key and phone-heartbeat jobs, and the daily 11:00 Pacific `check_in` push; all timed by the injected clock |
 | `internal/cleanup/` | The nightly retention sweep |
 | `internal/clock/` | Injectable clock (and a deterministic fake) for the scheduler and the cleanup |
 | `internal/auth/` | Device-token and enrollment-code generation and hashing; the `Authenticator` shared by the REST middleware and the WebSocket `hello` |
@@ -61,6 +62,8 @@ The image is built only in CI: `docker buildx build --platform linux/amd64 --bui
 | `PTTD_PUBLIC_URL` | unset | The address phones reach the server at, e.g. `https://ptt.example.com` (absolute `https` URL, no path or query; `http` only for `localhost`/`127.0.0.1`). Optional; `pttd admin bootstrap` requires it, to put it in the enrollment QR |
 | `PTTD_FCM_CREDENTIALS_FILE` | unset | Path of the Firebase service-account JSON; selects the real FCM sender (a secret file, see below; empty counts as unset) |
 | `PTTD_FCM_FAKE` | `false` | `true` records pushes in memory and serves them at `GET`/`DELETE /internal/fake-fcm` on the internal listener (CI only). Setting it together with credentials is an error |
+| `PTTD_HEALTHCHECKS_PING_KEY_FILE` | unset | Path of the file holding the Healthchecks.io project ping key (a secret file). Unset: one `info` log line and no pings; the daily `check_in` push still runs |
+| `PTTD_HEALTHCHECKS_URL` | `https://hc-ping.com` | Ping base URL (tests point it at a local fake) |
 
 With neither FCM variable set, pttd starts with pushes disabled: it logs one warning and every
 send fails permanently.

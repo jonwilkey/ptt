@@ -100,13 +100,19 @@ func (n *RosterNotifier) Close(ctx context.Context) {
 }
 
 func (n *RosterNotifier) broadcast(ctx context.Context, version int64) {
-	q := sqlcdb.New(n.db)
+	broadcast(ctx, n.db, n.sender, n.logger, "roster push",
+		map[string]string{TypeKey: "roster", "version": strconv.FormatInt(version, 10)}, RosterTTL)
+}
+
+// broadcast sends one normal-priority data message to every live, non-test device with an FCM
+// token, with bounded concurrency. A token FCM reports as unregistered is cleared.
+func broadcast(ctx context.Context, d *sql.DB, sender Sender, logger *slog.Logger, what string, data map[string]string, ttl time.Duration) {
+	q := sqlcdb.New(d)
 	targets, err := q.ListPushTargets(ctx)
 	if err != nil {
-		n.logger.LogAttrs(ctx, slog.LevelWarn, "roster push: list devices failed", slog.String("error", err.Error()))
+		logger.LogAttrs(ctx, slog.LevelWarn, what+": list devices failed", slog.String("error", err.Error()))
 		return
 	}
-	data := map[string]string{TypeKey: "roster", "version": strconv.FormatInt(version, 10)}
 
 	var wg sync.WaitGroup
 	gate := make(chan struct{}, sendConcurrency)
@@ -119,26 +125,26 @@ func (n *RosterNotifier) broadcast(ctx context.Context, version int64) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-gate }()
-			n.sendOne(ctx, q, t.ID, t.FcmToken.String, data)
+			sendOne(ctx, q, sender, logger, what, t.ID, t.FcmToken.String, data, ttl)
 		}()
 	}
 	wg.Wait()
 }
 
-func (n *RosterNotifier) sendOne(ctx context.Context, q *sqlcdb.Queries, deviceID, token string, data map[string]string) {
-	err := n.sender.Send(ctx, Message{Token: token, Data: data, Priority: Normal, TTL: RosterTTL})
+func sendOne(ctx context.Context, q *sqlcdb.Queries, sender Sender, logger *slog.Logger, what, deviceID, token string, data map[string]string, ttl time.Duration) {
+	err := sender.Send(ctx, Message{Token: token, Data: data, Priority: Normal, TTL: ttl})
 	switch {
 	case err == nil:
 	case isUnregistered(err):
 		if cerr := q.ClearFCMToken(ctx, sqlcdb.ClearFCMTokenParams{
 			ID: deviceID, FcmToken: sql.NullString{String: token, Valid: true},
 		}); cerr != nil {
-			n.logger.LogAttrs(ctx, slog.LevelWarn, "roster push: clear token failed",
+			logger.LogAttrs(ctx, slog.LevelWarn, what+": clear token failed",
 				slog.String("device_id", deviceID), slog.String("error", cerr.Error()))
 		}
 	default:
 		// The SDK error text carries no token or payload; the token itself is never logged.
-		n.logger.LogAttrs(ctx, slog.LevelWarn, "roster push failed",
+		logger.LogAttrs(ctx, slog.LevelWarn, what+" failed",
 			slog.String("device_id", deviceID), slog.String("error", err.Error()))
 	}
 }

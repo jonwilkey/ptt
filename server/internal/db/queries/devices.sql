@@ -87,3 +87,14 @@ SELECT COUNT(*) FROM devices WHERE id = ? AND revoked_at IS NOT NULL;
 -- The 5 s sweep: which of the connected devices have been revoked, in one query.
 -- name: ListRevokedAmong :many
 SELECT id FROM devices WHERE revoked_at IS NOT NULL AND id IN (sqlc.slice('ids'));
+
+-- The phone heartbeat (pttd's hourly ptt-phones check): every non-test device, revoked ones
+-- included because the restart rule looks at the newest last_seen_at of all of them.
+-- name: ListHeartbeatDevices :many
+SELECT d.id, u.display_name AS user_display_name, d.name, d.app_version, d.checklist_status,
+       d.created_at, d.last_seen_at, d.revoked_at,
+       CAST(d.fcm_token IS NOT NULL AND d.fcm_token <> '' AS INTEGER) AS has_token
+FROM devices d
+JOIN users u ON u.id = d.user_id
+WHERE d.is_test = 0
+ORDER BY d.id;
