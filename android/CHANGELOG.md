@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/jonwilkey/ptt/compare/android-v0.4.0...android-v0.5.0) (2026-11-02)
+
+
+### Features
+
+* **android:** reply to check_in ([#70](https://github.com/jonwilkey/ptt/issues/70)) ([d7cddab](https://github.com/jonwilkey/ptt/commit/d7cddabd4ea0b165023483ae3542cb25d72fa148))
+
 ## [0.4.0](https://github.com/jonwilkey/ptt/compare/android-v0.3.0...android-v0.4.0) (2026-11-02)
 
 
