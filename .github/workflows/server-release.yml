@@ -159,6 +159,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      contents: read # sparse checkout of .trivyignore.yaml from main
       packages: read # pull the image if the package is private
     steps:
       # Waivers come from main, not the tag's tree: the weekly scan reads main's too, a waiver

@@ -560,7 +560,7 @@ findings are not failures.
 Spec, "Supply chain": "`govulncheck`, OSV-Scanner on both lockfiles, and Trivy on the container
 image; high or critical findings fail the build."
 
-| Gate | Where today | Fails on | Gap |
+| Gate | Where before milestone 6 | Fails on | Gap (closed by the changes below) |
 | --- | --- | --- | --- |
 | `govulncheck` | `ci` / `server` (`make vuln`), a required check | any reachable vulnerability, any severity | none |
 | OSV-Scanner | `ci` / `osv-scanner`, a required check. The scan step has `continue-on-error: true` only so the next step can apply the threshold; that step fails the job | CVSS 7.0 or higher | unscored advisories only warn. For Go that is intended (`govulncheck` gates them by reachability); for Gradle they are not gated at all |

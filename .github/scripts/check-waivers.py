@@ -19,6 +19,8 @@ errors = []
 def check(path, entries, reason_key, date_key, max_days):
     for e in entries or []:
         name = f"{path}: {e.get('id', '?')}"
+        if not str(e.get("id") or "").strip():
+            errors.append(f"{name}: missing id")
         if not str(e.get(reason_key) or "").strip():
             errors.append(f"{name}: missing {reason_key}")
         d = e.get(date_key)
