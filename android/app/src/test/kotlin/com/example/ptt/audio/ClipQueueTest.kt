@@ -51,6 +51,37 @@ class ClipQueueTest {
     }
 
     @Test(timeout = 60_000)
+    fun inClipModeALiveTransmissionPlaysWholeOnceReleased() {
+        q.holdLive = true
+        assertTrue("held though nothing waits", live("t", 0))
+        for (seq in 1..3) assertTrue(live("t", seq))
+        assertEquals("nothing before its release", emptyList<String>(), run(2_000))
+        q.liveEnded("t")
+        assertEquals(listOf("t:0", "t:1", "t:2", "t:3", "t:done"), run(1_000))
+        q.holdLive = false
+        assertFalse("out of clip mode a new one plays live", live("u", 0))
+    }
+
+    @Test(timeout = 60_000)
+    fun inClipModeAStalledLiveTransmissionPlaysAfterThreeSeconds() {
+        q.holdLive = true
+        assertTrue(live("t", 0))
+        assertTrue(live("t", 1))
+        assertEquals(emptyList<String>(), run(ClipQueue.FINISH_AFTER_MS - TICK))
+        assertEquals(listOf("t:0", "t:1", "t:done"), run(1_000))
+    }
+
+    @Test(timeout = 60_000)
+    fun inClipModeAHeldTransmissionThatIsClippedPlaysAsAClip() {
+        q.holdLive = true
+        assertTrue(live("t", 0))
+        q.clip("t", 2, bits(), now)
+        pkt("t", 1)
+        pkt("t", 2)
+        assertEquals(listOf("t:0", "t:1", "t:2", "t:done"), run(1_000))
+    }
+
+    @Test(timeout = 60_000)
     fun liveAudioArrivingWhileAClipWaitsIsHeldAndPlaysAfterIt() {
         assertFalse("nothing waits: plays live", live("live0", 0))
         q.clip("c", 0, BitSet(), now)

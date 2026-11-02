@@ -31,12 +31,22 @@ sealed interface ClipOutput {
  * for a missing seq, from then on it skips the seqs it is missing and moves on after the last one it holds. A
  * live grant does not finish anything. While this phone is [busy] (talking) nothing plays; entries keep filling.
  *
+ * In clip mode ([holdLive]) every live transmission is held from its first frame and plays only once it is finished,
+ * as one clip (section 13.9 lets a phone in clip mode hold the whole transmission until its `floor_released`).
+ *
  * A clip for an id whose frames were accepted before it and that lacks fewer than [SHORT_TAIL] of its seqs
  * 0 .. `last_seq` is not played (the tail of an almost fully heard transmission would be a blip); a clip of an id
  * with nothing accepted always plays. Frames of an id that played out or was skipped are dropped.
  */
 class ClipQueue(private val frameMs: Int = AudioSpec.FRAME_MS) {
-    private class Entry(val id: String, var lastSeq: Int, var acceptedBefore: BitSet, now: Long) {
+    private class Entry(
+        val id: String,
+        var lastSeq: Int,
+        var acceptedBefore: BitSet,
+        now: Long,
+        /** A live transmission held in clip mode: nothing of it plays before it is finished (or clipped). */
+        var whole: Boolean = false
+    ) {
         val packets = TreeMap<Int, ByteArray>()
         var finished = false
         var lastFrameMs = now
@@ -49,6 +59,9 @@ class ClipQueue(private val frameMs: Int = AudioSpec.FRAME_MS) {
     private val entries = ArrayDeque<Entry>()
     private val over = HashSet<String>()
     private var busy = false
+
+    /** Clip mode: from now on a live transmission is held from its first frame and played whole. */
+    var holdLive = false
 
     /** True when nothing waits or plays. */
     val isEmpty: Boolean get() = entries.isEmpty()
@@ -68,6 +81,7 @@ class ClipQueue(private val frameMs: Int = AudioSpec.FRAME_MS) {
             existing.acceptedBefore = acceptedBefore
             existing.finished = false
             existing.lastFrameMs = now
+            existing.whole = false
             return
         }
         if (isShortTail(lastSeq, acceptedBefore)) {
@@ -80,11 +94,13 @@ class ClipQueue(private val frameMs: Int = AudioSpec.FRAME_MS) {
 
     /**
      * The first frame of a live transmission arrived. It is held (true: [offer] takes its frames) when an entry
-     * already waits or plays, or this phone is busy; otherwise (false) it plays live.
+     * already waits or plays, this phone is busy, or it is in clip mode; otherwise (false) it plays live.
      */
     fun hold(id: String, now: Long): Boolean {
-        val held = entries.isNotEmpty() || busy
-        if (held && entries.none { it.id == id }) entries.addLast(Entry(id, AudioFrame.MAX_SEQ, BitSet(), now))
+        val held = entries.isNotEmpty() || busy || holdLive
+        if (held && entries.none { it.id == id }) {
+            entries.addLast(Entry(id, AudioFrame.MAX_SEQ, BitSet(), now, whole = holdLive))
+        }
         return held
     }
 
@@ -110,6 +126,7 @@ class ClipQueue(private val frameMs: Int = AudioSpec.FRAME_MS) {
         for (e in entries) if (now - e.lastFrameMs >= FINISH_AFTER_MS) e.finished = true
         if (busy) return null
         val e = entries.firstOrNull() ?: return null
+        if (e.whole && !e.finished) return null
         when (seek(e)) {
             Seek.PLAY -> Unit
             Seek.WAIT -> return null

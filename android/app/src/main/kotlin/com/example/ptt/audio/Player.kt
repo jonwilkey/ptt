@@ -52,6 +52,8 @@ class Player(
 
         class Busy(val on: Boolean) : Msg
 
+        class HoldLive(val on: Boolean) : Msg
+
         data object Release : Msg
 
         data object Flush : Msg
@@ -95,6 +97,11 @@ class Player(
     /** This phone is capturing or sending: queued audio waits (section 13.8). */
     fun busy(on: Boolean) {
         if (!closed) inbox.add(Msg.Busy(on))
+    }
+
+    /** Clip mode (section 13.9): a live transmission that starts from now on is held and played whole. */
+    fun holdLive(on: Boolean) {
+        if (!closed) inbox.add(Msg.HoldLive(on))
     }
 
     /** The peer's floor was released: what is buffered plays out, later packets of that transmission are dropped. */
@@ -166,6 +173,8 @@ class Player(
 
             is Msg.Busy -> clips.busy(msg.on)
 
+            is Msg.HoldLive -> clips.holdLive = msg.on
+
             Msg.Release -> jitter.release()
 
             Msg.Flush -> {
@@ -214,6 +223,8 @@ class Player(
     internal fun handleEvent(event: Incoming, now: Long) = handle(Msg.Event(event), now)
 
     internal fun handleBusy(on: Boolean) = handle(Msg.Busy(on), 0)
+
+    internal fun handleHoldLive(on: Boolean) = handle(Msg.HoldLive(on), 0)
 
     internal fun handleRelease() = handle(Msg.Release, 0)
 

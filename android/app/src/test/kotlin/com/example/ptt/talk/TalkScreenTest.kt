@@ -41,4 +41,36 @@ class TalkScreenTest {
         compose.waitForIdle()
         compose.onNodeWithText("There is no live talk for a test alert.").assertExists()
     }
+
+    @Test
+    fun theConversationSaysClipModeAndThatAnAbsentPeerIsAway() {
+        val live = mutableStateOf(
+            TalkLive(
+                eligible = true,
+                active = true,
+                connection = TalkConnection.LIVE,
+                quality = LinkQuality.POOR,
+                clipMode = true,
+                waitingForPeer = true,
+                talkEnabled = true
+            )
+        )
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                TalkScreen(TalkState("p", "Mom", TalkPhase.ANSWERED), {}, {}, {}, live.value)
+            }
+        }
+        compose.waitForIdle()
+        compose.onNodeWithText("Clip mode · poor connection").assertExists()
+        compose.onNodeWithText("Mom is away").assertExists()
+        live.value = live.value.copy(clipMode = false, quality = LinkQuality.GOOD, talkEnabled = false)
+        compose.waitForIdle()
+        compose.onNodeWithText("Live · good connection").assertExists()
+        compose.onNodeWithText("Clip mode", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Waiting for Mom").assertExists()
+        live.value = live.value.copy(clipMode = true, connection = TalkConnection.CONNECTING)
+        compose.waitForIdle()
+        compose.onNodeWithText("Clip mode", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Connecting…").assertExists()
+    }
 }

@@ -189,12 +189,14 @@
     <string name="talk_peer_talking">%1$s is talking</string>
     <string name="talk_connecting">Connecting…</string>
     <string name="talk_live">Live</string>
-    <string name="talk_live_quality">Live · %1$s</string>
+    <string name="talk_mode_quality">%1$s · %2$s</string>
+    <string name="talk_clip_mode">Clip mode</string>
     <string name="talk_quality_good">good connection</string>
     <string name="talk_quality_fair">fair connection</string>
     <string name="talk_quality_poor">poor connection</string>
     <string name="talk_live_talk_unavailable">Live talk unavailable</string>
     <string name="talk_waiting_for">Waiting for %1$s</string>
+    <string name="talk_peer_away">%1$s is away</string>
     <string name="talk_speaks_first">%1$s speaks first</string>
     <string name="talk_capture_cap">60 s limit — press again</string>
     <string name="talk_capture_mic">Microphone unavailable</string>

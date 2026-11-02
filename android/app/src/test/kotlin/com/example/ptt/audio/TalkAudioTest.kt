@@ -3,6 +3,7 @@ package com.example.ptt.audio
 import com.example.ptt.net.SessionEndReason
 import com.example.ptt.talk.Incoming
 import com.example.ptt.talk.IncomingOpus
+import com.example.ptt.talk.LiveEnded
 import com.example.ptt.talk.SessionStage
 import com.example.ptt.talk.TalkConnection
 import com.example.ptt.talk.TalkEvent
@@ -28,11 +29,15 @@ private class FakeLink(private val sent: SentLog) : TalkLink {
     override val events = MutableSharedFlow<TalkEvent>(extraBufferCapacity = 64)
     override val incoming = MutableSharedFlow<Incoming>(extraBufferCapacity = 64)
     var pressResult = true
+
+    /** What the controller's state does on a press (a clip-mode press starts capturing at once). */
+    var onPress: () -> Unit = {}
     val presses = AtomicInteger()
     val releases = AtomicInteger()
 
     override fun pressTalk(): Boolean {
         presses.incrementAndGet()
+        if (pressResult) onPress()
         return pressResult
     }
 
@@ -49,7 +54,8 @@ private class FakeLink(private val sent: SentLog) : TalkLink {
         stage: SessionStage = state.value.stage,
         pageId: String? = state.value.pageId,
         capturing: Boolean = state.value.capturing,
-        sending: Boolean = state.value.sending
+        sending: Boolean = state.value.sending,
+        clipMode: Boolean = state.value.clipMode
     ) {
         state.value = state.value.copy(
             floor = floor,
@@ -57,7 +63,8 @@ private class FakeLink(private val sent: SentLog) : TalkLink {
             stage = stage,
             pageId = pageId,
             capturing = capturing,
-            sending = sending
+            sending = sending,
+            clipMode = clipMode
         )
     }
 }
@@ -481,6 +488,149 @@ class TalkAudioTest {
         } finally {
             a.close()
         }
+    }
+
+    /** A clip-mode press: the controller captures from the press, with the floor still IDLE and no grant. */
+    private fun clipCapture() {
+        conversation()
+        link.set(clipMode = true)
+        link.onPress = {
+            link.set(capturing = true, sending = true)
+            link.events.tryEmit(TalkEvent.RecordingClip)
+        }
+        assertTrue(audio.press())
+        await("capturing before any grant") { capturing() }
+        assertEquals(TalkFloor.IDLE, link.state.value.floor)
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModePressRecordsAtOnceAndNothingPlaysMeanwhile() {
+        clipCapture()
+        for (i in 0..2) link.incoming.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
+        Thread.sleep(250)
+        assertTrue("held while recording before the grant", sinks.isEmpty() || sinks.single().writes.isEmpty())
+        audio.release()
+        assertStopped()
+        link.set(capturing = false)
+        Thread.sleep(250)
+        assertTrue("held while the clip waits to be sent", sinks.isEmpty() || sinks.single().writes.isEmpty())
+        link.set(sending = false)
+        await("played after") { sinks.isNotEmpty() && sinks.single().writes.size == 3 }
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModeCaptureStopsOnBusy() {
+        clipCapture()
+        link.set(capturing = false, sending = false)
+        link.events.tryEmit(TalkEvent.FloorBusy)
+        assertStopped()
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModeCaptureStopsWhenTheRequestFails() {
+        clipCapture()
+        link.set(capturing = false, sending = false)
+        assertStopped()
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModeCaptureStopsAtSessionEnd() {
+        clipCapture()
+        link.events.tryEmit(TalkEvent.SessionEnded(SessionEndReason.ENDED_BY_PEER))
+        assertStopped()
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModeCaptureStopsWhenTalkGoesAway() {
+        clipCapture()
+        link.events.tryEmit(TalkEvent.TalkUnavailable)
+        assertStopped()
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModeCaptureOutlivesASocketDropUntilTheControllerStops() {
+        clipCapture()
+        link.set(connection = TalkConnection.CONNECTING)
+        val n = sent.count.get()
+        await("still recording") { sent.count.get() > n + 2 }
+        link.events.tryEmit(TalkEvent.StopCapture)
+        assertStopped()
+    }
+
+    /** The controller fires a press that waited for the previous transmission: it captures now (section 13.9). */
+    private fun FakeLink.pendingPressFires() {
+        set(capturing = true, sending = true)
+        events.tryEmit(TalkEvent.RecordingClip)
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipPressWhosePrewarmASocketDropStoppedStillRecordsWhenItFires() {
+        conversation()
+        link.set(clipMode = true)
+        assertTrue("pending behind the previous transmission", audio.press())
+        await("pre-warmed") { sources.size == 1 }
+        link.set(connection = TalkConnection.CONNECTING)
+        await("pre-warm stopped") { sources.single().closed }
+        link.set(connection = TalkConnection.LIVE)
+        link.pendingPressFires()
+        await("recording") { sources.size == 2 && sources[1].started && sent.count.get() > 2 }
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipPressWhosePrewarmTimedOutStillRecordsWhenItFires() {
+        val sent2 = SentLog()
+        val link2 = FakeLink(sent2)
+        val sources2 = CopyOnWriteArrayList<FakeSource>()
+        val a = TalkAudio(
+            pageId = PAGE,
+            link = link2,
+            sourceFactory = { FakeSource().also { sources2 += it } },
+            encoderFactory = { FakeEncoder() },
+            decoderFactory = { TaDecoder() },
+            sinkFactory = { TaSink() },
+            platform = FakePlatform(),
+            clock = System::currentTimeMillis,
+            dispatcher = Dispatchers.Unconfined,
+            prewarmTimeoutMs = 50
+        )
+        try {
+            link2.set(
+                connection = TalkConnection.LIVE,
+                stage = SessionStage.CONVERSATION,
+                pageId = PAGE,
+                clipMode = true
+            )
+            assertTrue("pending behind the previous transmission", a.press())
+            await("pre-warm timed out") { sources2.singleOrNull()?.closed == true }
+            Thread.sleep(20)
+            link2.pendingPressFires()
+            await("recording") { sources2.size == 2 && sources2[1].started && sent2.count.get() > 2 }
+        } finally {
+            a.close()
+        }
+    }
+
+    @Test(timeout = 60_000)
+    fun theGrantOfAClipLetGoBeforeItNeverOpensTheMicrophone() {
+        clipCapture()
+        audio.release()
+        assertStopped()
+        link.set(floor = TalkFloor.YOU, capturing = false)
+        link.events.tryEmit(TalkEvent.FloorGrantedToYou)
+        Thread.sleep(50)
+        assertEquals(1, sources.size)
+    }
+
+    @Test(timeout = 60_000)
+    fun inClipModeThePeersLiveTransmissionPlaysWholeAfterItsRelease() {
+        conversation(TalkFloor.PEER_TALKING)
+        link.set(clipMode = true)
+        for (i in 0..2) link.incoming.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
+        Thread.sleep(300)
+        assertTrue("held until released", sinks.isEmpty() || sinks.single().writes.isEmpty())
+        link.incoming.tryEmit(LiveEnded("t1"))
+        await("played whole") { sinks.isNotEmpty() && sinks.single().writes.size == 3 }
+        assertEquals(listOf(1, 2, 3), sinks.single().writes.toList())
     }
 
     @Test(timeout = 60_000)

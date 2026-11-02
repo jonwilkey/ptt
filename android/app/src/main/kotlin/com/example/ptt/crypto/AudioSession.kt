@@ -97,6 +97,18 @@ class AudioSession private constructor(
         return floor.request()
     }
 
+    /**
+     * A clip-mode request (protocol 2, section 13.9): mints the id like [requestFloor] and returns the sealer of that
+     * id at once, so frames are sealed before the grant. Its grant hands back this same sealer; nothing may be sent
+     * before it (section 12.4 rule 2). The caller sends `floor_request` for [FrameSealer.transmissionId].
+     */
+    @Synchronized
+    fun requestClipFloor(): FrameSealer {
+        val id = requestFloor()
+        endSealer()
+        return FrameSealer(id, FrameCipher.deriveKey(key, sessionId, ownDeviceId, id)).also { sealer = it }
+    }
+
     /** Button up. Returns the transmission id to send `floor_release` for, or null if none was active. */
     @Synchronized
     fun buttonReleased(): String? {
@@ -142,6 +154,7 @@ class AudioSession private constructor(
                     floor.onReleased(grant.transmissionId)
                     return GrantOutcome.SendRelease(grant.transmissionId, refused = true)
                 }
+                sealer?.takeIf { it.transmissionId == grant.transmissionId }?.let { return GrantOutcome.Transmit(it) }
                 endSealer()
                 val tk = FrameCipher.deriveKey(key, sessionId, ownDeviceId, grant.transmissionId)
                 val s = FrameSealer(grant.transmissionId, tk)
