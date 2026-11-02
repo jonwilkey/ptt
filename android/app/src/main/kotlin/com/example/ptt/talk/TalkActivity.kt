@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -66,8 +67,9 @@ object TalkIntents {
 
 /**
  * The talk screen: the page's progress or the incoming page, then the live conversation with its hold-to-talk
- * button ([TalkScreen]). It shows over the lock screen (the manifest and the calls below both ask for it) and holds
- * nothing but this conversation: it has its own task, so Back and End return to the lock screen. What it does for
+ * button (or the volume-down key) ([TalkScreen]). It shows over the lock screen (the manifest and the calls
+ * below both ask for it) and holds nothing but this conversation: it has its own task, so Back and End return to
+ * the lock screen. What it does for
  * each [TalkIntents] mode is in [TalkViewModel].
  */
 @AndroidEntryPoint
@@ -103,8 +105,8 @@ class TalkActivity : ComponentActivity() {
                     viewModel::end,
                     ::finishAndRemoveTask,
                     live,
-                    { viewModel.pressTalk() },
-                    viewModel::releaseTalk
+                    { viewModel.pressTalk(HoldSource.BUTTON) },
+                    { viewModel.releaseTalk(HoldSource.BUTTON) }
                 )
             }
         }
@@ -112,13 +114,36 @@ class TalkActivity : ComponentActivity() {
 
     /** A hold must never outlive the screen being visible and focused (lock, shade, another window, app switch). */
     override fun onStop() {
-        viewModel.releaseTalk()
+        viewModel.releaseAllTalk()
         super.onStop()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
-        if (!hasFocus) viewModel.releaseTalk()
+        if (!hasFocus) viewModel.releaseAllTalk()
         super.onWindowFocusChanged(hasFocus)
+    }
+
+    /**
+     * Volume-down is hold-to-talk while the conversation is up (where the button is shown), also from the lock
+     * screen: the first key-down starts the hold (and the auto-repeats are consumed without another request),
+     * the key-up ends it. The press goes through [TalkViewModel.pressTalk], so the first-talker lock and the
+     * peer-talking buzz are the same as the button's. Consuming (returning true) keeps the key from also changing
+     * the volume. Volume-up is never touched.
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN && viewModel.live.value.active) {
+            if (event.repeatCount == 0) viewModel.pressTalk(HoldSource.VOLUME_KEY)
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN && viewModel.live.value.active) {
+            viewModel.releaseTalk(HoldSource.VOLUME_KEY)
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
     }
 
     public override fun onNewIntent(intent: Intent) {
