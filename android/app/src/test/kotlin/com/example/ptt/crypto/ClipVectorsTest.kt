@@ -8,7 +8,7 @@ import org.junit.Test
 
 /**
  * Section 13 of docs/protocol.md against the shared vectors (`clip_fallback`), receiver side. The `resume`
- * vectors are the talker's resend (task 15c3).
+ * vectors (the talker's resend) are in [com.example.ptt.talk.TalkerTransmissionTest].
  */
 class ClipVectorsTest {
     private fun section(name: String): List<JsonValue.Obj> =

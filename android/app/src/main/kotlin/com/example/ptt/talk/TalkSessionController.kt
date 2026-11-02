@@ -2,7 +2,6 @@ package com.example.ptt.talk
 
 import com.example.ptt.crypto.AudioSession
 import com.example.ptt.crypto.ClipVerdict
-import com.example.ptt.crypto.FrameSealer
 import com.example.ptt.crypto.FrameVerdict
 import com.example.ptt.crypto.GrantOutcome
 import com.example.ptt.crypto.ProtocolException
@@ -13,6 +12,7 @@ import com.example.ptt.data.PageRole
 import com.example.ptt.net.ClientMessage
 import com.example.ptt.net.CloseReaction
 import com.example.ptt.net.DeviceTokenStore
+import com.example.ptt.net.ReleaseReason
 import com.example.ptt.net.ServerMessage
 import com.example.ptt.net.SessionEndReason
 import com.example.ptt.net.SocketEvent
@@ -91,6 +91,31 @@ enum class TalkFloor {
     BUSY
 }
 
+/** What losing the socket did to the own transmission. */
+private enum class OwnLoss {
+    NONE,
+
+    /** A press that had not been granted ended (its pre-warm must stop). */
+    PREWARM,
+
+    /** A granted protocol-1 transmission was lost. */
+    TRANSMISSION
+}
+
+/** A line about this phone's own transmission, for the talk screen (docs/protocol.md section 13.6). */
+enum class OwnNotice {
+    NONE,
+
+    /** `listener_gap`: the peer did not hear it live; it plays when they are back. */
+    NOT_HEARD_LIVE,
+
+    /** The floor is gone (or the socket dropped) but the transmission is still being captured or sent. */
+    SENDING_AS_CLIP,
+
+    /** The server no longer held it (`bad_transmission_id` after `resume`), and it may lack some of its frames. */
+    NOT_SENT
+}
+
 /**
  * Everything 14f (audio) and 14g (talk screen) observe. [pageProgress] is the last page state the WebSocket
  * reported (sender only; the active-page row and `PageEvent`s stay the source of truth for the screen).
@@ -107,7 +132,14 @@ data class TalkSessionState(
      * The sender may not talk yet: the receiver speaks first (see [FirstTalkerRule]). A fact about the session,
      * kept here so that recreating the screen cannot lose it. Never true for the receiver.
      */
-    val firstTalkerLocked: Boolean = false
+    val firstTalkerLocked: Boolean = false,
+    /** The socket's `hello` reply was protocol 2 (section 13.1): talk works while the peer is away (section 13.7). */
+    val protocol2: Boolean = false,
+    /** This phone is capturing into its own transmission (it may outlive the floor and the socket on protocol 2). */
+    val capturing: Boolean = false,
+    /** An own transmission is still being captured or sent: nothing plays meanwhile (section 13.8). */
+    val sending: Boolean = false,
+    val ownNotice: OwnNotice = OwnNotice.NONE
 )
 
 /** What the player learns from the session, in socket order ([TalkSessionController.incoming]). */
@@ -145,7 +177,7 @@ sealed interface TalkEvent {
     /** `floor_request` while nobody is there to hear it. */
     data object NoPeer : TalkEvent
 
-    /** Stop capturing now: the sealer refused (past the frame limit) or the floor was lost. */
+    /** Stop capturing now: the sealer refused, the frame limit was reached, or the transmission is over. */
     data object StopCapture : TalkEvent
 
     data class SessionEnded(val reason: SessionEndReason) : TalkEvent
@@ -290,7 +322,10 @@ class TalkSessionController(
         synchronized(lock) { run?.takeIf { it.pageId == pageId }?.stopNow() }
     }
 
-    /** The push-to-talk button went down. False if a request cannot be made now (not joined, already pressed). */
+    /**
+     * The push-to-talk button went down. False if a request cannot be made now (not joined, already pressed). While
+     * the previous own transmission is still being sent the request waits for it (section 13.6) and this is true.
+     */
     fun pressTalk(): Boolean = run?.press() ?: false
 
     /** The button went up: ends the own transmission, or makes a late grant be answered with a release. */
@@ -299,9 +334,10 @@ class TalkSessionController(
     }
 
     /**
-     * Seals one 20 ms Opus packet under the transmission that was granted and sends it as a binary frame. False
-     * (and nothing sent) when this phone does not hold the floor. A sealer that refuses stops the transmission
-     * ([TalkEvent.StopCapture]); the caller never reseals or builds its own sealer.
+     * Seals one 20 ms Opus packet into the own transmission's buffer and sends it as a binary frame as soon as the
+     * pacing allows (section 13.6). False (and nothing kept) when this phone is not capturing a granted transmission;
+     * on protocol 1 also when the frame could not go out. A sealer that refuses, or the 3000th frame, stops the
+     * capture ([TalkEvent.StopCapture]); the caller never reseals or builds its own sealer.
      */
     fun sendOpus(packet: ByteArray): Boolean = run?.sendOpus(packet) ?: false
 
@@ -335,9 +371,6 @@ class TalkSessionController(
         private var socket: TalkSocket? = null
 
         @Volatile
-        private var sealer: FrameSealer? = null
-
-        @Volatile
         private var joined = false
 
         /** The current socket's `hello` reply was protocol 2 or higher (section 13.1). */
@@ -347,8 +380,17 @@ class TalkSessionController(
         @Volatile
         private var pressed = false
 
-        @Volatile
-        private var outstanding: String? = null
+        /** The own transmission (section 13.6): at most one, from its `floor_request` until closed or given up. */
+        private var own: TalkerTransmission? = null
+
+        /** A press waits for the previous own transmission to be sent and closed (section 13.6). */
+        private var pendingPress = false
+        private var resumeSent = false
+
+        /** The last [OwnNotice] about a finished transmission; cleared by the next press. */
+        private var lastNotice = OwnNotice.NONE
+        private val pacer = SendPacer()
+        private var drainJob: Job? = null
 
         private var audio: AudioSession? = null
         private var firstTalker: FirstTalkerRule? = null
@@ -548,6 +590,8 @@ class TalkSessionController(
                 when (event) {
                     is SocketEvent.Ready -> {
                         protocol2 = event.protocol >= PROTOCOL_CLIP
+                        mutableState.update { it.copy(protocol2 = protocol2) }
+                        if (!protocol2) synchronized(audioLock) { own?.let(::giveUp) }
                         readySince = nowMs()
                         sendJoin(s)
                     }
@@ -613,17 +657,16 @@ class TalkSessionController(
             if (unavailable) mutableEvents.tryEmit(TalkEvent.TalkUnavailable)
         }
 
-        /** The socket closed: before anything else the audio state is told (never recreated on reconnect). */
+        /**
+         * The socket closed: before anything else the audio state is told (never recreated on reconnect). A protocol-2
+         * own transmission waits for the `resume` (section 13.6), still capturing if it was; a protocol-1 one is lost.
+         */
         private fun socketLost() {
-            var wasTalking = false
-            synchronized(audioLock) {
-                audio?.onSocketClosed()
-                wasTalking = sealer != null || mutableState.value.floor == TalkFloor.YOU
-                sealer = null
+            val loss = synchronized(audioLock) {
                 joined = false
-                pressed = false
-                outstanding = null
                 floorId = null
+                resumeSent = false
+                ownSocketLost().also { publishOwn() }
             }
             mutableState.update {
                 it.copy(
@@ -634,10 +677,29 @@ class TalkSessionController(
             }
             // The peer's transmission is suspended: the rejoin snapshot either resumes it or shows it is over.
             withRule { rule, _ -> rule.onOwnSocketLost() }
-            if (wasTalking) {
-                // The own transmission is lost with the socket: capture must stop (a new request needs a new id).
-                mutableEvents.tryEmit(TalkEvent.StopCapture)
-                mutableEvents.tryEmit(TalkEvent.FloorReleased(yours = true))
+            if (loss != OwnLoss.NONE) mutableEvents.tryEmit(TalkEvent.StopCapture)
+            // A protocol-1 transmission is lost with the socket: a new request needs a new id.
+            if (loss == OwnLoss.TRANSMISSION) mutableEvents.tryEmit(TalkEvent.FloorReleased(yours = true))
+        }
+
+        /** What the socket's loss did to the own transmission. Under [audioLock]. */
+        private fun ownSocketLost(): OwnLoss {
+            val t = own
+            if (t != null && t.protocol2) {
+                audio?.onSocketClosed(keepOwn = t.granted)
+                t.onSocketLost()
+                if (t.granted) return OwnLoss.NONE
+            } else {
+                audio?.onSocketClosed()
+                t?.let(::freeOwn)
+            }
+            val wasPressed = pressed
+            pressed = false
+            pendingPress = false
+            return when {
+                t?.granted == true -> OwnLoss.TRANSMISSION
+                wasPressed -> OwnLoss.PREWARM
+                else -> OwnLoss.NONE
             }
         }
 
@@ -647,26 +709,16 @@ class TalkSessionController(
         private suspend fun handle(s: TalkSocket, m: ServerMessage) {
             when (m) {
                 is ServerMessage.PageState -> pageState(s, m)
-
                 is ServerMessage.PeerJoined -> peerJoined(m.deviceId)
-
                 is ServerMessage.PeerLeft -> peerLeft(m.deviceId)
-
                 is ServerMessage.FloorGranted -> granted(s, m)
-
                 ServerMessage.FloorBusy -> busy()
-
                 is ServerMessage.FloorReleased -> released(s, m)
-
                 is ServerMessage.SessionEnd -> endSession(m.reason)
-
                 is ServerMessage.Error -> error(s, m.code)
-
                 is ServerMessage.Clip -> if (protocol2) clip(s, m)
-
-                // For the talker's screen (task 15c3); a protocol-1 server never sends it.
-                is ServerMessage.ListenerGap -> Unit
-
+                is ServerMessage.ListenerGap -> if (protocol2) listenerGap(m.transmissionId)
+                is ServerMessage.ResumeFrom -> if (protocol2) resumeFrom(s, m.lastSeq)
                 is ServerMessage.Hello, is ServerMessage.Pong -> Unit
             }
         }
@@ -679,6 +731,7 @@ class TalkSessionController(
                 joinRetry?.cancel()
                 mutableState.update { it.copy(connection = TalkConnection.LIVE) }
                 sendSenderKey(s)
+                synchronized(audioLock) { afterJoin(s) }
             }
             if (role != PageRole.SENDER) return
             mutableState.update { it.copy(pageProgress = it.pageProgress.forward(m.state)) }
@@ -712,16 +765,25 @@ class TalkSessionController(
         private fun granted(s: TalkSocket, m: ServerMessage.FloorGranted) = synchronized(audioLock) {
             when (val outcome = audio?.onFloorGranted(m.talker, m.transmissionId) ?: GrantOutcome.Ignored) {
                 is GrantOutcome.Transmit -> {
-                    if (outstanding == m.transmissionId) outstanding = null
-                    sealer = outcome.sealer
+                    val t = own?.takeIf { it.id == m.transmissionId && !it.granted }
+                    if (t == null) {
+                        // Cannot happen: the floor only transmits for the request this phone holds.
+                        audio?.onOwnClosed(m.transmissionId)
+                        s.send(ClientMessage.FloorRelease(m.transmissionId))
+                        return@synchronized
+                    }
+                    t.onGranted(outcome.sealer)
                     floorId = m.transmissionId
                     mutableState.update { it.copy(floor = TalkFloor.YOU) }
+                    publishOwn()
                     mutableEvents.tryEmit(TalkEvent.FloorGrantedToYou)
                 }
 
                 is GrantOutcome.SendRelease -> {
-                    if (outstanding == outcome.transmissionId) outstanding = null
                     s.send(ClientMessage.FloorRelease(outcome.transmissionId))
+                    own?.takeIf { it.id == outcome.transmissionId && !it.granted }?.let(::freeOwn)
+                    // Section 12.4 rule 4 refused the grant of a request the user still holds: that is "busy".
+                    if (outcome.refused) refusedBusy()
                 }
 
                 GrantOutcome.Listen -> {
@@ -736,33 +798,72 @@ class TalkSessionController(
         }
 
         private fun busy() {
-            synchronized(audioLock) {
-                failOutstanding()
-                // With a validated talker on record the floor state already says who; otherwise it is just busy.
-                mutableState.update { if (it.floor == TalkFloor.IDLE) it.copy(floor = TalkFloor.BUSY) else it }
-            }
+            synchronized(audioLock) { failOutstanding() }
+            refusedBusy()
+        }
+
+        /** With a validated talker on record the floor state already says who; otherwise it is just busy. */
+        private fun refusedBusy() {
+            mutableState.update { if (it.floor == TalkFloor.IDLE) it.copy(floor = TalkFloor.BUSY) else it }
             mutableEvents.tryEmit(TalkEvent.FloorBusy)
         }
 
+        /** `floor_busy` or `error` for the request: its buffer is discarded unsent, the id never used again. */
         private fun failOutstanding() {
-            outstanding?.let { audio?.onRequestFailed(it) }
-            outstanding = null
+            val t = own?.takeIf { !it.granted && !it.awaitingResume } ?: return
+            audio?.onRequestFailed(t.id)
+            freeOwn(t)
         }
 
+        @Suppress("ReturnCount")
         private fun released(s: TalkSocket, m: ServerMessage.FloorReleased) {
             var yours = false
+            var mine = false
             synchronized(audioLock) {
+                val t = own?.takeIf { it.id == m.transmissionId }
+                if (t != null && t.resumable && m.reason != ReleaseReason.RELEASED) {
+                    floorLost(t)
+                    return
+                }
                 audio?.onFloorReleased(m.transmissionId)?.let { sendHeard(s, m.transmissionId, it) }
-                if (outstanding == m.transmissionId) outstanding = null
-                if (m.transmissionId != floorId) return
-                yours = mutableState.value.floor == TalkFloor.YOU
-                floorId = null
-                sealer = null
-                mutableState.update { it.copy(floor = TalkFloor.IDLE) }
+                if (t != null) {
+                    // Closed (protocol 2), or the floor of a protocol-1 transmission: either way it is over.
+                    mine = t.granted && t.capturing
+                    freeOwn(t)
+                }
+                if (m.transmissionId == floorId) {
+                    yours = mutableState.value.floor == TalkFloor.YOU
+                    floorId = null
+                    mutableState.update { it.copy(floor = TalkFloor.IDLE) }
+                } else if (!mine) {
+                    return
+                }
             }
-            if (!yours) peerStoppedTalking()
-            if (!yours) playback.tryEmit(LiveEnded(m.transmissionId))
-            mutableEvents.tryEmit(TalkEvent.FloorReleased(yours))
+            if (mine) mutableEvents.tryEmit(TalkEvent.StopCapture)
+            if (mine || yours) {
+                mutableEvents.tryEmit(TalkEvent.FloorReleased(yours = true))
+                return
+            }
+            peerStoppedTalking()
+            playback.tryEmit(LiveEnded(m.transmissionId))
+            mutableEvents.tryEmit(TalkEvent.FloorReleased(yours = false))
+        }
+
+        /** `silence` or `max_length` for the own protocol-2 transmission: the floor is gone, the sending goes on. */
+        private fun floorLost(t: TalkerTransmission) {
+            audio?.onFloorReleased(t.id, ownStaysOpen = true)
+            t.onFloorLost()
+            if (floorId == t.id) {
+                floorId = null
+                mutableState.update { if (it.floor == TalkFloor.YOU) it.copy(floor = TalkFloor.IDLE) else it }
+            }
+            publishOwn()
+        }
+
+        private fun listenerGap(transmissionId: String) = synchronized(audioLock) {
+            if (own?.id != transmissionId) return@synchronized
+            lastNotice = OwnNotice.NOT_HEARD_LIVE
+            publishOwn()
         }
 
         /** An accepted `clip` (section 13.8); one that ends the peer's current transmission counts as its release. */
@@ -800,7 +901,12 @@ class TalkSessionController(
                     mutableEvents.tryEmit(TalkEvent.NoPeer)
                 }
 
-                WsErrorCode.BAD_TRANSMISSION_ID, WsErrorCode.UNKNOWN -> synchronized(audioLock) { failOutstanding() }
+                WsErrorCode.BAD_TRANSMISSION_ID -> synchronized(audioLock) {
+                    val resumed = own?.takeIf { resumeSent && it.awaitingResume }
+                    if (resumed != null) resumeRefused(resumed) else failOutstanding()
+                }
+
+                WsErrorCode.UNKNOWN -> synchronized(audioLock) { failOutstanding() }
             }
         }
 
@@ -823,7 +929,8 @@ class TalkSessionController(
             ended = true
             // No more sealing from here on, whatever the database write below takes.
             val peerWasTalking = synchronized(audioLock) {
-                sealer = null
+                pendingPress = false
+                own?.let(::freeOwn)
                 mutableState.value.floor == TalkFloor.PEER_TALKING
             }
             if (peerWasTalking) peerStoppedTalking()
@@ -843,53 +950,212 @@ class TalkSessionController(
             }
         }
 
-        // --- the talk button ---
+        // --- the talk button and the own transmission ---
 
-        @Suppress("ReturnCount", "ComplexCondition")
+        private fun canRequest() = !ended && joined && socket != null && audio != null
+
+        @Suppress("ReturnCount")
         fun press(): Boolean = synchronized(audioLock) {
+            if (pressed || !canRequest()) return false
+            pressed = true
+            lastNotice = OwnNotice.NONE
+            if (own != null) {
+                // Section 13.6: the request waits until the previous transmission is sent and closed.
+                pendingPress = true
+                publishOwn()
+                return true
+            }
+            if (!request()) pressed = false
+            pressed
+        }
+
+        /** Sends the `floor_request` of a new own transmission. Under [audioLock]. */
+        @Suppress("ReturnCount")
+        private fun request(): Boolean {
             val s = socket
             val a = audio
-            if (ended || !joined || s == null || a == null || pressed) return false
+            if (!canRequest() || s == null || a == null) return false
             val id = try {
                 a.requestFloor()
             } catch (_: ProtocolException) {
                 return false
             }
-            pressed = true
-            outstanding = id
-            if (!s.send(ClientMessage.FloorRequest(id))) {
+            // Live mode: `clip: false` on protocol 2 (section 13.9); the key is not allowed on protocol 1.
+            if (!s.send(ClientMessage.FloorRequest(id, clip = if (protocol2) false else null))) {
                 a.onRequestFailed(id)
-                outstanding = null
-                pressed = false
                 return false
             }
+            own = TalkerTransmission(id, protocol2)
             mutableState.update { if (it.floor == TalkFloor.BUSY) it.copy(floor = TalkFloor.IDLE) else it }
-            true
+            publishOwn()
+            return true
         }
 
         fun release() = synchronized(audioLock) {
             pressed = false
-            val id = audio?.buttonReleased()
-            sealer = null
-            if (id != null) {
-                socket?.send(ClientMessage.FloorRelease(id))
-                mutableState.update { if (it.floor == TalkFloor.YOU) it.copy(floor = TalkFloor.IDLE) else it }
-                if (floorId == id) floorId = null
+            pendingPress = false
+            audio?.buttonReleased()
+            // A request still awaiting its grant needs nothing here: the floor answers that grant with a release.
+            own?.takeIf { it.granted && it.capturing }?.let(::finishCapture)
+            publishOwn()
+        }
+
+        /**
+         * Capture of [t] ends (the button went up, or seq 2999 was sealed): the rest is sent, then `floor_release`
+         * (section 13.6). A protocol-1 transmission sends its release at once and is over (milestone 4).
+         */
+        private fun finishCapture(t: TalkerTransmission) {
+            t.stopCapture()
+            if (floorId == t.id) floorId = null
+            mutableState.update { if (it.floor == TalkFloor.YOU) it.copy(floor = TalkFloor.IDLE) else it }
+            if (t.protocol2) {
+                sendBacklog()
+            } else {
+                socket?.send(ClientMessage.FloorRelease(t.id))
+                freeOwn(t)
             }
         }
 
         @Suppress("ReturnCount")
         fun sendOpus(packet: ByteArray): Boolean = synchronized(audioLock) {
-            val sealing = sealer ?: return false
-            val s = socket ?: return false
-            val frame = try {
-                sealing.seal(packet)
+            val t = own ?: return false
+            val before = t.next
+            val sealed = try {
+                t.seal(packet)
             } catch (_: ProtocolException) {
                 release()
                 mutableEvents.tryEmit(TalkEvent.StopCapture)
                 return false
             }
-            s.sendFrame(frame)
+            if (!sealed) return false
+            if (t.capturing) {
+                sendBacklog()
+            } else {
+                finishCapture(t)
+                mutableEvents.tryEmit(TalkEvent.StopCapture)
+            }
+            publishOwn()
+            // Protocol 2 keeps the frame for a later send; protocol 1 reports whether it went out (milestone 4).
+            t.protocol2 || t.next > before
+        }
+
+        /**
+         * Hands the own transmission's frames to the socket in seq order, as section 13.6 allows: at most 200 in any
+         * second, a backlog frame only while under 16 KB are queued unsent; then `floor_release` once capture is
+         * over and every frame was handed. Waits are retried by a drain coroutine. Under [audioLock].
+         */
+        @Suppress("ReturnCount")
+        private fun sendBacklog() {
+            val t = own ?: return
+            val s = socket?.takeIf { joined } ?: return
+            var frame = t.nextFrame()
+            while (frame != null) {
+                val now = nowMs()
+                val wait = sendWait(t, s, now)
+                if (wait > 0) return drainLater(wait)
+                if (!s.sendFrame(frame)) return
+                pacer.sent(now)
+                t.handed()
+                frame = t.nextFrame()
+            }
+            if (t.releaseDue && s.send(ClientMessage.FloorRelease(t.id))) t.onReleaseHanded()
+        }
+
+        /** How long the frame at `t.next` must wait: the 200 / s pacing, then the 16 KB rule for a backlog frame. */
+        private fun sendWait(t: TalkerTransmission, s: TalkSocket, now: Long): Long {
+            val paced = pacer.waitMs(now)
+            return when {
+                paced > 0 -> paced
+                t.backlog && s.unsentBytes >= BACKLOG_LIMIT_BYTES -> QUEUE_POLL_MS
+                else -> 0
+            }
+        }
+
+        private fun drainLater(waitMs: Long) {
+            if (drainJob?.isActive == true) return
+            drainJob = scope.launch {
+                delay(waitMs)
+                synchronized(audioLock) {
+                    drainJob = null
+                    sendBacklog()
+                    publishOwn()
+                }
+            }
+        }
+
+        /** After each join: a protocol-2 own transmission left by the old socket is resumed (section 13.6). */
+        private fun afterJoin(s: TalkSocket) {
+            val t = own
+            when {
+                t != null && t.awaitingResume && protocol2 && !resumeSent ->
+                    resumeSent = s.send(ClientMessage.Resume(t.id))
+
+                t == null && pendingPress -> firePendingPress()
+            }
+        }
+
+        private fun resumeFrom(s: TalkSocket, lastSeq: Int) = synchronized(audioLock) {
+            val t = own?.takeIf { resumeSent && it.awaitingResume } ?: return@synchronized
+            resumeSent = false
+            if (!t.granted) {
+                // Granted while the socket was down and never seen here: nothing was captured, so it ends empty.
+                s.send(ClientMessage.FloorRelease(t.id))
+                freeOwn(t)
+                return@synchronized
+            }
+            t.onResumeFrom(lastSeq)
+            sendBacklog()
+            publishOwn()
+        }
+
+        /** `bad_transmission_id` after `resume`: the server no longer holds it. */
+        private fun resumeRefused(t: TalkerTransmission) {
+            resumeSent = false
+            giveUp(t)
+        }
+
+        /** The own transmission cannot be finished: it is freed, "Not sent" if the server may lack frames of it. */
+        private fun giveUp(t: TalkerTransmission) {
+            if (t.granted && t.mayLackFrames) lastNotice = OwnNotice.NOT_SENT
+            val capturing = t.capturing
+            if (capturing) pressed = false
+            freeOwn(t)
+            if (capturing) mutableEvents.tryEmit(TalkEvent.StopCapture)
+        }
+
+        /** The own transmission is over (closed, refused, given up): the buffer goes; a waiting press goes ahead. */
+        private fun freeOwn(t: TalkerTransmission) {
+            if (own !== t) return
+            t.free()
+            audio?.onOwnClosed(t.id)
+            own = null
+            resumeSent = false
+            drainJob?.cancel()
+            drainJob = null
+            if (pendingPress && joined) firePendingPress()
+            publishOwn()
+        }
+
+        private fun firePendingPress() {
+            pendingPress = false
+            if (pressed && !request()) pressed = false
+        }
+
+        /** Publishes the own transmission's part of the state. Under [audioLock]. */
+        private fun publishOwn() {
+            val t = own
+            val asClip = t != null && t.sending && !t.floorHeld
+            mutableState.update {
+                if (run !== this) {
+                    it
+                } else {
+                    it.copy(
+                        capturing = t?.capturing == true,
+                        sending = t?.sending == true,
+                        ownNotice = if (asClip) OwnNotice.SENDING_AS_CLIP else lastNotice
+                    )
+                }
+            }
         }
 
         // --- End ---
@@ -904,7 +1170,12 @@ class TalkSessionController(
             ended = true
             joinRetry?.cancel()
             firstTalker?.let { synchronized(it) { lockTimer?.cancel() } }
-            sealer = null
+            synchronized(audioLock) {
+                pendingPress = false
+                own?.free()
+                own = null
+                drainJob?.cancel()
+            }
             audio?.close()
             socket?.close()
             socket = null
@@ -913,9 +1184,20 @@ class TalkSessionController(
                     it.pageId != pageId && it.pageId != null -> it
 
                     // Live talk is over but the page goes on: keep the stage, say "unavailable".
-                    pageContinues -> it.copy(floor = TalkFloor.IDLE, peerPresent = false)
+                    pageContinues -> it.copy(
+                        floor = TalkFloor.IDLE,
+                        peerPresent = false,
+                        capturing = false,
+                        sending = false
+                    )
 
-                    else -> it.copy(stage = SessionStage.ENDED, floor = TalkFloor.IDLE, peerPresent = false)
+                    else -> it.copy(
+                        stage = SessionStage.ENDED,
+                        floor = TalkFloor.IDLE,
+                        peerPresent = false,
+                        capturing = false,
+                        sending = false
+                    )
                 }
             }
             synchronized(lock) { if (run === this) run = null }
@@ -936,6 +1218,12 @@ class TalkSessionController(
         private const val EVENT_BUFFER = 32
         private const val ACCEPTED_MEMORY = 16
         private const val PROTOCOL_CLIP = 2
+
+        /** A backlog frame goes to the socket only while fewer bytes than this are queued unsent (section 13.6). */
+        const val BACKLOG_LIMIT_BYTES = 16 * 1024L
+
+        /** How soon a backlog held by the 16 KB rule is tried again (one frame's time). */
+        const val QUEUE_POLL_MS = 20L
         private const val STATE_ENDED = "ended"
         private const val STATE_ANSWERED = "answered"
         private val OVER_STATES = setOf("ended", "failed", "missed")

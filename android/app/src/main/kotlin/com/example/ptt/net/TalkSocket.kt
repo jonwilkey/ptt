@@ -36,6 +36,9 @@ interface TransportSocket {
 
     fun sendBinary(bytes: ByteArray): Boolean
 
+    /** Bytes queued on the connection and not yet transmitted. */
+    fun queuedBytes(): Long
+
     /** A graceful close with [code]. */
     fun close(code: Int)
 
@@ -72,6 +75,8 @@ class OkHttpTalkTransport(client: OkHttpClient, private val state: EnrollmentSta
         override fun sendText(text: String) = ws.send(text)
 
         override fun sendBinary(bytes: ByteArray) = ws.send(bytes.toByteString())
+
+        override fun queuedBytes() = ws.queueSize()
 
         override fun close(code: Int) {
             ws.close(code, null)
@@ -297,6 +302,9 @@ class TalkSocket(
 
     /** Sends one sealed audio frame (a binary frame). */
     fun sendFrame(frame: ByteArray): Boolean = ready && (socket?.sendBinary(frame) ?: false)
+
+    /** Bytes handed to the socket and not yet transmitted (the talker's 16 KB backlog rule, section 13.6). */
+    val unsentBytes: Long get() = socket?.queuedBytes() ?: 0L
 
     /** Closes gracefully (client-initiated, code 1000); no further events except the final [SocketEvent.Closed]. */
     fun close() {

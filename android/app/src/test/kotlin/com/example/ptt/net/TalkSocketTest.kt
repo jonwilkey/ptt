@@ -27,7 +27,7 @@ class TalkSocketTest {
         assertFalse(s.send(ClientMessage.Join(OWN)))
         ws.serverOpen()
         assertEquals(listOf("hello"), ws.types())
-        assertTrue(ws.texts.single().contains("\"protocol\":1"))
+        assertTrue(ws.texts.single().contains("\"protocol\":2"))
         assertFalse("not before hello is answered", s.send(ClientMessage.Join(OWN)))
         ws.serverText(serverHello())
         assertEquals(SocketEvent.Ready(OWN, 1), s.events.receive())
@@ -48,7 +48,7 @@ class TalkSocketTest {
     }
 
     @Test(timeout = 60_000)
-    fun aProtocolTwoReplyIsBelievedWhileHelloStillAdvertisesOne() = runTest {
+    fun helloAdvertisesTwoAndAProtocolTwoReplyIsBelieved() = runTest {
         val s = socket()
         s.open()
         runCurrent()
@@ -56,8 +56,8 @@ class TalkSocketTest {
         ws.serverOpen()
         ws.serverText(serverHello(protocol = 2))
         assertEquals(2, (s.events.receive() as SocketEvent.Ready).protocol)
-        assertEquals(1, TALK_PROTOCOL)
-        assertTrue(ws.texts.first().contains("\"protocol\":1"))
+        assertEquals(2, TALK_PROTOCOL)
+        assertTrue(ws.texts.first().contains("\"protocol\":2"))
         ws.serverClose(1000)
     }
 

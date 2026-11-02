@@ -306,14 +306,14 @@ class TalkSessionControllerTest {
     }
 
     @Test(timeout = 60_000)
-    fun aProtocolOneSocketGetsNoSenderKeyAndHelloAdvertisesOne() = runTest {
+    fun aProtocolOneSocketGetsNoSenderKeyThoughHelloAdvertisesTwo() = runTest {
         val rig = Rig(this)
         rig.sender()
         rig.controller.open(PAGE)
         val ws = rig.connect(protocol = 1)
         rig.joined(ws)
         assertEquals(listOf("hello", "join"), ws.sent())
-        assertTrue(ws.texts.first().contains("\"protocol\":1"))
+        assertTrue(ws.texts.first().contains("\"protocol\":2"))
     }
 
     @Test(timeout = 60_000)
@@ -1356,5 +1356,355 @@ class TalkSessionControllerTest {
         pong(second)
         assertFalse(rig.controller.locked())
         assertTrue(rig.controller.pressTalk())
+    }
+
+    // ---- the talker on protocol 2 (section 13.6) ----
+
+    private fun packet(n: Int) = ByteArray(20) { (n + it).toByte() }
+
+    private fun seqOf(frame: ByteArray) = java.nio.ByteBuffer.wrap(frame, 17, 4).int
+
+    private fun FakeWs.released(id: String, reason: String) =
+        serverText("""{"type":"floor_released","talker":"$OWN","transmission_id":"$id","reason":"$reason"}""")
+
+    private fun FakeWs.lastSent(): String = types().last { it != "ping" }
+
+    private fun TestScope.collectEvents(rig: Rig): MutableList<TalkEvent> {
+        val events = mutableListOf<TalkEvent>()
+        backgroundScope.launch { rig.controller.events.collect { events += it } }
+        runCurrent()
+        return events
+    }
+
+    /** The answerer, joined on a protocol-2 socket, talking under a granted id after [frames] captured packets. */
+    private suspend fun TestScope.talkingOnTwo(rig: Rig, frames: Int, peer: Boolean = true): Pair<FakeWs, String> {
+        rig.receiver()
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws, state = "answered", peer = peer)
+        assertTrue(rig.controller.pressTalk())
+        val id = ws.requestId()
+        ws.grant(OWN, id)
+        runCurrent()
+        repeat(frames) { assertTrue(rig.controller.sendOpus(packet(it))) }
+        return ws to id
+    }
+
+    /** Drops [ws], reconnects on protocol 2 and joins; returns the new socket (the `resume` is sent). */
+    private fun TestScope.reconnectOnTwo(rig: Rig, ws: FakeWs, index: Int = 1): FakeWs {
+        ws.serverClose(1006)
+        runCurrent()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val next = rig.connect(index, protocol = 2)
+        rig.joined(next, state = "answered")
+        return next
+    }
+
+    @Test(timeout = 60_000)
+    fun onProtocolTwoTheRequestSaysLiveModeAndFramesGoOutAsCaptured() = runTest {
+        val rig = Rig(this)
+        val (ws, id) = talkingOnTwo(rig, frames = 3)
+        assertEquals(
+            """{"type":"floor_request","transmission_id":"$id","clip":false}""",
+            ws.lastOf("floor_request")
+        )
+        assertEquals(listOf(0, 1, 2), ws.binaries.map(::seqOf))
+        assertTrue(rig.controller.state.value.capturing)
+        assertTrue(rig.controller.state.value.sending)
+    }
+
+    @Test(timeout = 60_000)
+    fun aTalkerWhoseSocketDropsResumesAndResendsTheSameBytesExactlyOnce() = runTest {
+        val rig = Rig(this)
+        val (first, id) = talkingOnTwo(rig, frames = 8)
+        assertEquals(8, first.binaries.size)
+        first.serverClose(1006)
+        runCurrent()
+        assertTrue("capture goes on while the socket is down", rig.controller.state.value.capturing)
+        assertEquals(OwnNotice.SENDING_AS_CLIP, rig.controller.state.value.ownNotice)
+        repeat(2) { assertTrue(rig.controller.sendOpus(packet(8 + it))) }
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1, protocol = 2)
+        rig.joined(second, state = "answered")
+        assertEquals("""{"type":"resume","transmission_id":"$id"}""", second.lastOf("resume"))
+        assertTrue("nothing of it before the reply", second.binaries.isEmpty())
+        assertTrue(rig.controller.sendOpus(packet(10)))
+        assertTrue(second.binaries.isEmpty())
+        second.serverText("""{"type":"resume_from","last_seq":4}""")
+        runCurrent()
+        assertEquals((5..10).toList(), second.binaries.map(::seqOf))
+        for (i in 5..7) assertArrayEquals("seq $i resent byte for byte", first.binaries[i], second.binaries[i - 5])
+        assertTrue(rig.controller.sendOpus(packet(11)))
+        rig.controller.releaseTalk()
+        runCurrent()
+        assertEquals((5..11).toList(), second.binaries.map(::seqOf))
+        assertEquals("floor_release", second.lastSent())
+        assertTrue(second.lastOf("floor_release").contains(id))
+        assertFalse("everything handed", rig.controller.state.value.sending)
+        val events = collectEvents(rig)
+        second.released(id, "released")
+        runCurrent()
+        assertFalse("capture had ended already", events.contains(TalkEvent.FloorReleased(yours = true)))
+        assertEquals(OwnNotice.NONE, rig.controller.state.value.ownNotice)
+        assertEquals(1, rig.controller.audioSessionsBuilt)
+    }
+
+    @Test(timeout = 60_000)
+    fun aTransmissionClosedWhileAwayStopsAtTheReleaseAfterItsResumeFrom() = runTest {
+        val rig = Rig(this)
+        val (first, id) = talkingOnTwo(rig, frames = 4)
+        rig.controller.releaseTalk()
+        runCurrent()
+        assertTrue(first.lastOf("floor_release").contains(id))
+        val second = reconnectOnTwo(rig, first)
+        assertTrue(second.lastOf("resume").contains(id))
+        second.serverText("""{"type":"resume_from","last_seq":3}""")
+        second.released(id, "released")
+        runCurrent()
+        assertTrue(second.binaries.isEmpty())
+        assertFalse(rig.controller.state.value.sending)
+        // The slot is free: the next press asks for the floor with a new id.
+        assertTrue(rig.controller.pressTalk())
+        assertNotEquals(id, second.requestId())
+    }
+
+    @Test(timeout = 60_000)
+    fun aBadTransmissionIdAfterTheResumeFreesTheBufferAndSaysNotSent() = runTest {
+        val rig = Rig(this)
+        val (first, id) = talkingOnTwo(rig, frames = 4)
+        val events = collectEvents(rig)
+        val second = reconnectOnTwo(rig, first)
+        assertTrue(second.lastOf("resume").contains(id))
+        second.serverText("""{"type":"error","code":"bad_transmission_id"}""")
+        runCurrent()
+        assertEquals(OwnNotice.NOT_SENT, rig.controller.state.value.ownNotice)
+        assertFalse(rig.controller.state.value.sending)
+        assertFalse(rig.controller.state.value.capturing)
+        assertTrue(events.contains(TalkEvent.StopCapture))
+        assertFalse("never sealed under it again", rig.controller.sendOpus(packet(9)))
+        assertTrue(second.binaries.isEmpty())
+        assertTrue("the next press clears the line", rig.controller.pressTalk())
+        assertEquals(OwnNotice.NONE, rig.controller.state.value.ownNotice)
+    }
+
+    @Test(timeout = 60_000)
+    fun aSilenceReleaseKeepsCapturingAndSendingAsAClip() = runTest {
+        val rig = Rig(this)
+        val (ws, id) = talkingOnTwo(rig, frames = 3)
+        val events = collectEvents(rig)
+        ws.released(id, "silence")
+        runCurrent()
+        val state = rig.controller.state.value
+        assertEquals(TalkFloor.IDLE, state.floor)
+        assertTrue(state.capturing)
+        assertTrue("nothing plays meanwhile", state.sending)
+        assertEquals(OwnNotice.SENDING_AS_CLIP, state.ownNotice)
+        assertFalse(events.contains(TalkEvent.StopCapture))
+        assertTrue(rig.controller.sendOpus(packet(3)))
+        assertEquals(listOf(0, 1, 2, 3), ws.binaries.map(::seqOf))
+        // The peer may talk now; this phone's frames still go out.
+        ws.grant(PEER_DEVICE, "77777777-7777-4777-8777-777777777777")
+        runCurrent()
+        assertEquals(TalkFloor.PEER_TALKING, rig.controller.state.value.floor)
+        assertTrue(rig.controller.sendOpus(packet(4)))
+        rig.controller.releaseTalk()
+        assertTrue(ws.lastOf("floor_release").contains(id))
+        assertEquals(5, ws.binaries.size)
+        assertFalse(rig.controller.state.value.sending)
+        ws.released(id, "released")
+        runCurrent()
+        assertFalse("capture had ended already", events.contains(TalkEvent.FloorReleased(yours = true)))
+        assertEquals("the peer's floor is untouched", TalkFloor.PEER_TALKING, rig.controller.state.value.floor)
+    }
+
+    @Test(timeout = 60_000)
+    fun aPressWaitsUntilThePreviousTransmissionIsClosed() = runTest {
+        val rig = Rig(this)
+        val (ws, id) = talkingOnTwo(rig, frames = 2)
+        rig.controller.releaseTalk()
+        assertTrue(rig.controller.pressTalk())
+        assertEquals("no second request yet", 1, ws.types().count { it == "floor_request" })
+        ws.released(id, "released")
+        runCurrent()
+        assertEquals(2, ws.types().count { it == "floor_request" })
+        assertNotEquals(id, ws.requestId())
+    }
+
+    @Test(timeout = 60_000)
+    fun aQuickRepressKeepsItsPrewarmWhenTheOldReleaseArrives() = runTest {
+        val rig = Rig(this)
+        val (ws, id) = talkingOnTwo(rig, frames = 2)
+        val events = collectEvents(rig)
+        rig.controller.releaseTalk()
+        assertTrue(rig.controller.pressTalk())
+        ws.released(id, "released")
+        runCurrent()
+        assertFalse(events.contains(TalkEvent.StopCapture))
+        assertFalse(events.contains(TalkEvent.FloorReleased(yours = true)))
+        val next = ws.requestId()
+        assertNotEquals(id, next)
+        ws.grant(OWN, next)
+        runCurrent()
+        assertTrue(rig.controller.state.value.capturing)
+        assertTrue(rig.controller.sendOpus(packet(0)))
+    }
+
+    @Test(timeout = 60_000)
+    fun aRequestGrantedWhileAwayIsReleasedAfterTheResumeFromMinusOne() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        val first = rig.connect(protocol = 2)
+        rig.joined(first, state = "answered")
+        assertTrue(rig.controller.pressTalk())
+        val id = first.requestId()
+        val second = reconnectOnTwo(rig, first)
+        assertTrue(second.lastOf("resume").contains(id))
+        second.serverText("""{"type":"resume_from","last_seq":-1}""")
+        runCurrent()
+        assertTrue(second.lastOf("floor_release").contains(id))
+        assertTrue(second.binaries.isEmpty())
+        assertFalse(rig.controller.state.value.capturing)
+        assertFalse(rig.controller.state.value.sending)
+        assertTrue(rig.controller.pressTalk())
+        assertNotEquals(id, second.requestId())
+    }
+
+    @Test(timeout = 60_000)
+    fun aReleaseWhileStillPressingStopsCaptureAndTheNextPressAsksAgain() = runTest {
+        val rig = Rig(this)
+        val (ws, id) = talkingOnTwo(rig, frames = 2)
+        val events = collectEvents(rig)
+        ws.released(id, "released")
+        runCurrent()
+        assertTrue(events.contains(TalkEvent.StopCapture))
+        assertFalse(rig.controller.state.value.capturing)
+        assertFalse(rig.controller.sendOpus(packet(2)))
+        assertEquals(1, ws.types().count { it == "floor_request" })
+        rig.controller.releaseTalk()
+        assertTrue(rig.controller.pressTalk())
+        assertEquals(2, ws.types().count { it == "floor_request" })
+        assertNotEquals(id, ws.requestId())
+    }
+
+    @Test(timeout = 60_000)
+    fun aPressReleasedWhileWaitingNeverAsks() = runTest {
+        val rig = Rig(this)
+        val (ws, id) = talkingOnTwo(rig, frames = 2)
+        rig.controller.releaseTalk()
+        assertTrue(rig.controller.pressTalk())
+        rig.controller.releaseTalk()
+        ws.released(id, "released")
+        runCurrent()
+        assertEquals(1, ws.types().count { it == "floor_request" })
+    }
+
+    @Test(timeout = 60_000)
+    fun aBacklogIsPacedTo200PerSecondAndHeldWhile16KbAreUnsent() = runTest {
+        val rig = Rig(this)
+        val (first, id) = talkingOnTwo(rig, frames = 0)
+        first.serverClose(1006)
+        runCurrent()
+        repeat(300) { assertTrue(rig.controller.sendOpus(packet(it))) }
+        rig.controller.releaseTalk()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1, protocol = 2)
+        rig.joined(second, state = "answered")
+        second.serverText("""{"type":"resume_from","last_seq":-1}""")
+        runCurrent()
+        assertEquals("the first second's worth", 200, second.binaries.size)
+        second.queued = TalkSessionController.BACKLOG_LIMIT_BYTES
+        advanceTimeBy(1_100)
+        assertEquals("held while 16 KB are queued", 200, second.binaries.size)
+        second.queued = 0
+        advanceTimeBy(TalkSessionController.QUEUE_POLL_MS + 1)
+        assertEquals((0 until 300).toList(), second.binaries.map(::seqOf))
+        assertTrue(second.lastOf("floor_release").contains(id))
+        assertEquals("floor_release", second.lastSent())
+    }
+
+    @Test(timeout = 60_000)
+    fun aGrantWithThePeerAwayTalksAndTheGapIsShown() = runTest {
+        val rig = Rig(this)
+        val (ws, id) = talkingOnTwo(rig, frames = 2, peer = false)
+        assertFalse(rig.controller.state.value.peerPresent)
+        assertTrue(rig.controller.state.value.protocol2)
+        assertEquals(TalkFloor.YOU, rig.controller.state.value.floor)
+        assertEquals(2, ws.binaries.size)
+        ws.serverText("""{"type":"listener_gap","transmission_id":"$id"}""")
+        runCurrent()
+        assertEquals(OwnNotice.NOT_HEARD_LIVE, rig.controller.state.value.ownNotice)
+        rig.controller.releaseTalk()
+        ws.released(id, "released")
+        runCurrent()
+        assertEquals(
+            "the line stays after the transmission",
+            OwnNotice.NOT_HEARD_LIVE,
+            rig.controller.state.value.ownNotice
+        )
+    }
+
+    @Test(timeout = 60_000)
+    fun aProtocolOneServerGetsMilestoneFourTalk() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        val first = rig.connect(protocol = 1)
+        assertTrue(first.texts.first().contains("\"protocol\":2"))
+        rig.joined(first, state = "answered")
+        val events = collectEvents(rig)
+        assertTrue(rig.controller.pressTalk())
+        val id = first.requestId()
+        assertEquals("""{"type":"floor_request","transmission_id":"$id"}""", first.lastOf("floor_request"))
+        first.grant(OWN, id)
+        runCurrent()
+        assertTrue(rig.controller.sendOpus(packet(0)))
+        first.serverClose(1006)
+        runCurrent()
+        assertTrue(events.contains(TalkEvent.StopCapture))
+        assertFalse(rig.controller.state.value.capturing)
+        assertFalse(rig.controller.sendOpus(packet(1)))
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1, protocol = 1)
+        rig.joined(second, state = "answered")
+        val sent = (first.types() + second.types()).toSet()
+        for (type in listOf("resume", "heard", "sender_key")) assertFalse(type, type in sent)
+    }
+
+    @Test(timeout = 60_000)
+    fun aReconnectOnProtocolOneGivesUpTheOpenTransmission() = runTest {
+        val rig = Rig(this)
+        val (first, _) = talkingOnTwo(rig, frames = 3)
+        first.serverClose(1006)
+        runCurrent()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1, protocol = 1)
+        rig.joined(second, state = "answered")
+        assertFalse(second.types().contains("resume"))
+        assertFalse(rig.controller.state.value.sending)
+        assertEquals(OwnNotice.NOT_SENT, rig.controller.state.value.ownNotice)
+    }
+
+    @Test(timeout = 60_000)
+    fun anOwnGrantRefusedByRuleFourBuzzes() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws, state = "answered")
+        val events = collectEvents(rig)
+        assertTrue(rig.controller.pressTalk())
+        val id = ws.requestId()
+        // The peer's transmission is current when (a lying server) grants this phone too.
+        ws.grant(PEER_DEVICE, "77777777-7777-4777-8777-777777777777")
+        ws.grant(OWN, id)
+        runCurrent()
+        assertTrue(ws.lastOf("floor_release").contains(id))
+        assertTrue(events.contains(TalkEvent.FloorBusy))
+        assertFalse(rig.controller.sendOpus(packet(0)))
     }
 }

@@ -56,4 +56,28 @@ class ClipCodecTest {
         )
         for (text in bad) assertNull(text, TalkCodec.decode(text))
     }
+
+    @Test(timeout = 60_000)
+    fun talkerMessagesAreEncodedWithExactlyTheirKeys() {
+        assertEquals(
+            """{"type":"floor_request","transmission_id":"$TID","clip":false}""",
+            TalkCodec.encode(ClientMessage.FloorRequest(TID, clip = false))
+        )
+        assertEquals(
+            """{"type":"floor_request","transmission_id":"$TID"}""",
+            TalkCodec.encode(ClientMessage.FloorRequest(TID))
+        )
+        assertEquals("""{"type":"resume","transmission_id":"$TID"}""", TalkCodec.encode(ClientMessage.Resume(TID)))
+        assertThrows(ProtocolException::class.java) { TalkCodec.encode(ClientMessage.Resume("x")) }
+    }
+
+    @Test(timeout = 60_000)
+    fun resumeFromDecodesFromMinusOneTo2999() {
+        assertEquals(ServerMessage.ResumeFrom(-1), TalkCodec.decode("""{"type":"resume_from","last_seq":-1}"""))
+        assertEquals(ServerMessage.ResumeFrom(2999), TalkCodec.decode("""{"last_seq":2999,"type":"resume_from"}"""))
+        for (bad in listOf("-2", "3000", "\"4\"", "1.5", "null")) {
+            assertNull(bad, TalkCodec.decode("""{"type":"resume_from","last_seq":$bad}"""))
+        }
+        assertNull(TalkCodec.decode("""{"type":"resume_from"}"""))
+    }
 }

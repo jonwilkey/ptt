@@ -201,6 +201,9 @@
     <string name="talk_capture_codec">Audio encoder unavailable</string>
     <string name="talk_capture_focus">Interrupted</string>
     <string name="talk_capture_refused">Could not send — press again</string>
+    <string name="talk_not_heard_live">%1$s didn\'t hear this live. It will play when they\'re back.</string>
+    <string name="talk_sending_as_clip">Sending as a clip</string>
+    <string name="talk_not_sent">Not sent</string>
     <string name="talk_ended_idle">Ended — nobody talking</string>
     <string name="talk_ended_by_peer">%1$s ended</string>
     <string name="talk_page_ended">Page ended</string>

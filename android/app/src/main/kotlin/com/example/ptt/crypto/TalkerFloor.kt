@@ -76,10 +76,13 @@ class TalkerFloor internal constructor(private val mint: () -> String = { UUID.r
         if (outstanding == transmissionId) outstanding = null
     }
 
-    /** The socket closed: the floor is lost (section 12.4 rule 3); a new request needs a new id. */
-    fun onSocketClosed() {
+    /**
+     * The socket closed: the floor is lost (section 12.4 rule 3); a new request needs a new id. [keepActive]: the
+     * active transmission is open and will be resumed (protocol 2, section 13.6).
+     */
+    fun onSocketClosed(keepActive: Boolean = false) {
         outstanding = null
-        active = null
+        if (!keepActive) active = null
     }
 
     private companion object {

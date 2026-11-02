@@ -52,6 +52,7 @@ internal fun Conversation(
     if (live.waitingForPeer) Text(stringResource(R.string.talk_waiting_for, who))
     if (live.firstTalkerLocked) Text(stringResource(R.string.talk_speaks_first, who))
     captureLine(live.capture)?.let { Text(stringResource(it)) }
+    ownLine(live.ownNotice, who)?.let { Text(it) }
     if (state.microphoneMissing) Text(stringResource(R.string.talk_microphone_missing))
     HoldToTalkButton(live.talkEnabled, live.speaker == Speaker.YOU, onPress, onRelease)
     BigButton(R.string.talk_end, onEnd, enabled = !state.ending)
@@ -76,6 +77,14 @@ private fun LinkQuality.label(): Int = when (this) {
     LinkQuality.GOOD -> R.string.talk_quality_good
     LinkQuality.FAIR -> R.string.talk_quality_fair
     LinkQuality.POOR -> R.string.talk_quality_poor
+}
+
+@Composable
+private fun ownLine(notice: OwnNotice, who: String): String? = when (notice) {
+    OwnNotice.NONE -> null
+    OwnNotice.NOT_HEARD_LIVE -> stringResource(R.string.talk_not_heard_live, who)
+    OwnNotice.SENDING_AS_CLIP -> stringResource(R.string.talk_sending_as_clip)
+    OwnNotice.NOT_SENT -> stringResource(R.string.talk_not_sent)
 }
 
 @StringRes

@@ -58,7 +58,9 @@ data class TalkLive(
     val firstTalkerLocked: Boolean = false,
     val talkEnabled: Boolean = false,
     /** Why capture stopped by itself; IDLE and CAPTURING mean nothing to show. */
-    val capture: CaptureStatus = CaptureStatus.IDLE
+    val capture: CaptureStatus = CaptureStatus.IDLE,
+    /** A line about this phone's own transmission (sending as a clip, not heard live, not sent). */
+    val ownNotice: OwnNotice = OwnNotice.NONE
 )
 
 /**
@@ -69,16 +71,19 @@ fun deriveLive(screen: TalkState, session: TalkSessionState, eligible: Boolean, 
     val active = eligible && screen.answered
     val live = active && session.connection == TalkConnection.LIVE
     val conversation = live && session.stage == SessionStage.CONVERSATION
-    val ready = conversation && session.peerPresent
+    // On protocol 2 the floor is granted with the peer away (section 13.7): what is said waits for them as a clip.
+    val ready = conversation && (session.peerPresent || session.protocol2)
     return TalkLive(
         eligible = eligible,
         active = active,
         connection = session.connection,
         quality = if (live) LinkQuality.of(session.rttMillis) else null,
-        speaker = Speaker.of(session.floor),
+        // Still capturing after the floor went (protocol 2) is still this phone talking.
+        speaker = if (session.capturing) Speaker.YOU else Speaker.of(session.floor),
         waitingForPeer = conversation && !session.peerPresent,
         firstTalkerLocked = ready && session.firstTalkerLocked,
         talkEnabled = ready && !session.firstTalkerLocked && !screen.ending && !screen.microphoneMissing,
-        capture = capture
+        capture = capture,
+        ownNotice = if (active) session.ownNotice else OwnNotice.NONE
     )
 }

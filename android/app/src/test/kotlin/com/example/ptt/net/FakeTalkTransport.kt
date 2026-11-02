@@ -10,6 +10,9 @@ class FakeWs(private val listener: TransportListener) : TransportSocket {
     val binaries = mutableListOf<ByteArray>()
     var cancelled = false
     var closedWith: Int? = null
+
+    /** What [queuedBytes] reports: bytes the "network" has not taken yet. */
+    var queued = 0L
     private var done = false
 
     fun serverOpen() = listener.onOpen(this)
@@ -39,6 +42,8 @@ class FakeWs(private val listener: TransportListener) : TransportSocket {
         binaries += bytes
         return true
     }
+
+    override fun queuedBytes() = queued
 
     override fun close(code: Int) {
         closedWith = code
