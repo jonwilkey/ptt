@@ -1,9 +1,11 @@
 # {{ ansible_managed }}
 [Unit]
 Description=ptt nightly SQLite snapshot
+Wants=network-online.target
 Requires=docker.service
-After=docker.service
+After=network-online.target docker.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=15min
 ExecStart={{ snapshot_script }}

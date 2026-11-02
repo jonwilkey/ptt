@@ -21,15 +21,7 @@
   ansible.builtin.apt:
     name: prometheus-node-exporter
     state: present
-
-- name: Bind the node exporter to the Tailscale address
-  ansible.builtin.template:
-    src: prometheus-node-exporter.default.j2
-    dest: /etc/default/prometheus-node-exporter
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Restart the node exporter
+    install_recommends: false
 
 - name: Create the node exporter unit drop-in directory
   ansible.builtin.file:
@@ -39,19 +31,13 @@
     group: root
     mode: "0755"
 
-# The address only exists once tailscaled is up; retry if the first bind fails at boot.
-- name: Start the node exporter after tailscaled
-  ansible.builtin.copy:
+# The address only exists once tailscaled is up; retry if the first bind fails at boot. The
+# listen address goes here, not in /etc/default/prometheus-node-exporter: that file is a dpkg
+# conffile, and changing it makes package upgrades stop at a prompt.
+- name: Bind the node exporter to the Tailscale address and start it after tailscaled
+  ansible.builtin.template:
+    src: 10-ptt-tailnet.conf.j2
     dest: /etc/systemd/system/prometheus-node-exporter.service.d/10-ptt-tailnet.conf
-    content: |
-      # Managed by Ansible.
-      [Unit]
-      Wants=tailscaled.service
-      After=tailscaled.service
-
-      [Service]
-      Restart=on-failure
-      RestartSec=5
     owner: root
     group: root
     mode: "0644"

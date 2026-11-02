@@ -5,9 +5,12 @@ ever committed here — **never commit plaintext**. Decrypted working copies (`*
 `*.plain.*`) are git-ignored.
 
 Contents: the FCM service-account key, `fcm-service-account.sops.json`, created by
-[docs/runbooks/firebase-setup.md](../../docs/runbooks/firebase-setup.md). and the Healthchecks.io project ping key, `healthchecks-ping-key.sops.txt` (a bare value;
-listed with `dest: healthchecks-ping-key`; see docs/operations.md, "Configuration"). Each file is listed in
-`app_secrets` (see `infra/ansible/inventory/group_vars/prod/main.yml`) to be deployed.
+[docs/runbooks/firebase-setup.md](../../docs/runbooks/firebase-setup.md), and the Healthchecks.io
+project ping key, `healthchecks-ping-key.sops.txt` (a bare value, listed with
+`dest: healthchecks-ping-key`; see docs/operations.md, "Configuration"). Each file is listed in
+`app_secrets` (see `infra/ansible/inventory/group_vars/prod/main.yml`) to be deployed. Removing
+an entry from `app_secrets` does not remove the decrypted file from `/opt/ptt/secrets/` on the
+host; delete it by hand (this applies to the FCM key too).
 
 Name each file `<name>.sops.<ext>`, where `<ext>` is the plaintext's format, because sops picks
 its file format from the extension: `.json` for a JSON document (stored as encrypted JSON
@@ -18,6 +21,8 @@ the age public key of each admin plus the CI key (docs/runbooks/github-setup.md,
 key"), because CI decrypts these files during deploys (only one admin key for now:
 [ADR 0008](../../docs/adr/0008-sops-secrets-one-admin-recipient.md)). Each encrypted file records its
 recipients' age public keys in its `sops` metadata; public keys are safe to publish. No
-`.sops.yaml` is committed, so always pass `--age` explicitly. Edit later with
-`sops <name>.sops.<ext>`. Name decrypted working copies `*.dec.*` or `*.plain.*` so git ignores
+`.sops.yaml` is committed, so always pass `--age` explicitly. The ping key is a bare value with no trailing newline, so
+encrypt it as binary, with the same recipients as the FCM key:
+`sops -e --age <recipients> --input-type binary --output-type binary <plain> >
+infra/secrets/healthchecks-ping-key.sops.txt`. Edit later with `sops <name>.sops.<ext>`. Name decrypted working copies `*.dec.*` or `*.plain.*` so git ignores
 them, and delete them when done.
