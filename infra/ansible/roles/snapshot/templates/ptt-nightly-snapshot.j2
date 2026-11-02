@@ -1,0 +1,35 @@
+#!/bin/sh
+# {{ ansible_managed }}
+# Nightly SQLite snapshot: runs `pttd admin snapshot` inside the running container, then
+# reports the exit code and the last {{ snapshot_ping_log_lines }} lines of output to Healthchecks.io.
+# The ping is skipped when the ping key file is absent; the exit status is the snapshot's either way.
+set -u
+
+compose_file='{{ snapshot_app_dir }}/compose.yaml'
+key_file='{{ snapshot_ping_key_file }}'
+
+output="$(docker compose -f "$compose_file" exec -T pttd /pttd admin snapshot 2>&1)"
+status=$?
+printf '%s\n' "$output"
+
+if [ ! -r "$key_file" ]; then
+    echo "ptt-nightly-snapshot: no ping key at $key_file; not pinging" >&2
+    exit "$status"
+fi
+
+key="$(tr -d '[:space:]' < "$key_file")"
+if [ -z "$key" ]; then
+    echo "ptt-nightly-snapshot: ping key file is empty; not pinging" >&2
+    exit "$status"
+fi
+
+# The URL carries the key, so curl reads it from a config on stdin instead of argv. -K - and
+# --data-binary @- cannot both read stdin, so the body goes through a temporary file.
+body="$(mktemp)"
+trap 'rm -f "$body"' EXIT
+printf '%s\n' "$output" | tail -n {{ snapshot_ping_log_lines }} > "$body"
+if ! printf 'url = "%s/%s/{{ snapshot_check_slug }}/%s"\n' "{{ snapshot_ping_base_url }}" "$key" "$status" \
+    | curl -fsS -m 10 --retry 3 --data-binary "@$body" -K - -o /dev/null; then
+    echo "ptt-nightly-snapshot: ping failed" >&2
+fi
+exit "$status"

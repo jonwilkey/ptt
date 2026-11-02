@@ -72,6 +72,8 @@
     # Caddy's certificates and state; persists across container recreation.
     - {path: "{{ app_dir }}/caddy/data", owner: root, group: root, mode: "0700"}
     - {path: "{{ app_dir }}/caddy/config", owner: root, group: root, mode: "0700"}
+    # Published APKs: root-owned, so the read-only mount in pttd cannot be used to change them.
+    - {path: "{{ app_dir }}/apk", owner: root, group: root, mode: "0755"}
     - {path: "{{ app_data_dir }}", owner: "{{ app_container_uid }}", group: "{{ app_container_gid }}", mode: "0700"}
   loop_control:
     label: "{{ item.path }}"

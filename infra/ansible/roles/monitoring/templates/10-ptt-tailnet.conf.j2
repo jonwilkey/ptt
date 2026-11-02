@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# Listens on this node's Tailscale IPv4 address only; the firewall also allows port
+# {{ monitoring_exporter_port }} on tailscale0 only. If the node is re-registered and its address
+# changes, rerun Ansible. The empty ExecStart= clears the packaged command ($ARGS from
+# /etc/default/prometheus-node-exporter), which this replaces.
+[Unit]
+Wants=tailscaled.service
+After=tailscaled.service
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/prometheus-node-exporter --web.listen-address={{ monitoring_tailscale_ip4.stdout }}:{{ monitoring_exporter_port }}{{ ' ' ~ monitoring_exporter_extra_args if monitoring_exporter_extra_args | length > 0 else '' }}
+Restart=on-failure
+RestartSec=5

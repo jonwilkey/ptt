@@ -13,3 +13,7 @@
 # name makes the app role set PTTD_FCM_CREDENTIALS_FILE for pttd.
 app_secrets:
   - {src: fcm-service-account.sops.json, dest: fcm-service-account.json}
+# Healthchecks.io project ping key (docs/operations.md, "Configuration"). Add this line once
+# infra/secrets/healthchecks-ping-key.sops.txt exists (infra/secrets/README.md); its dest name
+# makes the app role set PTTD_HEALTHCHECKS_PING_KEY_FILE and the snapshot role ping with it.
+#  - {src: healthchecks-ping-key.sops.txt, dest: healthchecks-ping-key}

@@ -6,17 +6,17 @@ cloud-init joins it to the tailnet; Ansible does everything else.
 
 | Playbook | Roles | Used by |
 | --- | --- | --- |
-| `site.yml` | `base`, `tailscale`, `docker`, `app` (tag per role) | the `infra` workflow and admins |
+| `site.yml` | `base`, `tailscale`, `docker`, `app`, `snapshot`, `monitoring` (tag per role) | the `infra` workflow and admins |
 | `deploy.yml` | `app` only | the `server-release` deploy job |
-
-The `snapshot` and `monitoring` roles arrive in later milestones.
 
 | Role | What it does |
 | --- | --- |
 | `base` | Admin users plus a `deploy` user for CI, passwordless sudo, SSH hardening, nftables host firewall, timezone (Pacific) and time sync, `unattended-upgrades` with the 04:00 reboot window, `needrestart`. |
 | `tailscale` | Tailscale apt repo and package; joins the tailnet if logged out; makes sshd listen only on the Tailscale addresses. |
 | `docker` | Docker Engine and compose plugin from Docker's apt repo; `daemon.json` with log rotation and hardening. |
-| `app` | `/opt/ptt` with `compose.yaml`, `Caddyfile`, `.env`, and decrypted secrets; `/data`; pulls and starts the compose project and waits until it is healthy. |
+| `app` | `/opt/ptt` with `compose.yaml`, `Caddyfile`, `.env`, and decrypted secrets; `/data`; pulls and starts the compose project and waits until it is healthy. Also `/opt/ptt/apk` (root 0755), mounted read-only for the published APKs; and `PTTD_HEALTHCHECKS_PING_KEY_FILE` in `.env` when `app_secrets` has the `healthchecks-ping-key` entry. |
+| `snapshot` | `/usr/local/sbin/ptt-nightly-snapshot` plus `ptt-snapshot.timer` (02:00 Pacific, `Persistent=true`): runs `pttd admin snapshot` in the container and pings the `ptt-snapshot` Healthchecks check with the exit code and the last 50 lines. Without the ping key file it still snapshots and skips the ping. |
+| `monitoring` | Debian's `prometheus-node-exporter`, listening on the tailnet IPv4 address only (port 9100; nftables allows it on `tailscale0` only). |
 
 ## Requirements on the machine running Ansible
 
@@ -54,7 +54,7 @@ variables as an extra-vars file: the `infra` workflow from the `production` secr
 | `pttd_image` | `deploy.yml`; optional for `site.yml` | `<registry>/<name>@sha256:<64 hex>`; anything not pinned by digest is rejected. `deploy.yml` requires it. `site.yml` without it keeps the `PTTD_IMAGE` already in `/opt/ptt/.env`; on a host with no release yet it writes the files and starts nothing. |
 | `GHCR_TOKEN` (environment variable) | `app`, optional | Token with `read:packages` used to log in to ghcr.io for the pull and log out afterwards (CI: the job's `GITHUB_TOKEN`). Read from the controller's environment, never `-e`, so it stays off command lines. Not needed when the image is already on the host. |
 | `tailscale_auth_key` | `tailscale`, optional | Pre-authorized key tagged `tag:ptt-server`; only used if the node is logged out. |
-| `app_secrets` | `app` | List of `{src, dest}`: sops files in `infra/secrets/` decrypted to `/opt/ptt/secrets/<dest>`. Prod lists the Firebase key (`fcm-service-account.sops.json`); an entry with `dest: fcm-service-account.json` also sets `PTTD_FCM_CREDENTIALS_FILE` in `/opt/ptt/.env` ([firebase-setup.md](../../docs/runbooks/firebase-setup.md)). |
+| `app_secrets` | `app` | List of `{src, dest}`: sops files in `infra/secrets/` decrypted to `/opt/ptt/secrets/<dest>`. Prod lists the Firebase key (`fcm-service-account.sops.json`); an entry with `dest: fcm-service-account.json` also sets `PTTD_FCM_CREDENTIALS_FILE` in `/opt/ptt/.env`; an entry with `dest: healthchecks-ping-key` likewise sets `PTTD_HEALTHCHECKS_PING_KEY_FILE` ([firebase-setup.md](../../docs/runbooks/firebase-setup.md)). |
 
 Each role asserts its required variables before changing anything.
 

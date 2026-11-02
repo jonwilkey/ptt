@@ -27,8 +27,11 @@ app_deploy_src_dir: "{{ playbook_dir }}/../../deploy"
 # FCM disabled. Example:
 #   app_secrets:
 #     - {src: fcm-service-account.sops.json, dest: fcm-service-account.json}
+#     - {src: healthchecks-ping-key.sops.txt, dest: healthchecks-ping-key}
 app_secrets: []
 app_fcm_secret_dest: fcm-service-account.json
+# Likewise for the Healthchecks.io ping key: PTTD_HEALTHCHECKS_PING_KEY_FILE in .env.
+app_healthchecks_secret_dest: healthchecks-ping-key
 app_secrets_src_dir: "{{ playbook_dir }}/../secrets"
 
 app_ghcr_registry: ghcr.io

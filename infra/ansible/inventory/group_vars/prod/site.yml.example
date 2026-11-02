@@ -26,6 +26,12 @@ base_deploy_ssh_keys:
 # base_admin_users at the same time.
 # base_admin_users_removed: [carol]
 
+# Secrets decrypted onto the host are listed in main.yml (app_secrets), not here. Production
+# lists the FCM key and the Healthchecks.io ping key:
+#   app_secrets:
+#     - {src: fcm-service-account.sops.json, dest: fcm-service-account.json}
+#     - {src: healthchecks-ping-key.sops.txt, dest: healthchecks-ping-key}
+
 # pttd_image is not set here. deploy.yml needs it per run, pinned by digest:
 #   -e pttd_image=ghcr.io/<owner>/ptt/pttd@sha256:<64 hex digits>
 # site.yml keeps the deployed image when it is not given.

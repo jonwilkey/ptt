@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=ptt nightly SQLite snapshot at 02:00 Pacific
+
+[Timer]
+OnCalendar={{ snapshot_on_calendar }}
+# A run missed while the host was off happens at boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
