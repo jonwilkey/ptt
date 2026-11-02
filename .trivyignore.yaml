@@ -1,0 +1,7 @@
+# Trivy waivers, read by ci / server-image, server-release / scan and the scheduled scans.
+# Empty on purpose. A waiver is added by pull request, so a person decides, and ci / waivers
+# fails if `expired_at` is more than 30 days away or `statement` is missing.
+vulnerabilities: []
+#  - id: CVE-2099-0001
+#    statement: Unfixed upstream in the base image; no fix released, not reachable from pttd. Tracked in #123.
+#    expired_at: 2027-01-31

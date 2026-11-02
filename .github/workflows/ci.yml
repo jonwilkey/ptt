@@ -30,6 +30,9 @@ env:
   # renovate: datasource=github-releases depName=gitleaks/gitleaks
   GITLEAKS_VERSION: v8.30.1
   GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  # Same pin as server-release.yml; Renovate bumps each separately.
+  # renovate: datasource=github-releases depName=aquasecurity/trivy
+  TRIVY_VERSION: v0.75.0
 
 jobs:
   server:
@@ -148,6 +151,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The release gate (server-release `scan`) on pull requests, so a base-image or dependency
+      # change that brings in a high finding fails here, not at release time. The image is in the
+      # runner's Docker daemon, which Trivy checks before any registry.
+      - name: Scan the image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: pttd:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
+          format: table
+
       # Not the release smoke test (that runs with test devices in server-release); this only
       # proves the image starts under the production runtime restrictions.
       - name: Image runs read-only as nonroot and turns healthy
@@ -213,12 +232,13 @@ jobs:
           scan-args: |-
             --format=json
             --output-file=osv-results.json
+            --config=./osv-scanner.toml
             --recursive
             ./
 
-      # Fails on CVSS >= 7.0 (high or critical). Unscored findings, which include most Go
-      # advisories, are reported as warnings; govulncheck in the server job gates those by
-      # reachability.
+      # Fails on CVSS >= 7.0 (high or critical) and on unscored findings outside Go. Unscored Go
+      # advisories are warnings; govulncheck in the server job gates those by reachability.
+      # A false positive is waived in osv-scanner.toml.
       - name: Fail on high or critical findings
         env:
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
@@ -242,12 +262,26 @@ jobs:
             exit 0
           fi
           column -t -s "$(printf '\t')" -N SEVERITY,PACKAGE,IDS,SOURCE findings.tsv
-          awk -F '\t' '$1 == "unscored" { printf "::warning::Unscored advisory %s in %s\n", $3, $2 }' findings.tsv
-          high=$(awk -F '\t' '$1 != "unscored" && $1 + 0 >= 7.0' findings.tsv | wc -l)
-          if [ "$high" -gt 0 ]; then
-            echo "::error::${high} high or critical (CVSS >= 7.0) finding(s)."
+          awk -F '\t' '$1 == "unscored" && $2 ~ /^Go\// { printf "::warning::Unscored Go advisory %s in %s\n", $3, $2 }' findings.tsv
+          bad=$(awk -F '\t' '($1 == "unscored" && $2 !~ /^Go\//) || ($1 != "unscored" && $1 + 0 >= 7.0)' findings.tsv)
+          if [ -n "$bad" ]; then
+            printf '%s\n' "$bad" | awk -F '\t' '{ printf "::error::%s finding %s in %s\n", $1, $3, $2 }'
+            echo "::error::High, critical or unscored non-Go finding(s) above."
             exit 1
           fi
+
+  waivers:
+    name: waivers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Expiry limits for .trivyignore.yaml (30 days) and osv-scanner.toml (90 days).
+      - name: Check waiver reasons and expiry dates
+        run: .github/scripts/check-waivers.py
 
   gitleaks:
     name: gitleaks
