@@ -1,0 +1,67 @@
+---
+# The listen address is learned from tailscaled, as the tailscale role does for sshd. The
+# role therefore needs the node to be on the tailnet; it refuses to listen elsewhere.
+- name: Read the Tailscale IPv4 address
+  ansible.builtin.command: tailscale ip -4
+  changed_when: false
+  check_mode: false
+  register: monitoring_tailscale_ip4
+
+- name: Check the Tailscale address was discovered
+  ansible.builtin.assert:
+    that:
+      - monitoring_tailscale_ip4.stdout_lines | length == 1
+      - monitoring_tailscale_ip4.stdout is match(monitoring_tailnet_ip4_pattern)
+    fail_msg: >-
+      Could not read this node's Tailscale address
+      (got '{{ monitoring_tailscale_ip4.stdout }}'); not starting the node exporter.
+    quiet: true
+
+- name: Install the Prometheus node exporter
+  ansible.builtin.apt:
+    name: prometheus-node-exporter
+    state: present
+
+- name: Bind the node exporter to the Tailscale address
+  ansible.builtin.template:
+    src: prometheus-node-exporter.default.j2
+    dest: /etc/default/prometheus-node-exporter
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the node exporter
+
+- name: Create the node exporter unit drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/prometheus-node-exporter.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The address only exists once tailscaled is up; retry if the first bind fails at boot.
+- name: Start the node exporter after tailscaled
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/prometheus-node-exporter.service.d/10-ptt-tailnet.conf
+    content: |
+      # Managed by Ansible.
+      [Unit]
+      Wants=tailscaled.service
+      After=tailscaled.service
+
+      [Service]
+      Restart=on-failure
+      RestartSec=5
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart the node exporter
+
+- name: Apply the unit changes before starting the exporter
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the node exporter
+  ansible.builtin.systemd_service:
+    name: prometheus-node-exporter.service
+    enabled: true
+    state: started

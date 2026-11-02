@@ -22,6 +22,8 @@ services:
       - /data:/data
       # Decrypted secrets (0600, uid 65532), read through PTTD_*_FILE variables.
       - ./secrets:/run/secrets/ptt:ro
+      # Published APKs and latest.json, written by the publish step as root; pttd only reads.
+      - ./apk:/apk:ro
     environment:
       # Put in the enrollment QR by `pttd admin bootstrap`. Everything else uses the image's
       # defaults (PTTD_LISTEN_ADDR=:8080, PTTD_INTERNAL_ADDR=:9090, database and snapshots under
@@ -31,6 +33,11 @@ services:
       # app_secrets has the fcm-service-account.json entry; empty means "not configured" and
       # pttd runs with pushes disabled.
       PTTD_FCM_CREDENTIALS_FILE: ${PTTD_FCM_CREDENTIALS_FILE:-}
+      # Healthchecks.io project ping key. Ansible writes the variable to .env when app_secrets
+      # has the healthchecks-ping-key entry; empty means no pings are sent.
+      PTTD_HEALTHCHECKS_PING_KEY_FILE: ${PTTD_HEALTHCHECKS_PING_KEY_FILE:-}
+      # Where /v1/app/latest and the APK download read from (the mount above).
+      PTTD_APK_DIR: /apk
     ports:
       # /metrics and /internal/status, for the host only (and later the tailnet exporter).
       # Caddy proxies only to :8080, which is not published at all.

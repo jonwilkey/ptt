@@ -5,7 +5,8 @@ ever committed here — **never commit plaintext**. Decrypted working copies (`*
 `*.plain.*`) are git-ignored.
 
 Contents: the FCM service-account key, `fcm-service-account.sops.json`, created by
-[docs/runbooks/firebase-setup.md](../../docs/runbooks/firebase-setup.md). Each file is listed in
+[docs/runbooks/firebase-setup.md](../../docs/runbooks/firebase-setup.md). and the Healthchecks.io project ping key, `healthchecks-ping-key.sops.txt` (a bare value;
+listed with `dest: healthchecks-ping-key`; see docs/operations.md, "Configuration"). Each file is listed in
 `app_secrets` (see `infra/ansible/inventory/group_vars/prod/main.yml`) to be deployed.
 
 Name each file `<name>.sops.<ext>`, where `<ext>` is the plaintext's format, because sops picks

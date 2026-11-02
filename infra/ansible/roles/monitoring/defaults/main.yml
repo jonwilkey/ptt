@@ -1,0 +1,6 @@
+---
+monitoring_exporter_port: 9100
+# Extra node exporter flags, after the listen address.
+monitoring_exporter_extra_args: ""
+# Tailscale's CGNAT range, 100.64.0.0/10.
+monitoring_tailnet_ip4_pattern: '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$'

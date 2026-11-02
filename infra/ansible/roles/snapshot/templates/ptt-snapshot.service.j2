@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+[Unit]
+Description=ptt nightly SQLite snapshot
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart={{ snapshot_script }}

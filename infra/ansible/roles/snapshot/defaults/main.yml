@@ -1,0 +1,11 @@
+---
+# Where the app role put the compose project and the decrypted ping key.
+snapshot_app_dir: /opt/ptt
+snapshot_ping_key_file: "{{ snapshot_app_dir }}/secrets/healthchecks-ping-key"
+snapshot_script: /usr/local/sbin/ptt-nightly-snapshot
+snapshot_ping_base_url: https://hc-ping.com
+snapshot_check_slug: ptt-snapshot
+# Lines of the command's output sent as the ping body.
+snapshot_ping_log_lines: 50
+# systemd calendar expression with its own time zone, so it holds whatever the host's zone is.
+snapshot_on_calendar: "*-*-* 02:00:00 America/Los_Angeles"
