@@ -65,33 +65,51 @@ class ServiceTalkAudioSource @Inject constructor() : TalkAudioSource {
 fun TalkAudioSource.captureStatus(pageId: String): Flow<CaptureStatus> =
     audios(pageId).flatMapLatest { it?.captureStatus ?: flowOf(CaptureStatus.IDLE) }
 
+/** Who is holding the talk (button and volume key at once share one hold). */
+enum class HoldSource {
+    BUTTON,
+    VOLUME_KEY
+}
+
 /**
- * The state of the hold-to-talk button, kept out of the composition so that holding never depends on
- * recomposition: whoever ends the hold (pointer up or cancel, focus loss, stop, talk disabled) calls [release].
- * Main thread only.
+ * The state of the hold-to-talk, kept out of the composition so that holding never depends on
+ * recomposition: whoever ends a hold (pointer up or cancel, key up, focus loss, stop, talk disabled) calls
+ * [release] or [releaseAll]. Main thread only.
  *
  * It only calls [TalkAudioPort.press] when the caller says talk is enabled (a press briefly opens the mic and the
- * encoder), never twice for one hold, and never presses again by itself: after the audio stops on its own (cap,
- * mic, codec, focus, refused) the user must lift and press again. Never calls the controller directly: the audio
- * pre-warms the mic and owns audio focus.
+ * encoder), once per hold — [HoldSource.BUTTON] and [HoldSource.VOLUME_KEY] held together share the one hold — and
+ * never presses again by itself: after the audio stops on its own (cap, mic, codec, focus, refused) the user must
+ * lift and press again. Never calls the controller directly: the audio pre-warms the mic and owns audio focus.
  */
 class HoldToTalk(private val source: TalkAudioSource) {
     private var held: TalkAudioPort? = null
+    private val holders = mutableSetOf<HoldSource>()
 
     val isHeld: Boolean get() = held != null
 
     /** True if a request was made. False when disabled, already held, or the audio refused (not a request). */
     @Suppress("ReturnCount")
-    fun press(pageId: String, enabled: Boolean): Boolean {
-        if (!enabled || held != null) return false
-        val audio = source.audio(pageId) ?: return false
+    fun press(source: HoldSource, pageId: String, enabled: Boolean): Boolean {
+        if (!enabled) return false
+        if (held != null) {
+            holders += source
+            return false
+        }
+        val audio = this.source.audio(pageId) ?: return false
         if (!audio.press()) return false
         held = audio
+        holders += source
         return true
     }
 
-    /** Ends the hold, if any. Idempotent. */
-    fun release() {
+    /** Drops one holder; ends the hold (and releases the audio) when the last holder goes. */
+    fun release(source: HoldSource) {
+        if (holders.remove(source) && holders.isEmpty()) releaseAll()
+    }
+
+    /** Ends the hold, if any, whoever held it. Idempotent. */
+    fun releaseAll() {
+        holders.clear()
         val audio = held ?: return
         held = null
         audio.release()

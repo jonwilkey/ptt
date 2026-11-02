@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Application
 import android.content.Intent
 import android.os.Looper
+import android.view.KeyEvent
 import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -80,7 +81,10 @@ class TalkActivityTest {
      * The sender's screen of an answered page whose live session is up, with a view model built on fakes: [audio]
      * records what reaches the microphone's hold.
      */
-    private fun liveSendersScreen(audio: FakeAudioSource): ActivityScenario<TalkActivity> {
+    private fun liveSendersScreen(
+        audio: FakeAudioSource,
+        firstTalkerLocked: Boolean = false
+    ): ActivityScenario<TalkActivity> {
         shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO)
         val local = TestDb.inMemory(app).also { fakeDb = it }
         val clock = Clock.systemUTC()
@@ -94,12 +98,15 @@ class TalkActivityTest {
             pageId = PAGE,
             stage = SessionStage.CONVERSATION,
             connection = TalkConnection.LIVE,
-            peerPresent = true
+            peerPresent = true,
+            firstTalkerLocked = firstTalkerLocked
         )
         val events = MutableSharedFlow<PageEvent>()
         runBlocking { repo.start(PAGE, PageRole.SENDER, "session-1", PEER, "normal", "answered") }
         TalkActivity.viewModelFactory = viewModelFactory {
-            initializer { TalkViewModel(engine, repo, outbox, keys, notices, events, fakeScope, clock, talk, audio) }
+            initializer {
+                TalkViewModel(engine, repo, outbox, keys, notices, events, fakeScope, clock, talk, audio, FakeCues())
+            }
         }
         return launch(PAGE, TalkIntents.MODE_OUTGOING, "Mom")
     }
@@ -300,6 +307,77 @@ class TalkActivityTest {
             scenario.holdTalk()
             scenario.onActivity { it.onWindowFocusChanged(false) }
             assertEquals(listOf("press", "release"), audio.calls)
+        }
+    }
+
+    @Test
+    fun volumeDownIsHoldToTalkWhileTheConversationIsUp() {
+        val audio = FakeAudioSource(PAGE)
+        liveSendersScreen(audio).use { scenario ->
+            lateinit var activity: TalkActivity
+            scenario.onActivity { activity = it }
+            awaitTrue("talk to be enabled") { activity.viewModel.live.value.talkEnabled }
+            val down = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN)
+            // The first key-down starts the hold, and it is consumed so the volume does not change.
+            assertTrue(activity.onKeyDown(KeyEvent.KEYCODE_VOLUME_DOWN, down))
+            assertEquals(listOf("press"), audio.calls)
+            // The auto-repeats are consumed too, but do not make a second press.
+            val repeat = KeyEvent(0L, 0L, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN, 2)
+            assertTrue(activity.onKeyDown(KeyEvent.KEYCODE_VOLUME_DOWN, repeat))
+            assertEquals(listOf("press"), audio.calls)
+            val up = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN)
+            assertTrue(activity.onKeyUp(KeyEvent.KEYCODE_VOLUME_DOWN, up))
+            assertEquals(listOf("press", "release"), audio.calls)
+            // Volume-up is never ours.
+            val volumeUp = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_UP)
+            assertFalse(activity.onKeyDown(KeyEvent.KEYCODE_VOLUME_UP, volumeUp))
+            assertFalse(activity.onKeyUp(KeyEvent.KEYCODE_VOLUME_UP, volumeUp))
+            assertEquals(listOf("press", "release"), audio.calls)
+        }
+    }
+
+    @Test
+    fun volumeDownWhileFirstTalkerLockedIsConsumedAndDoesNothing() {
+        val audio = FakeAudioSource(PAGE)
+        liveSendersScreen(audio, firstTalkerLocked = true).use { scenario ->
+            lateinit var activity: TalkActivity
+            scenario.onActivity { activity = it }
+            awaitTrue("the live screen to be active") { activity.viewModel.live.value.active }
+            assertTrue(activity.viewModel.live.value.firstTalkerLocked)
+            val down = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN)
+            assertTrue(activity.onKeyDown(KeyEvent.KEYCODE_VOLUME_DOWN, down))
+            val up = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN)
+            assertTrue(activity.onKeyUp(KeyEvent.KEYCODE_VOLUME_DOWN, up))
+            assertEquals(emptyList<String>(), audio.calls)
+        }
+    }
+
+    @Test
+    fun volumeKeyUpAfterFocusLossReleasesNothingTwice() {
+        val audio = FakeAudioSource(PAGE)
+        liveSendersScreen(audio).use { scenario ->
+            lateinit var activity: TalkActivity
+            scenario.onActivity { activity = it }
+            awaitTrue("talk to be enabled") { activity.viewModel.live.value.talkEnabled }
+            val down = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN)
+            assertTrue(activity.onKeyDown(KeyEvent.KEYCODE_VOLUME_DOWN, down))
+            activity.onWindowFocusChanged(false)
+            assertEquals(listOf("press", "release"), audio.calls)
+            activity.onKeyUp(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN))
+            assertEquals(listOf("press", "release"), audio.calls)
+        }
+    }
+
+    @Test
+    fun volumeDownIsTheSystemsKeyOutsideTheConversation() {
+        launch(PAGE, TalkIntents.MODE_INCOMING, "Mom").use { scenario ->
+            lateinit var activity: TalkActivity
+            scenario.onActivity { activity = it }
+            compose.waitForIdle()
+            assertFalse(activity.viewModel.live.value.active)
+            val down = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN)
+            assertFalse(activity.onKeyDown(KeyEvent.KEYCODE_VOLUME_DOWN, down))
+            assertFalse(activity.onKeyUp(KeyEvent.KEYCODE_VOLUME_DOWN, down))
         }
     }
 

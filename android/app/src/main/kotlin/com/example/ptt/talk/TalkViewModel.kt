@@ -143,7 +143,8 @@ class TalkViewModel @Inject constructor(
     private val scope: CoroutineScope,
     private val clock: Clock,
     private val talk: TalkSessions,
-    private val audio: TalkAudioSource
+    private val audio: TalkAudioSource,
+    private val cues: TalkCues
 ) : ViewModel() {
     private val _state = MutableStateFlow(TalkState())
     val state: StateFlow<TalkState> = _state
@@ -161,14 +162,14 @@ class TalkViewModel @Inject constructor(
     ) { screen, session, capture ->
         deriveLive(
             screen,
-            if (ours(session)) session else TalkSessionState(),
+            if (ours(session, screen.pageId)) session else TalkSessionState(),
             eligible(screen),
             capture
         )
     }
         .stateIn(viewModelScope, SharingStarted.Eagerly, TalkLive())
 
-    /** The one-shot events, for the chirps and the busy buzz (the next PR). Durable UI never reads these. */
+    /** The one-shot events, for the chirps and the busy buzz (14h). Durable UI never reads these. */
     val talkEvents: SharedFlow<TalkEvent> get() = talk.events
 
     private val answered: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -192,7 +193,7 @@ class TalkViewModel @Inject constructor(
         }
         val caller = callerName ?: engine.nameOf(pageId)
         seenRowFor = null
-        holdToTalk.release()
+        holdToTalk.releaseAll()
         if (mode == TalkIntents.MODE_OUTGOING) {
             _state.value = TalkState(pageId, caller, TalkPhase.OUTGOING, sender = true)
             scope.launch { openOutgoing(pageId) }
@@ -203,19 +204,29 @@ class TalkViewModel @Inject constructor(
     }
 
     /**
-     * The hold-to-talk button went down. Does nothing (and never touches the microphone) unless talk is enabled for
-     * the shown page. True if a floor request was made; false is "no request", not an error.
+     * A hold went down (the button, or the volume-down key). Does nothing (and never touches the microphone)
+     * unless talk is enabled for the shown page: while first-talker-locked the key is consumed but ignored. A fresh
+     * press while the peer is talking buzzes [Cue.BUSY] instead of opening the microphone. True if a floor request
+     * was made; false is "no request", not an error.
      */
-    fun pressTalk(): Boolean {
-        val shown = _state.value.pageId
-        return holdToTalk.press(shown, live.value.talkEnabled)
+    @Suppress("ReturnCount")
+    fun pressTalk(source: HoldSource = HoldSource.BUTTON): Boolean {
+        if (!live.value.talkEnabled) return false
+        if (!holdToTalk.isHeld && live.value.speaker == Speaker.PEER) {
+            cues.play(Cue.BUSY)
+            return false
+        }
+        return holdToTalk.press(source, _state.value.pageId, true)
     }
 
-    /** The button went up or was cancelled, the window lost focus, or the screen stopped. Idempotent. */
-    fun releaseTalk() = holdToTalk.release()
+    /** One holder went up (the button, or the volume-down key); the hold ends with the last one. */
+    fun releaseTalk(source: HoldSource) = holdToTalk.release(source)
+
+    /** Every holder goes at once (window focus lost, screen stopped, talk disabled, End). Idempotent. */
+    fun releaseAllTalk() = holdToTalk.releaseAll()
 
     override fun onCleared() {
-        holdToTalk.release()
+        holdToTalk.releaseAll()
     }
 
     /** Whether live talk may run for the shown page (never for a Test alert to this phone itself). */
@@ -239,7 +250,7 @@ class TalkViewModel @Inject constructor(
         val current = _state.value
         val canEnd = current.phase == TalkPhase.ANSWERED || (current.sender && current.phase == TalkPhase.OUTGOING)
         if (!canEnd || current.ending) return
-        holdToTalk.release()
+        holdToTalk.releaseAll()
         _state.update { it.copy(ending = true) }
         scope.launch {
             val pageId = current.pageId
@@ -333,16 +344,28 @@ class TalkViewModel @Inject constructor(
             launch(start = CoroutineStart.UNDISPATCHED) { activePage.active.collect(::rowChanged) }
             launch(start = CoroutineStart.UNDISPATCHED) { talk.events.collect(::sessionEvent) }
             launch(start = CoroutineStart.UNDISPATCHED) {
-                live.map { it.talkEnabled }.distinctUntilChanged().collect { if (!it) holdToTalk.release() }
+                live.map { it.talkEnabled }.distinctUntilChanged().collect { if (!it) holdToTalk.releaseAll() }
             }
         }
     }
 
-    /** True if [session] is the live session of the shown page (the controller's state can be stale for another). */
-    private fun ours(session: TalkSessionState) = session.pageId != null && session.pageId == _state.value.pageId
+    /** True if [session] is the live session of [pageId] (the controller's state can be stale for another). */
+    private fun ours(session: TalkSessionState, pageId: String) = session.pageId != null && session.pageId == pageId
 
     private fun sessionEvent(event: TalkEvent) {
-        if (event is TalkEvent.SessionEnded && ours(talk.state.value)) sessionEnded(event.reason)
+        val pageId = _state.value.pageId
+        if (!ours(talk.state.value, pageId)) return
+        cueFor(event)?.let { cues.play(it) }
+        if (event is TalkEvent.SessionEnded) sessionEnded(event.reason)
+    }
+
+    /** The cue a session event makes, if any — the screen hears only its own page's events. */
+    private fun cueFor(event: TalkEvent): Cue? = when (event) {
+        is TalkEvent.PeerJoined -> Cue.JOINED
+        is TalkEvent.FloorGrantedToYou -> Cue.GO
+        is TalkEvent.FloorReleased -> if (event.yours) null else Cue.OVER
+        is TalkEvent.FloorBusy, is TalkEvent.NoPeer -> Cue.BUSY
+        else -> null
     }
 
     /**
