@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/jonwilkey/ptt/compare/android-v0.3.0...android-v0.4.0) (2026-11-02)
+
+
+### Features
+
+* **android:** clip mode ([#60](https://github.com/jonwilkey/ptt/issues/60)) ([69ed3ce](https://github.com/jonwilkey/ptt/commit/69ed3ced98e19bebec544cbdddc32e734999b423))
+* **android:** debug network impairment ([#61](https://github.com/jonwilkey/ptt/issues/61)) ([99c8551](https://github.com/jonwilkey/ptt/commit/99c855168ff3d4d622bd3d013a8af65dd47df603))
+* **android:** receive and play clips ([#58](https://github.com/jonwilkey/ptt/issues/58)) ([d54d9d2](https://github.com/jonwilkey/ptt/commit/d54d9d23873df90411162e5222a619adc8bd1a2e))
+* **android:** sender key for clip recovery ([#56](https://github.com/jonwilkey/ptt/issues/56)) ([73e0d0d](https://github.com/jonwilkey/ptt/commit/73e0d0d0f22dc8334c4aafc096e7658fb0b6b300))
+* **android:** talker buffer, resume and protocol 2 ([#59](https://github.com/jonwilkey/ptt/issues/59)) ([1c56a66](https://github.com/jonwilkey/ptt/commit/1c56a66c1d24abff83cada1ad658f95084808e91))
+
 ## [0.3.0](https://github.com/jonwilkey/ptt/compare/android-v0.2.0...android-v0.3.0) (2026-11-02)
 
 
