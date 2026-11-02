@@ -129,7 +129,8 @@ restore() {
 		restored="restored-${snap}"
 		mv -- "${snapdir}/${snap}" "${snapdir}/${restored}"
 		log "Restored ${snap} to ${data}/pttd.db; the failed database is in ${failed_dir}."
-	elif [ -d "$failed_dir" ] && [[ $before =~ ^[0-9]+$ ]] &&
+	elif [ -e "${failed_dir}/pttd.db" ] && [ ! -e "${data}/.pttd.db.restoring" ] &&
+		[[ $before =~ ^[0-9]+$ ]] &&
 		[ -z "$(qualifying_snapshot "$before" "$start" restored-pre-migrate)" ]; then
 		snap="$(qualifying_snapshot "$before" "$start")"
 		if [ -n "$snap" ]; then

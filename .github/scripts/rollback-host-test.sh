@@ -147,6 +147,14 @@ check "rerun after a restore cut off before the rename: renames the snapshot" \
 	"$(summary "$o") $(cd "$data/snapshots" && echo *)" \
 	"migrated=yes restored=restored-$new db=$new $old restored-$new"
 
+setup "$old" "$new"
+mkdir "$data/rolled-back-$start"
+cp "$data/snapshots/$new" "$data/.pttd.db.restoring"
+o="$(run 5)"
+check "rerun after a restore cut off before the move, schema unknown: no rename, image only" \
+	"$(summary "$o") $(cd "$data/snapshots" && echo *)" \
+	"migrated=unknown restored= db=failed $old $new"
+
 setup "$new"
 rc=0
 FAKE_STATUS="$status99999" FAKE_STOP_RC=1 run 5 > /dev/null || rc=$?
