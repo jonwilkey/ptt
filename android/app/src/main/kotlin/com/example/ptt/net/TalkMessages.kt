@@ -15,13 +15,10 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 /** The `hello.protocol` this build advertises (docs/protocol.md section 11.1). */
-const val TALK_PROTOCOL = 1
+const val TALK_PROTOCOL = 2
 
-/**
- * The highest protocol this build's code can speak. [TALK_PROTOCOL] stays below it until the protocol-2 talker
- * side lands; a server answering `hello` with up to this value is believed.
- */
-const val MAX_TALK_PROTOCOL = 2
+/** The highest protocol this build's code can speak; a server answering `hello` with up to this value is believed. */
+const val MAX_TALK_PROTOCOL = TALK_PROTOCOL
 
 /** Messages the phone sends over the WebSocket (docs/protocol.md section 11.2). The server is strict about them. */
 sealed interface ClientMessage {
@@ -32,7 +29,8 @@ sealed interface ClientMessage {
 
     data class Join(val sessionId: String) : ClientMessage
 
-    data class FloorRequest(val transmissionId: String) : ClientMessage
+    /** [clip] is required on a protocol-2 socket and not allowed on a protocol-1 one (null there, section 13.2). */
+    data class FloorRequest(val transmissionId: String, val clip: Boolean? = null) : ClientMessage
 
     data class FloorRelease(val transmissionId: String) : ClientMessage
 
@@ -43,6 +41,9 @@ sealed interface ClientMessage {
 
     /** `heard` (protocol 2, section 13.5): every frame 0 .. [lastSeq] of [transmissionId] was accepted. */
     data class Heard(val transmissionId: String, val lastSeq: Int) : ClientMessage
+
+    /** `resume` (protocol 2, section 13.6): where to continue the talker's unfinished transmission. */
+    data class Resume(val transmissionId: String) : ClientMessage
 
     data class Ping(val t: Long) : ClientMessage
 }
@@ -126,6 +127,9 @@ sealed interface ServerMessage {
 
     /** Protocol 2, to the talker only: the listener did not get [transmissionId] live (section 13.4). */
     data class ListenerGap(val transmissionId: String) : ServerMessage
+
+    /** Protocol 2, the reply to `resume`: the highest seq the server holds, -1 for none (section 13.6). */
+    data class ResumeFrom(val lastSeq: Int) : ServerMessage
 }
 
 /**
@@ -167,6 +171,7 @@ object TalkCodec {
                     Validation.requireUuid(message.transmissionId, "transmission id")
                     put("type", "floor_request")
                     put("transmission_id", message.transmissionId)
+                    message.clip?.let { put("clip", it) }
                 }
 
                 is ClientMessage.FloorRelease -> {
@@ -198,6 +203,12 @@ object TalkCodec {
                     put("type", "heard")
                     put("transmission_id", message.transmissionId)
                     put("last_seq", message.lastSeq)
+                }
+
+                is ClientMessage.Resume -> {
+                    Validation.requireUuid(message.transmissionId, "transmission id")
+                    put("type", "resume")
+                    put("transmission_id", message.transmissionId)
                 }
 
                 is ClientMessage.Ping -> {
@@ -259,6 +270,10 @@ object TalkCodec {
 
             "listener_gap" -> ServerMessage.ListenerGap(obj.uuid("transmission_id") ?: return null)
 
+            "resume_from" -> ServerMessage.ResumeFrom(
+                obj.signed("last_seq")?.takeIf { it in -1L..MAX_CLIP_SEQ }?.toInt() ?: return null
+            )
+
             else -> null
         }
     }
@@ -274,9 +289,11 @@ object TalkCodec {
     private fun JsonObject.str(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
-    private fun JsonObject.long(key: String): Long? {
+    private fun JsonObject.long(key: String): Long? = signed(key)?.takeIf { it >= 0 }
+
+    private fun JsonObject.signed(key: String): Long? {
         val p = this[key] as? JsonPrimitive ?: return null
-        return if (p.isString) null else p.longOrNull?.takeIf { it >= 0 }
+        return if (p.isString) null else p.longOrNull
     }
 
     private fun JsonObject.uuid(key: String): String? = str(key)?.takeIf(Validation::isUuid)

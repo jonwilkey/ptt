@@ -42,13 +42,23 @@ private class FakeLink(private val sent: SentLog) : TalkLink {
 
     override fun sendOpus(packet: ByteArray) = sent.send(packet)
 
+    @Suppress("LongParameterList")
     fun set(
         floor: TalkFloor = state.value.floor,
         connection: TalkConnection = state.value.connection,
         stage: SessionStage = state.value.stage,
-        pageId: String? = state.value.pageId
+        pageId: String? = state.value.pageId,
+        capturing: Boolean = state.value.capturing,
+        sending: Boolean = state.value.sending
     ) {
-        state.value = state.value.copy(floor = floor, connection = connection, stage = stage, pageId = pageId)
+        state.value = state.value.copy(
+            floor = floor,
+            connection = connection,
+            stage = stage,
+            pageId = pageId,
+            capturing = capturing,
+            sending = sending
+        )
     }
 }
 
@@ -115,7 +125,7 @@ class TalkAudioTest {
     )
 
     private fun grant() {
-        link.set(floor = TalkFloor.YOU)
+        link.set(floor = TalkFloor.YOU, capturing = true)
         link.events.tryEmit(TalkEvent.FloorGrantedToYou)
     }
 
@@ -217,17 +227,39 @@ class TalkAudioTest {
     }
 
     @Test(timeout = 60_000)
-    fun connectionLeavingLiveStops() {
+    fun aProtocolOneSocketLossStops() {
         startCapture()
-        link.set(connection = TalkConnection.CONNECTING)
+        link.set(connection = TalkConnection.CONNECTING, floor = TalkFloor.IDLE, capturing = false)
         assertStopped()
     }
 
     @Test(timeout = 60_000)
-    fun floorLeavingYouStops() {
+    fun theControllerNoLongerCapturingStops() {
+        startCapture()
+        link.set(floor = TalkFloor.IDLE, capturing = false)
+        assertStopped()
+    }
+
+    @Test(timeout = 60_000)
+    fun onProtocolTwoCaptureOutlivesTheFloorAndASocketDrop() {
         startCapture()
         link.set(floor = TalkFloor.IDLE)
-        assertStopped()
+        link.set(connection = TalkConnection.CONNECTING)
+        val n = sent.count.get()
+        await("still sending") { sent.count.get() > n + 2 }
+        assertFalse(sources.single().closed)
+    }
+
+    @Test(timeout = 60_000)
+    fun nothingPlaysWhileTheOwnTransmissionIsStillBeingSent() {
+        conversation(TalkFloor.PEER_TALKING)
+        link.set(sending = true)
+        for (i in 0..2) link.incoming.tryEmit(IncomingOpus("t1", i, byteArrayOf((i + 1).toByte())))
+        Thread.sleep(250)
+        assertTrue("held while sending", sinks.isEmpty() || sinks.single().writes.isEmpty())
+        link.set(sending = false)
+        await("played after") { sinks.isNotEmpty() && sinks.single().writes.size == 3 }
+        assertEquals(listOf(1, 2, 3), sinks.single().writes.toList())
     }
 
     @Test(timeout = 60_000)

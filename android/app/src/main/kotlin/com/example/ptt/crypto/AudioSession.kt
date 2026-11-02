@@ -5,8 +5,11 @@ sealed interface GrantOutcome {
     /** This phone is the talker: send audio by sealing Opus packets with [sealer]. */
     class Transmit(val sealer: FrameSealer) : GrantOutcome
 
-    /** Send `floor_release {transmission_id}` and no audio. */
-    class SendRelease(val transmissionId: String) : GrantOutcome
+    /**
+     * Send `floor_release {transmission_id}` and no audio. [refused] is true when the grant answered this phone's own
+     * request but section 12.4 rule 4 refused it (another transmission is current): for the user that is "busy".
+     */
+    class SendRelease(val transmissionId: String, val refused: Boolean = false) : GrantOutcome
 
     /** The peer is talking: feed binary frames to [AudioSession.onFrame]. */
     data object Listen : GrantOutcome
@@ -137,7 +140,7 @@ class AudioSession private constructor(
                 if (receiver.onOwnGranted(ownDeviceId, grant.transmissionId) == GrantVerdict.REFUSED) {
                     // Another transmission holds the floor (section 12.4 rule 4): give this grant back, send nothing.
                     floor.onReleased(grant.transmissionId)
-                    return GrantOutcome.SendRelease(grant.transmissionId)
+                    return GrantOutcome.SendRelease(grant.transmissionId, refused = true)
                 }
                 endSealer()
                 val tk = FrameCipher.deriveKey(key, sessionId, ownDeviceId, grant.transmissionId)
@@ -154,14 +157,21 @@ class AudioSession private constructor(
 
     /**
      * `floor_released {transmission_id}`. Returns the `last_seq` of the `heard` to send for it (protocol 2,
-     * section 13.5), or null.
+     * section 13.5), or null. [ownStaysOpen]: the floor of this phone's own protocol-2 transmission is gone but the
+     * transmission is not closed (section 13.6), so its sealer is kept for the frames still to be captured.
      */
     @Synchronized
-    fun onFloorReleased(transmissionId: String): Int? {
+    fun onFloorReleased(transmissionId: String, ownStaysOpen: Boolean = false): Int? {
         val heard = receiver.onReleased(transmissionId)
+        if (!ownStaysOpen) onOwnClosed(transmissionId)
+        return heard
+    }
+
+    /** This phone's own transmission [transmissionId] is over (closed, refused or given up): its sealer goes. */
+    @Synchronized
+    fun onOwnClosed(transmissionId: String) {
         floor.onReleased(transmissionId)
         if (sealer?.transmissionId == transmissionId) endSealer()
-        return heard
     }
 
     /**
@@ -193,12 +203,15 @@ class AudioSession private constructor(
     @Synchronized
     fun onRequestFailed(transmissionId: String) = floor.onRequestFailed(transmissionId)
 
-    /** The socket closed: listening is suspended and any own transmission is lost (a new id is needed). */
+    /**
+     * The socket closed: listening is suspended. Without [keepOwn] any own transmission is lost (protocol 1: a new
+     * id is needed); with it (protocol 2) a granted own transmission stays, to be resumed (section 13.6).
+     */
     @Synchronized
-    fun onSocketClosed() {
+    fun onSocketClosed(keepOwn: Boolean = false) {
         receiver.onSocketClosed()
-        floor.onSocketClosed()
-        endSealer()
+        floor.onSocketClosed(keepActive = keepOwn)
+        if (!keepOwn) endSealer()
     }
 
     /** A binary frame from the server. */

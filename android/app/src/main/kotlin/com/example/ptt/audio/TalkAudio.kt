@@ -75,11 +75,13 @@ class ControllerLink(private val controller: TalkSessionController) : TalkLink {
  * The audio of one live-talk session, owned by [com.example.ptt.talk.TalkService] (created when it starts for a page,
  * [close]d when it stops, so nothing records without the service). It watches the session and runs the pieces:
  * - capture ([Recorder], one per press): pre-warmed by [press], started by the floor being granted to this phone,
- *   stopped by [release], StopCapture, FloorReleased(yours), SessionEnded, the connection leaving LIVE, the floor
- *   leaving YOU, `sendOpus` refusing, the 59.5 s cap (which also gives the floor back), or losing audio focus;
+ *   stopped by [release], StopCapture, FloorReleased(yours), SessionEnded, the controller no longer capturing
+ *   (on protocol 2 that outlives the floor and a socket drop), `sendOpus` refusing, the 59.5 s cap (which also gives
+ *   the floor back), or losing audio focus;
  * - playback ([Player]): fed by a collector that only enqueues; the floor leaving PEER_TALKING (or the connection
  *   leaving LIVE) lets the buffer play out, and the session ending flushes it. While this phone holds the floor,
- *   clips and newly granted transmissions wait (docs/protocol.md section 13.8);
+ *   captures, or still sends its own transmission, clips and newly granted transmissions wait (docs/protocol.md
+ *   section 13.8);
  * - routing ([AudioRouting]): active from the start of the conversation until the session ends.
  *
  * 14g wires the hold-to-talk button to [press] and [release]. Both are cheap and safe from the main thread.
@@ -179,11 +181,17 @@ class TalkAudio(
             else -> Unit
         }
         if (peerStoppedTalking(before, s)) player.release()
-        val talking = s.floor == TalkFloor.YOU
-        if (talking != (before.floor == TalkFloor.YOU)) player.busy(talking)
+        val held = playbackHeld(s)
+        if (held != playbackHeld(before)) player.busy(held)
         if (s.floor == TalkFloor.PEER_TALKING && before.floor != TalkFloor.PEER_TALKING) routing.ensureFocus()
-        if (!live || captureOver(s)) stopRecorder()
+        if (captureOver(s, live)) stopRecorder()
     }
+
+    /**
+     * Section 13.8: a phone that holds the floor, is capturing, or is still sending an open transmission plays
+     * nothing; incoming audio waits as a clip.
+     */
+    private fun playbackHeld(s: TalkSessionState): Boolean = s.floor == TalkFloor.YOU || s.capturing || s.sending
 
     /** The peer's floor ended, or its connection dropped while it was talking: let the buffer play out. */
     private fun peerStoppedTalking(before: TalkSessionState, now: TalkSessionState): Boolean {
@@ -192,14 +200,19 @@ class TalkAudio(
         return left || (talking && now.connection != TalkConnection.LIVE)
     }
 
-    /** Capture that must stop because of the floor: lost while recording, or a pre-warm the peer/busy overtook. */
-    private fun captureOver(s: TalkSessionState): Boolean = when (recorder?.phase) {
-        Recorder.Phase.CAPTURING -> s.floor != TalkFloor.YOU
+    /**
+     * Capture that must stop: the controller no longer takes frames (on protocol 2 a transmission keeps capturing
+     * after its floor is gone or while the socket reconnects, section 13.6), or a pre-warm that the socket's loss, the
+     * peer or "busy" overtook.
+     */
+    private fun captureOver(s: TalkSessionState, live: Boolean): Boolean = when (recorder?.phase) {
+        Recorder.Phase.CAPTURING -> !s.capturing
 
         // A request in flight has floor IDLE and is fine; once the peer or "busy" wins, the pre-warm is useless.
-        Recorder.Phase.PREWARM -> s.floor == TalkFloor.PEER_TALKING || s.floor == TalkFloor.BUSY
+        Recorder.Phase.PREWARM ->
+            !live || s.floor == TalkFloor.PEER_TALKING || s.floor == TalkFloor.BUSY
 
-        else -> false
+        else -> !live
     }
 
     private fun onEvent(e: TalkEvent) {
