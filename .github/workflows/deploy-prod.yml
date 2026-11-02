@@ -111,6 +111,24 @@ jobs:
           ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
 
+      # deploy/ and infra/ come from the tag; the pipeline scripts come from main, so a deploy of
+      # an older tag (weekly rebuilds, the drill, redeploys) still has every script this workflow
+      # calls.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: _main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Use main's pipeline scripts
+        run: |
+          set -euo pipefail
+          rm -rf .github/scripts
+          cp -a _main/.github/scripts .github/scripts
+          rm -rf _main
+
       - name: Connect to the tailnet
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
         with:
