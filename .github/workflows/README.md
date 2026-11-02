@@ -11,6 +11,8 @@ pinned by commit digest (Renovate keeps them current).
 | `server-release` | Called by `release-please`, tag `server-v*`, or manual (tag input) | Image to GHCR, Trivy, smoke test of the pushed image, SBOM and cosign signature, then `deploy-prod` after approval |
 | `deploy-prod` | Called by `server-release` and `rollback-drill` (`workflow_call`) | Deploys an image with Ansible, checks health and runs the smoke test, rolls back automatically on failure, and moves the GHCR tag `deployed` after a successful deploy |
 | `rollback-drill` | Manual only, from `main`, input `confirm: break production` | Deploys a deliberately broken build of the running release and passes only if production rolled back ([docs/operations.md](../../docs/operations.md#proving-it-the-rollback-drill)) |
+| `weekly-maintenance` | Mondays 03:00 America/Los_Angeles (two UTC crons plus a DST check), or manual from `main` | Rebuilds the running release (the `deployed` image's version, `+maint` dropped) with refreshed base-image digests, same gates as a release, deploys through `deploy-prod` in the reviewer-free `maintenance` environment ([ADR 0012](../../docs/adr/0012-weekly-maintenance-deploys-without-approval.md)), pings `ptt-weekly` |
+| `nightly-security` | Daily 13:00 UTC, or manual | Trivy on the `deployed` image, OSV-Scanner and `govulncheck` on `main`; opens, closes and reopens `security` issues for findings a release gate would fail ([ADR 0014](../../docs/adr/0014-nightly-security-reports-release-gate-findings.md)); pings `ptt-security` |
 | `infra` | Push to `main` touching `infra/` (or `deploy/compose.yaml`, `deploy/Caddyfile`), or manual | `tofu plan`, `tofu apply` after approval (only with changes), then `site.yml` after approval |
 
 Shared pieces: `.github/actions/docker-daemon-prod` and `.github/actions/compose-smoke`
@@ -18,6 +20,8 @@ Shared pieces: `.github/actions/docker-daemon-prod` and `.github/actions/compose
 server over Tailscale, the deployed image, the wait for no active sessions, the production
 health check and smoke test, the rollback (`rollback-prod.sh` on the runner, `rollback-host.sh` on
 the host, `rollback-host-test.sh` for its decisions), masking the Ansible site vars, public-safe `tofu plan` and its
-summary).
+summary). The scheduled workflows add `maintenance-gate.sh` (the 03:00 Pacific check),
+`deployed-release.sh`, `refresh-base-digests.sh`, `hc-ping.sh` (Healthchecks.io pings) and
+`nightly-security.py` (findings and issues); `scheduled-test.sh` tests them.
 
 Repository settings, environments, secrets, and variables: [docs/runbooks/github-setup.md](../../docs/runbooks/github-setup.md).

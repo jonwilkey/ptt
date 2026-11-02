@@ -1,0 +1,451 @@
+name: weekly-maintenance
+
+# Monday 03:00 America/Los_Angeles. Rebuilds the release production runs (the version label of
+# the `deployed` image, `+maint...` dropped) with refreshed base-image digests, runs it through
+# the release gates (Trivy, smoke test, SBOM, cosign), and deploys it with deploy-prod.yml in the
+# `maintenance` environment, which has no required reviewers (ADR 0012). Automatic rollback is
+# deploy-prod's. Pings the `ptt-weekly` Healthchecks.io check with the result.
+# Details: docs/operations.md, "weekly-maintenance".
+#
+# The build, scan, smoke and sign jobs mirror server-release.yml's; the differences are what is
+# built (T's tree with refreshed base digests, version <T>+maint.<YYYYMMDD>, GHCR tag
+# <T>-maint.<YYYYMMDD>, no git tag or release) and the signing identity.
+#
+# The repository and its Actions logs are public: the domain comes only from the maintenance
+# environment's secrets (masked), and the ping key never appears in a URL that is printed.
+
+on:
+  schedule:
+    # GitHub cron is UTC: 03:00 PDT and 03:00 PST. The gate job lets only the matching one run.
+    - cron: "0 10 * * 1"
+    - cron: "0 11 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: weekly-maintenance
+  cancel-in-progress: false
+
+env:
+  # renovate: datasource=github-releases depName=aquasecurity/trivy
+  TRIVY_VERSION: v0.75.0
+  # renovate: datasource=github-releases depName=sigstore/cosign
+  COSIGN_VERSION: v3.1.3
+  # renovate: datasource=github-releases depName=anchore/syft
+  SYFT_VERSION: v1.54.1
+
+jobs:
+  gate:
+    name: gate (03:00 Pacific)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Only from main
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::weekly-maintenance runs only from main, not ${GITHUB_REF}."
+            exit 1
+          fi
+
+      # Exits successfully with run=false unless this is the cron that is 03:00 in Los Angeles.
+      - name: Is it 03:00 in Los Angeles?
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: .github/scripts/maintenance-gate.sh
+
+  resolve:
+    name: resolve the running release
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      base_tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}+maint.${{ steps.date.outputs.day }}
+      ghcr_tag: ${{ steps.release.outputs.version }}-maint.${{ steps.date.outputs.day }}
+      repo: ${{ steps.meta.outputs.repo }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Image name and date
+        id: meta
+        run: echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}/pttd" >> "$GITHUB_OUTPUT"
+
+      - name: Date (Pacific)
+        id: date
+        run: echo "day=$(TZ=America/Los_Angeles date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # The release production runs, never the newest server-v* tag (a newer release may await its
+      # approval or have been rolled back).
+      - name: Find the deployed release
+        id: release
+        env:
+          REPO: ${{ steps.meta.outputs.repo }}
+        run: |
+          set -euo pipefail
+          if ! docker pull --quiet "${REPO}:deployed" > /dev/null; then
+            echo "::error::${REPO}:deployed does not exist. Deploy a release through deploy-prod.yml first (or seed the tag; docs/runbooks/github-setup.md)."
+            exit 1
+          fi
+          label="$(docker image inspect "${REPO}:deployed" \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
+          .github/scripts/deployed-release.sh "$label" | tee -a "$GITHUB_OUTPUT"
+          echo "Production runs ${label}." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    outputs:
+      image: ${{ needs.resolve.outputs.repo }}@${{ steps.push.outputs.digest }}
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      BASE_TAG: ${{ needs.resolve.outputs.base_tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.base_tag }}
+          persist-credentials: false
+
+      # The scripts come from main: the tag may predate them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: _main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Tagged commit
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Only the digests of the pinned base images move; the tags, the code and go.sum are T's.
+      - name: Refresh the base-image digests
+        run: |
+          set -euo pipefail
+          {
+            echo "### Base images for ${VERSION} (built from ${BASE_TAG})"
+            echo
+            echo '```'
+            _main/.github/scripts/refresh-base-digests.sh server/Dockerfile
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and push (by digest)
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server
+          file: server/Dockerfile
+          platforms: linux/amd64
+          build-args: VERSION=${{ needs.resolve.outputs.version }}
+          outputs: type=image,name=${{ needs.resolve.outputs.repo }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+            org.opencontainers.image.licenses=MIT
+          pull: true
+          no-cache: true
+          provenance: false
+          sbom: false
+
+      - name: Summary
+        env:
+          IMAGE: ${{ needs.resolve.outputs.repo }}@${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo
+            echo "Image: \`${IMAGE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  scan:
+    name: scan (Trivy)
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read # sparse checkout of .trivyignore.yaml from main
+      packages: read # pull the image if the package is private
+    steps:
+      # Waivers come from main (as in server-release and nightly-security), so a waiver merged
+      # after T was released applies.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: .trivyignore.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Scan the pushed image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ needs.build.outputs.image }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
+          format: table
+
+  smoke:
+    name: smoke (image on the runner)
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    env:
+      COMPOSE_FILE: deploy/compose.yaml:deploy/compose.ci.yaml
+      PTTD_IMAGE: ptt/pttd:ci
+      PTT_DOMAIN: ptt.example.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.base_tag }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/docker-daemon-prod
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull the pushed image by digest
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          docker tag "$IMAGE" ptt/pttd:ci
+          docker logout ghcr.io
+
+      - uses: ./.github/actions/compose-smoke
+
+      - name: The stack ran the pushed image
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          want="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+          got="$(docker inspect "$(docker compose ps -q pttd)" --format '{{.Image}}')"
+          if [ "$want" != "$got" ]; then
+            echo "::error::pttd ran $got, not the pushed image $want."
+            exit 1
+          fi
+          echo "ok    pttd ran $IMAGE"
+
+      - name: Container logs
+        if: failure()
+        run: docker compose logs --no-color --timestamps || true
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v --timeout 30 || true
+
+  sign:
+    name: SBOM and signature
+    needs: [resolve, build, scan, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: write # push the signature and the SBOM attestation
+      id-token: write # keyless signing (Fulcio certificate for this workflow's identity)
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ needs.build.outputs.image }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ github.token }}
+          syft-version: ${{ env.SYFT_VERSION }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/pttd.spdx.json
+          artifact-name: pttd-${{ needs.resolve.outputs.ghcr_tag }}.spdx.json
+          upload-artifact: true
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Sign the image and attach the SBOM
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMAGE"
+          cosign attest --yes --type spdxjson --predicate "$RUNNER_TEMP/pttd.spdx.json" "$IMAGE"
+
+      - name: Verify the signature and the SBOM attestation
+        run: |
+          set -euo pipefail
+          # This workflow on main (docs/operations.md, "weekly-maintenance"). server-release's
+          # check accepts this identity too.
+          server_re="${GITHUB_SERVER_URL//./\\.}"
+          repo_re="${GITHUB_REPOSITORY//./\\.}"
+          identity="^${server_re}/${repo_re}/\.github/workflows/weekly-maintenance\.yml@refs/heads/main$"
+          issuer="https://token.actions.githubusercontent.com"
+          cosign verify "$IMAGE" \
+            --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" > /dev/null
+          cosign verify-attestation "$IMAGE" --type spdxjson \
+            --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" > /dev/null
+          echo "ok    signature and SBOM attestation verify"
+
+      # The GHCR tag (<T>-maint.<YYYYMMDD>; OCI tags cannot contain +) points at exactly the digest
+      # that passed scan, smoke test, and signing. The manifest is copied byte for byte.
+      - name: Tag the image
+        env:
+          REPO: ${{ needs.resolve.outputs.repo }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          GHCR_TAG: ${{ needs.resolve.outputs.ghcr_tag }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          name="${REPO#ghcr.io/}"
+          token="$(curl -fsS -u "${GITHUB_ACTOR}:${GHCR_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${name}:pull,push" | jq -r .token)"
+          echo "::add-mask::$token"
+          manifest="$RUNNER_TEMP/manifest.json"
+          accept="application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
+          curl -fsS -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+            -o "$manifest" "https://ghcr.io/v2/${name}/manifests/${DIGEST}"
+          if [ "sha256:$(sha256sum < "$manifest" | cut -d' ' -f1)" != "$DIGEST" ]; then
+            echo "::error::The registry returned a manifest that does not match ${DIGEST}."
+            exit 1
+          fi
+          media_type="$(jq -r '.mediaType' "$manifest")"
+          curl -fsS -X PUT -H "Authorization: Bearer ${token}" -H "Content-Type: ${media_type}" \
+            --data-binary "@${manifest}" "https://ghcr.io/v2/${name}/manifests/${GHCR_TAG}" -o /dev/null
+          tagged="$(curl -fsS -I -H "Authorization: Bearer ${token}" -H "Accept: ${accept}" \
+            "https://ghcr.io/v2/${name}/manifests/${GHCR_TAG}" | tr -d '\r' |
+            awk -F': ' 'tolower($1) == "docker-content-digest" { print $2 }')"
+          if [ "$tagged" != "$DIGEST" ]; then
+            echo "::error::${REPO}:${GHCR_TAG} resolves to '${tagged}', not ${DIGEST}."
+            exit 1
+          fi
+          echo "${REPO}:${GHCR_TAG} -> ${DIGEST}"
+          echo "Tag: \`${REPO}:${GHCR_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # deploy-prod.yml: the maintenance environment (no reviewers, main only; ADR 0012), the
+  # deploy-production concurrency group, the automatic rollback, and the deployed tag.
+  deploy:
+    name: deploy
+    needs: [resolve, build, scan, smoke, sign]
+    permissions:
+      contents: read
+      packages: write # the deployed tag; the deploy job itself keeps packages: read
+    uses: ./.github/workflows/deploy-prod.yml
+    with:
+      image: ${{ needs.build.outputs.image }}
+      tag: ${{ needs.resolve.outputs.base_tag }}
+      environment: maintenance
+
+  ping:
+    name: ping ptt-weekly
+    needs: [gate, resolve, build, scan, smoke, sign, deploy]
+    # A skipped run (the other DST cron) pings nothing; everything else pings, even when a job
+    # before it failed.
+    if: always() && needs.gate.outputs.run != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # the ping script, from main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Ping Healthchecks.io
+        env:
+          HC_PING_KEY: ${{ secrets.HC_PING_KEY }}
+          GATE: ${{ needs.gate.result }}
+          RESOLVE: ${{ needs.resolve.result }}
+          BUILD: ${{ needs.build.result }}
+          SCAN: ${{ needs.scan.result }}
+          SMOKE: ${{ needs.smoke.result }}
+          SIGN: ${{ needs.sign.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          ROLLED_BACK: ${{ needs.deploy.outputs.rolled_back }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          failed=""
+          for job in gate resolve build scan smoke sign deploy; do
+            result="${job^^}"
+            if [ "${!result}" != success ]; then
+              failed="${failed:+$failed, }${job} (${!result})"
+            fi
+          done
+          if [ -z "$failed" ]; then
+            .github/scripts/hc-ping.sh ptt-weekly ok "weekly-maintenance ${VERSION} deployed. ${RUN_URL}"
+          else
+            msg="weekly-maintenance failed: ${failed}."
+            if [ "$ROLLED_BACK" = true ]; then
+              msg="${msg} The deploy was rolled back; production runs the previous image."
+            fi
+            .github/scripts/hc-ping.sh ptt-weekly fail "${msg} ${RUN_URL}"
+            echo "::error::${msg}"
+            exit 1
+          fi
