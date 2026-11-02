@@ -837,6 +837,29 @@ class TalkViewModelTest {
     }
 
     @Test
+    fun aClipModePressChirpsAtOnce() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.talk.events.emit(TalkEvent.RecordingClip)
+        runCurrent()
+        assertEquals(listOf(Cue.GO), l.cues.played)
+    }
+
+    @Test
+    fun clipModeFollowsTheSession() = runTest {
+        val l = receiverLive()
+        val vm = l.rig.vm
+        l.talk.state.value = conversation().copy(clipMode = true, protocol2 = true)
+        runCurrent()
+        assertTrue(vm.live.value.clipMode)
+        assertTrue("talk works in clip mode", vm.live.value.talkEnabled)
+        l.talk.state.value = conversation().copy(clipMode = false, protocol2 = true)
+        runCurrent()
+        assertFalse(vm.live.value.clipMode)
+    }
+
+    @Test
     fun aFloorYouReleasedAndUnrelatedEventsPlayNoCue() = runTest {
         val l = receiverLive()
         l.talk.state.value = conversation()

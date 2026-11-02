@@ -12,18 +12,25 @@ import com.example.ptt.crypto.FrameSealer
  *
  * A [protocol2] transmission survives the loss of its floor ([onFloorLost]) and of its socket ([onSocketLost]); a
  * protocol-1 one ends with either (milestone 4).
+ *
+ * A clip-mode transmission (section 13.9) is made with the [clipSealer] of its request: it captures and seals from the
+ * press, and nothing of it is handed to the socket before the grant (section 12.4 rule 2).
  */
-class TalkerTransmission(val id: String, val protocol2: Boolean) {
-    private var sealer: FrameSealer? = null
+class TalkerTransmission(val id: String, val protocol2: Boolean, clipSealer: FrameSealer? = null) {
+    private var sealer: FrameSealer? = clipSealer
 
-    /** The grant answered the request: frames can be sealed and sent. */
-    val granted: Boolean get() = sealer != null
+    /** Captured from the press, sent from the grant (section 13.9); a live one captures from the grant. */
+    val clip: Boolean = clipSealer != null
+
+    /** The grant answered the request (or a `resume_from` showed the server granted it): frames may be sent. */
+    var granted = false
+        private set
 
     /** It outlives the loss of its floor and of its socket (a granted protocol-2 transmission, section 13.6). */
     val resumable: Boolean get() = protocol2 && granted
 
     /** Frames are being captured into the buffer (the button is held, the cap not reached). */
-    var capturing = false
+    var capturing = clip
         private set
 
     /** The seq of the next frame to hand to the socket. */
@@ -47,8 +54,12 @@ class TalkerTransmission(val id: String, val protocol2: Boolean) {
     /** How many frames have been sealed. */
     val sealed: Int get() = sealer?.sealedCount ?: 0
 
-    /** Still capturing, or not everything (frames, then `floor_release`) is handed to the socket yet. */
-    val sending: Boolean get() = granted && (capturing || next < sealed || !releaseHanded || awaitingResume)
+    /**
+     * Still capturing, or not everything (frames, then `floor_release`) is handed to the socket yet. A clip-mode
+     * transmission is sending from its press: its buffer waits for the grant.
+     */
+    val sending: Boolean
+        get() = capturing || ((granted || clip) && (next < sealed || !releaseHanded || awaitingResume))
 
     /** The frame at [next] is a backlog frame, not the one just captured (the 16 KB rule applies to it). */
     val backlog: Boolean get() = !(capturing && next == sealed - 1)
@@ -59,10 +70,16 @@ class TalkerTransmission(val id: String, val protocol2: Boolean) {
     /** The server may lack frames of it: some were sealed beyond what a `resume_from` vouched for. */
     val mayLackFrames: Boolean get() = sealed - 1 > confirmed
 
-    /** The grant: capture starts (the request was still wanted, or the grant would have been released). */
+    /**
+     * The grant. A live transmission starts capturing with [s] (the request was still wanted, or the grant would have
+     * been released); a clip-mode one keeps its own sealer and capture, which may have ended before the grant.
+     */
     fun onGranted(s: FrameSealer) {
-        sealer = s
-        capturing = true
+        if (sealer == null) {
+            sealer = s
+            capturing = true
+        }
+        granted = true
         floorHeld = true
     }
 
@@ -85,7 +102,7 @@ class TalkerTransmission(val id: String, val protocol2: Boolean) {
     }
 
     /** The next frame to hand to the socket (the stored sealed bytes), or null when none may go now. */
-    fun nextFrame(): ByteArray? = if (awaitingResume || next >= sealed) null else sealer?.stored(next)
+    fun nextFrame(): ByteArray? = if (!granted || awaitingResume || next >= sealed) null else sealer?.stored(next)
 
     /** The frame from [nextFrame] was handed to the socket. */
     fun handed() {
@@ -110,9 +127,11 @@ class TalkerTransmission(val id: String, val protocol2: Boolean) {
 
     /**
      * `resume_from {last_seq}`: send from `last_seq + 1`. A lower value than expected only resends the same bytes;
-     * a value past what was sealed (a lying server) is treated as everything sealed.
+     * a value past what was sealed (a lying server) is treated as everything sealed. The server holds only granted
+     * transmissions, so this also stands for a grant that was lost with the old socket.
      */
     fun onResumeFrom(lastSeq: Int) {
+        granted = true
         awaitingResume = false
         next = (lastSeq + 1).coerceIn(0, sealed)
         confirmed = maxOf(confirmed, minOf(lastSeq, sealed - 1))

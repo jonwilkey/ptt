@@ -13,6 +13,7 @@ import com.example.ptt.net.ClientMessage
 import com.example.ptt.net.CloseReaction
 import com.example.ptt.net.DeviceTokenStore
 import com.example.ptt.net.ReleaseReason
+import com.example.ptt.net.RttSample
 import com.example.ptt.net.ServerMessage
 import com.example.ptt.net.SessionEndReason
 import com.example.ptt.net.SocketEvent
@@ -139,7 +140,12 @@ data class TalkSessionState(
     val capturing: Boolean = false,
     /** An own transmission is still being captured or sent: nothing plays meanwhile (section 13.8). */
     val sending: Boolean = false,
-    val ownNotice: OwnNotice = OwnNotice.NONE
+    val ownNotice: OwnNotice = OwnNotice.NONE,
+    /**
+     * Clip mode (section 13.9, protocol 2 only): the next press records at once and sends on release, and an incoming
+     * live transmission is held and played whole.
+     */
+    val clipMode: Boolean = false
 )
 
 /** What the player learns from the session, in socket order ([TalkSessionController.incoming]). */
@@ -163,8 +169,11 @@ sealed interface TalkEvent {
 
     data object PeerLeft : TalkEvent
 
-    /** This phone's request was granted: capture may start (`sendOpus` now works). */
+    /** This phone's request was granted: capture may start (`sendOpus` now works). Not sent for a clip-mode one. */
     data object FloorGrantedToYou : TalkEvent
+
+    /** A clip-mode press: capture starts now, before the grant (section 13.9). */
+    data object RecordingClip : TalkEvent
 
     data object PeerStartedTalking : TalkEvent
 
@@ -335,9 +344,10 @@ class TalkSessionController(
 
     /**
      * Seals one 20 ms Opus packet into the own transmission's buffer and sends it as a binary frame as soon as the
-     * pacing allows (section 13.6). False (and nothing kept) when this phone is not capturing a granted transmission;
-     * on protocol 1 also when the frame could not go out. A sealer that refuses, or the 3000th frame, stops the
-     * capture ([TalkEvent.StopCapture]); the caller never reseals or builds its own sealer.
+     * pacing allows (section 13.6), never before the grant. False (and nothing kept) when this phone is not capturing
+     * its own transmission (a granted one, or a clip-mode one from its press); on protocol 1 also when the frame could
+     * not go out. A sealer that refuses, or the 3000th frame, stops the capture ([TalkEvent.StopCapture]); the caller
+     * never reseals or builds its own sealer.
      */
     fun sendOpus(packet: ByteArray): Boolean = run?.sendOpus(packet) ?: false
 
@@ -387,8 +397,12 @@ class TalkSessionController(
         private var pendingPress = false
         private var resumeSent = false
 
-        /** The last [OwnNotice] about a finished transmission; cleared by the next press. */
+        /** The last [OwnNotice] about a finished transmission; cleared by the next press, or the peer's return. */
         private var lastNotice = OwnNotice.NONE
+        private val clipMode = ClipModeDetector()
+
+        /** A socket of this Run has joined: every later join is a reconnect (section 13.9). */
+        private var joinedOnce = false
         private val pacer = SendPacer()
         private var drainJob: Job? = null
 
@@ -590,7 +604,7 @@ class TalkSessionController(
                 when (event) {
                     is SocketEvent.Ready -> {
                         protocol2 = event.protocol >= PROTOCOL_CLIP
-                        mutableState.update { it.copy(protocol2 = protocol2) }
+                        mutableState.update { it.copy(protocol2 = protocol2, clipMode = protocol2 && clipMode.on) }
                         if (!protocol2) synchronized(audioLock) { own?.let(::giveUp) }
                         readySince = nowMs()
                         sendJoin(s)
@@ -600,12 +614,7 @@ class TalkSessionController(
 
                     is SocketEvent.Frame -> if (!ended) onFrame(s, event.bytes)
 
-                    is SocketEvent.Rtt -> {
-                        mutableState.update { it.copy(rttMillis = event.millis) }
-                        // Any pong after the join's page_state answers a ping sent after the join, so the whole
-                        // snapshot is in (the server handles a socket's messages in order, section 11.8).
-                        if (joined) withRule { rule, _ -> rule.onRejoinSettled() }
-                    }
+                    is SocketEvent.Rtt -> rtt(event.sample)
 
                     is SocketEvent.Closed -> {
                         socketLost()
@@ -614,6 +623,20 @@ class TalkSessionController(
                 }
             }
             return Pumped(closed, readySince)
+        }
+
+        private fun rtt(sample: RttSample) {
+            if (protocol2 && joined) clipMode.onSample(sample)
+            mutableState.update { it.copy(rttMillis = sample.millis, clipMode = protocol2 && clipMode.on) }
+        }
+
+        /**
+         * Any pong after the join's page_state answers a ping sent after the join, so the whole snapshot is in (the
+         * server handles a socket's messages in order, section 11.8), however late it came and whether or not it was
+         * an RTT sample.
+         */
+        private fun pong() {
+            if (joined) withRule { rule, _ -> rule.onRejoinSettled() }
         }
 
         /** After every successful join of its own page, on a protocol-2 socket (section 13.7); no reply. */
@@ -686,9 +709,11 @@ class TalkSessionController(
         private fun ownSocketLost(): OwnLoss {
             val t = own
             if (t != null && t.protocol2) {
-                audio?.onSocketClosed(keepOwn = t.granted)
+                // A clip-mode request may have been granted unseen: `resume` tells (section 13.6).
+                val keep = t.granted || t.clip
+                audio?.onSocketClosed(keepOwn = keep)
                 t.onSocketLost()
-                if (t.granted) return OwnLoss.NONE
+                if (keep) return OwnLoss.NONE
             } else {
                 audio?.onSocketClosed()
                 t?.let(::freeOwn)
@@ -719,7 +744,8 @@ class TalkSessionController(
                 is ServerMessage.Clip -> if (protocol2) clip(s, m)
                 is ServerMessage.ListenerGap -> if (protocol2) listenerGap(m.transmissionId)
                 is ServerMessage.ResumeFrom -> if (protocol2) resumeFrom(s, m.lastSeq)
-                is ServerMessage.Hello, is ServerMessage.Pong -> Unit
+                is ServerMessage.Pong -> pong()
+                is ServerMessage.Hello -> Unit
             }
         }
 
@@ -729,7 +755,13 @@ class TalkSessionController(
                 joined = true
                 s.joined()
                 joinRetry?.cancel()
-                mutableState.update { it.copy(connection = TalkConnection.LIVE) }
+                // A reconnect: an earlier socket of this session closed. A close after `session_end`, or 4409, ends
+                // the Run, so it is never followed by a join here.
+                if (joinedOnce && protocol2) clipMode.onReconnect(nowMs())
+                joinedOnce = true
+                mutableState.update {
+                    it.copy(connection = TalkConnection.LIVE, clipMode = protocol2 && clipMode.on)
+                }
                 sendSenderKey(s)
                 synchronized(audioLock) { afterJoin(s) }
             }
@@ -749,6 +781,11 @@ class TalkSessionController(
         private fun peerJoined(device: String) {
             if (audio?.onPeerJoined(device) != true) return
             peerDevice = device
+            synchronized(audioLock) {
+                // They are back, so what they did not hear live is playing for them now.
+                if (lastNotice == OwnNotice.NOT_HEARD_LIVE) lastNotice = OwnNotice.NONE
+                publishOwn()
+            }
             mutableState.update { it.copy(peerPresent = true) }
             // Also the join snapshot's: a peer already there when this phone joined, or replayed after a reconnect
             // (which cannot restart the window).
@@ -773,15 +810,23 @@ class TalkSessionController(
                         return@synchronized
                     }
                     t.onGranted(outcome.sealer)
-                    floorId = m.transmissionId
-                    mutableState.update { it.copy(floor = TalkFloor.YOU) }
+                    // A clip-mode transmission let go before its grant is not this phone talking: it only sends.
+                    if (t.capturing) {
+                        floorId = m.transmissionId
+                        mutableState.update { it.copy(floor = TalkFloor.YOU) }
+                    }
+                    sendBacklog()
                     publishOwn()
-                    mutableEvents.tryEmit(TalkEvent.FloorGrantedToYou)
+                    if (!t.clip) mutableEvents.tryEmit(TalkEvent.FloorGrantedToYou)
                 }
 
                 is GrantOutcome.SendRelease -> {
                     s.send(ClientMessage.FloorRelease(outcome.transmissionId))
-                    own?.takeIf { it.id == outcome.transmissionId && !it.granted }?.let(::freeOwn)
+                    own?.takeIf { it.id == outcome.transmissionId && !it.granted }?.let {
+                        // A clip-mode request already holds what the user said.
+                        if (it.mayLackFrames) lastNotice = OwnNotice.NOT_SENT
+                        freeOwn(it)
+                    }
                     // Section 12.4 rule 4 refused the grant of a request the user still holds: that is "busy".
                     if (outcome.refused) refusedBusy()
                 }
@@ -811,8 +856,12 @@ class TalkSessionController(
         /** `floor_busy` or `error` for the request: its buffer is discarded unsent, the id never used again. */
         private fun failOutstanding() {
             val t = own?.takeIf { !it.granted && !it.awaitingResume } ?: return
+            val capturing = t.capturing
+            // A clip-mode request already holds what the user said.
+            if (t.mayLackFrames) lastNotice = OwnNotice.NOT_SENT
             audio?.onRequestFailed(t.id)
             freeOwn(t)
+            if (capturing) mutableEvents.tryEmit(TalkEvent.StopCapture)
         }
 
         @Suppress("ReturnCount")
@@ -969,34 +1018,51 @@ class TalkSessionController(
             pressed
         }
 
-        /** Sends the `floor_request` of a new own transmission. Under [audioLock]. */
+        /**
+         * Sends the `floor_request` of a new own transmission, in the mode of this moment (section 13.9): in clip mode
+         * capture starts now, sealed under the new id, and nothing goes out before the grant. Under [audioLock].
+         */
         @Suppress("ReturnCount")
         private fun request(): Boolean {
             val s = socket
             val a = audio
             if (!canRequest() || s == null || a == null) return false
-            val id = try {
+            val clip = mutableState.value.clipMode
+            val clipSealer = try {
+                if (clip) a.requestClipFloor() else null
+            } catch (_: ProtocolException) {
+                return false
+            }
+            val id = clipSealer?.transmissionId ?: try {
                 a.requestFloor()
             } catch (_: ProtocolException) {
                 return false
             }
-            // Live mode: `clip: false` on protocol 2 (section 13.9); the key is not allowed on protocol 1.
-            if (!s.send(ClientMessage.FloorRequest(id, clip = if (protocol2) false else null))) {
+            // The `clip` key is not allowed on protocol 1.
+            if (!s.send(ClientMessage.FloorRequest(id, clip = if (protocol2) clip else null))) {
                 a.onRequestFailed(id)
+                a.onOwnClosed(id)
                 return false
             }
-            own = TalkerTransmission(id, protocol2)
+            own = TalkerTransmission(id, protocol2, clipSealer)
             mutableState.update { if (it.floor == TalkFloor.BUSY) it.copy(floor = TalkFloor.IDLE) else it }
             publishOwn()
+            if (clip) mutableEvents.tryEmit(TalkEvent.RecordingClip)
             return true
         }
 
         fun release() = synchronized(audioLock) {
             pressed = false
             pendingPress = false
-            audio?.buttonReleased()
-            // A request still awaiting its grant needs nothing here: the floor answers that grant with a release.
-            own?.takeIf { it.granted && it.capturing }?.let(::finishCapture)
+            val t = own
+            // A live request still awaiting its grant needs nothing more: the floor answers that grant with a release.
+            // A clip-mode one keeps wanting its grant, which sends what it captured.
+            if (t == null || !t.clip || t.granted) audio?.buttonReleased()
+            when {
+                t == null || !t.capturing -> Unit
+                t.granted -> finishCapture(t)
+                else -> t.stopCapture()
+            }
             publishOwn()
         }
 
@@ -1097,7 +1163,7 @@ class TalkSessionController(
         private fun resumeFrom(s: TalkSocket, lastSeq: Int) = synchronized(audioLock) {
             val t = own?.takeIf { resumeSent && it.awaitingResume } ?: return@synchronized
             resumeSent = false
-            if (!t.granted) {
+            if (!t.granted && !t.clip) {
                 // Granted while the socket was down and never seen here: nothing was captured, so it ends empty.
                 s.send(ClientMessage.FloorRelease(t.id))
                 freeOwn(t)
@@ -1116,7 +1182,7 @@ class TalkSessionController(
 
         /** The own transmission cannot be finished: it is freed, "Not sent" if the server may lack frames of it. */
         private fun giveUp(t: TalkerTransmission) {
-            if (t.granted && t.mayLackFrames) lastNotice = OwnNotice.NOT_SENT
+            if (t.mayLackFrames) lastNotice = OwnNotice.NOT_SENT
             val capturing = t.capturing
             if (capturing) pressed = false
             freeOwn(t)
@@ -1141,10 +1207,13 @@ class TalkSessionController(
             if (pressed && !request()) pressed = false
         }
 
-        /** Publishes the own transmission's part of the state. Under [audioLock]. */
+        /**
+         * Publishes the own transmission's part of the state. "Sending as a clip": a live one that lost its floor, a
+         * clip-mode one once it is let go and until everything is handed. Under [audioLock].
+         */
         private fun publishOwn() {
             val t = own
-            val asClip = t != null && t.sending && !t.floorHeld
+            val asClip = t != null && t.sending && if (t.clip) !t.capturing else !t.floorHeld
             mutableState.update {
                 if (run !== this) {
                     it

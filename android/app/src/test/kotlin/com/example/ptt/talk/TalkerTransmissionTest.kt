@@ -32,6 +32,52 @@ class TalkerTransmissionTest {
         }
     }
 
+    private fun clip(): TalkerTransmission = TalkerTransmission(TID, true, FrameSealer(TID, ByteArray(32) { 3 }))
+
+    @Test(timeout = 60_000)
+    fun aClipModeTransmissionSealsFromThePressAndHandsNothingBeforeTheGrant() {
+        val t = clip()
+        assertTrue(t.capturing)
+        assertTrue("nothing plays while it records", t.sending)
+        repeat(3) { assertTrue(t.seal(ByteArray(20) { 7 })) }
+        assertNull(t.nextFrame())
+        assertFalse(t.releaseDue)
+        t.stopCapture()
+        assertTrue("its buffer still waits for the grant", t.sending)
+        assertNull(t.nextFrame())
+        assertFalse(t.releaseDue)
+        t.onGranted(FrameSealer(TID, ByteArray(32) { 9 }))
+        assertFalse("the grant does not restart a capture that ended", t.capturing)
+        assertEquals(3, t.drain().size)
+        assertTrue(t.releaseDue)
+        t.onReleaseHanded()
+        assertFalse(t.sending)
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModeGrantKeepsTheSealerOfThePress() {
+        val t = clip()
+        assertTrue(t.seal(ByteArray(20) { 7 }))
+        t.onGranted(FrameSealer(TID, ByteArray(32) { 9 }))
+        assertTrue(t.capturing)
+        assertTrue(t.seal(ByteArray(20) { 8 }))
+        assertEquals(2, t.drain().size)
+        assertEquals(2, t.sealed)
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipModeRequestLostWithItsSocketIsSentAfterTheResumeFrom() {
+        val t = clip()
+        repeat(2) { assertTrue(t.seal(ByteArray(20) { 7 })) }
+        t.onSocketLost()
+        assertTrue(t.capturing)
+        assertTrue(t.seal(ByteArray(20) { 7 }))
+        assertNull(t.nextFrame())
+        t.onResumeFrom(-1)
+        assertTrue(t.granted)
+        assertEquals(3, t.drain().size)
+    }
+
     @Test(timeout = 60_000)
     fun aResendIsTheSameBytesAndNothingIsSealedAgain() {
         val t = granted()

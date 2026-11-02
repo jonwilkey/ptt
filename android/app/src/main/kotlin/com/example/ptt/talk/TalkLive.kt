@@ -51,6 +51,8 @@ data class TalkLive(
     val active: Boolean = false,
     val connection: TalkConnection = TalkConnection.IDLE,
     val quality: LinkQuality? = null,
+    /** Clip mode (docs/protocol.md section 13.9): a press records and sends on release. Shown while live. */
+    val clipMode: Boolean = false,
     val speaker: Speaker = Speaker.NONE,
     /** Connected, but the other phone is not in the conversation. */
     val waitingForPeer: Boolean = false,
@@ -78,6 +80,7 @@ fun deriveLive(screen: TalkState, session: TalkSessionState, eligible: Boolean, 
         active = active,
         connection = session.connection,
         quality = if (live) LinkQuality.of(session.rttMillis) else null,
+        clipMode = session.clipMode,
         // Still capturing after the floor went (protocol 2) is still this phone talking.
         speaker = if (session.capturing) Speaker.YOU else Speaker.of(session.floor),
         waitingForPeer = conversation && !session.peerPresent,

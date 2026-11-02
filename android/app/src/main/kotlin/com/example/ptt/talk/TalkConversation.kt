@@ -49,7 +49,10 @@ internal fun Conversation(
 
         Speaker.NONE -> Unit
     }
-    if (live.waitingForPeer) Text(stringResource(R.string.talk_waiting_for, who))
+    // With talk enabled the peer being away does not stop anyone talking (protocol 2): it plays when they are back.
+    if (live.waitingForPeer) {
+        Text(stringResource(if (live.talkEnabled) R.string.talk_peer_away else R.string.talk_waiting_for, who))
+    }
     if (live.firstTalkerLocked) Text(stringResource(R.string.talk_speaks_first, who))
     captureLine(live.capture)?.let { Text(stringResource(it)) }
     ownLine(live.ownNotice, who)?.let { Text(it) }
@@ -66,9 +69,17 @@ private fun connectionLine(live: TalkLive): String? = when (live.connection) {
 
     TalkConnection.UNAVAILABLE -> stringResource(R.string.talk_live_talk_unavailable)
 
-    TalkConnection.LIVE -> when (live.quality) {
-        null -> stringResource(R.string.talk_live)
-        else -> stringResource(R.string.talk_live_quality, stringResource(live.quality.label()))
+    TalkConnection.LIVE -> {
+        val mode = if (live.clipMode) R.string.talk_clip_mode else R.string.talk_live
+        when (live.quality) {
+            null -> stringResource(mode)
+
+            else -> stringResource(
+                R.string.talk_mode_quality,
+                stringResource(mode),
+                stringResource(live.quality.label())
+            )
+        }
     }
 }
 

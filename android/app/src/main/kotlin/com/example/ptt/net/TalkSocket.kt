@@ -140,8 +140,11 @@ sealed interface SocketEvent {
 
     class Frame(val bytes: ByteArray) : SocketEvent
 
-    /** A round-trip time measured from a `pong`. */
-    data class Rtt(val millis: Long) : SocketEvent
+    /**
+     * One RTT sample (section 13.9): a `pong`, or on a joined protocol-2 socket a `ping` left unanswered for 800 ms.
+     * A `pong` that comes after its ping's timeout is no sample; every `pong` is also delivered as a [Message].
+     */
+    data class Rtt(val sample: RttSample) : SocketEvent
 
     /** The last event of a socket. */
     data class Closed(val reaction: CloseReaction, val code: Int?, val httpStatus: Int?) : SocketEvent
@@ -264,12 +267,6 @@ class TalkSocket(
     }
 
     /**
-     * The RTT samples of this socket (section 13.9): every `pong`, and in protocol 2 while joined every ping left
-     * unanswered for 800 ms. A snapshot, oldest first.
-     */
-    val rttSamples: List<RttSample> get() = synchronized(rtt) { rtt.samples }
-
-    /**
      * The join was acknowledged. On a protocol-2 socket the client now pings every [CLIP_PING_INTERVAL_MS] and
      * treats [CLIP_DEAD_AFTER_MS] without any server message as a dead socket (section 13.9); otherwise nothing
      * changes.
@@ -282,7 +279,7 @@ class TalkSocket(
             pinger = scope.launch {
                 while (true) {
                     delay(RttSamples.TIMEOUT_MS)
-                    synchronized(rtt) { rtt.expire(nowMs()) }
+                    synchronized(rtt) { rtt.expire(nowMs()) }.forEach { channel.trySend(SocketEvent.Rtt(it)) }
                     delay(CLIP_PING_INTERVAL_MS - RttSamples.TIMEOUT_MS)
                     send(ClientMessage.Ping(nowMs()))
                 }
@@ -364,9 +361,7 @@ class TalkSocket(
             }
             if (!ready) return
             if (message is ServerMessage.Pong) {
-                synchronized(rtt) { rtt.pong(message.t, nowMs()) }
-                channel.trySend(SocketEvent.Rtt((nowMs() - message.t).coerceAtLeast(0)))
-                return
+                synchronized(rtt) { rtt.pong(message.t, nowMs()) }?.let { channel.trySend(SocketEvent.Rtt(it)) }
             }
             channel.trySend(SocketEvent.Message(message))
         }

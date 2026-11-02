@@ -74,14 +74,14 @@ class ControllerLink(private val controller: TalkSessionController) : TalkLink {
 /**
  * The audio of one live-talk session, owned by [com.example.ptt.talk.TalkService] (created when it starts for a page,
  * [close]d when it stops, so nothing records without the service). It watches the session and runs the pieces:
- * - capture ([Recorder], one per press): pre-warmed by [press], started by the floor being granted to this phone,
- *   stopped by [release], StopCapture, FloorReleased(yours), SessionEnded, the controller no longer capturing
- *   (on protocol 2 that outlives the floor and a socket drop), `sendOpus` refusing, the 59.5 s cap (which also gives
- *   the floor back), or losing audio focus;
+ * - capture ([Recorder], one per press): pre-warmed by [press], started by FloorGrantedToYou in live mode and by
+ *   RecordingClip in clip mode (docs/protocol.md section 13.9), stopped by [release], StopCapture,
+ *   FloorReleased(yours), SessionEnded, the controller no longer capturing (on protocol 2 that outlives the floor
+ *   and a socket drop), `sendOpus` refusing, the 59.5 s cap (which also gives the floor back), or losing audio focus;
  * - playback ([Player]): fed by a collector that only enqueues; the floor leaving PEER_TALKING (or the connection
  *   leaving LIVE) lets the buffer play out, and the session ending flushes it. While this phone holds the floor,
  *   captures, or still sends its own transmission, clips and newly granted transmissions wait (docs/protocol.md
- *   section 13.8);
+ *   section 13.8). In clip mode a live transmission that starts is held and played whole (section 13.9);
  * - routing ([AudioRouting]): active from the start of the conversation until the session ends.
  *
  * 14g wires the hold-to-talk button to [press] and [release]. Both are cheap and safe from the main thread.
@@ -99,7 +99,8 @@ class TalkAudio(
     sinkFactory: (Int) -> AudioSink,
     platform: AudioPlatform,
     private val clock: () -> Long,
-    private val dispatcher: CoroutineDispatcher
+    private val dispatcher: CoroutineDispatcher,
+    private val prewarmTimeoutMs: Long = Recorder.PREWARM_TIMEOUT_MS
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val player = Player(decoderFactory, sinkFactory, clock)
@@ -183,6 +184,7 @@ class TalkAudio(
         if (peerStoppedTalking(before, s)) player.release()
         val held = playbackHeld(s)
         if (held != playbackHeld(before)) player.busy(held)
+        if (s.clipMode != before.clipMode) player.holdLive(s.clipMode)
         if (s.floor == TalkFloor.PEER_TALKING && before.floor != TalkFloor.PEER_TALKING) routing.ensureFocus()
         if (captureOver(s, live)) stopRecorder()
     }
@@ -218,25 +220,29 @@ class TalkAudio(
     private fun onEvent(e: TalkEvent) {
         if (closed) return
         when (e) {
-            TalkEvent.FloorGrantedToYou -> grantedToYou()
+            TalkEvent.FloorGrantedToYou -> if (link.state.value.floor == TalkFloor.YOU) captureNow()
             is TalkEvent.FloorReleased -> if (e.yours) stopRecorder() else player.release()
             TalkEvent.StopCapture -> stopRecorder()
             TalkEvent.FloorBusy, TalkEvent.NoPeer -> stopRecorder()
             is TalkEvent.SessionEnded, TalkEvent.TalkUnavailable -> shutdown()
             TalkEvent.PeerJoined, TalkEvent.PeerLeft, TalkEvent.PeerStartedTalking -> Unit
+            TalkEvent.RecordingClip -> captureNow()
         }
     }
 
-    private fun grantedToYou() {
+    /**
+     * The controller started capturing for this phone: the grant in live mode, the press in clip mode. Records with
+     * the pre-warmed recorder, or a fresh one when that is gone (a repeated grant, a pre-warm that timed out or that a
+     * socket drop stopped while the press waited for the previous transmission). Once per event, so a microphone
+     * that failed is not reopened in a loop.
+     */
+    private fun captureNow() {
         val s = link.state.value
         if (closed || !mayCapture(s)) return
         val current = synchronized(lock) { recorder }
         when (current?.phase) {
             Recorder.Phase.PREWARM, Recorder.Phase.IDLE -> startCapture(current)
-
             Recorder.Phase.CAPTURING -> Unit
-
-            // a repeated grant
             Recorder.Phase.DONE, null -> swapRecorder()?.let(::startCapture)
         }
     }
@@ -246,15 +252,17 @@ class TalkAudio(
         r.start(clock())
     }
 
-    /** The floor is ours, the socket is up, and the state is this page's. */
+    /** The controller captures, the socket is up, and the state is this page's. */
     private fun mayCapture(s: TalkSessionState): Boolean =
-        s.pageId == pageId && s.floor == TalkFloor.YOU && s.connection == TalkConnection.LIVE
+        s.pageId == pageId && s.capturing && s.connection == TalkConnection.LIVE
 
     /** Replaces the recorder by a fresh one (stopping the old) and returns it, or null once closed. */
     private fun swapRecorder(): Recorder? {
         lateinit var fresh: Recorder
         fresh =
-            Recorder(link::sendOpus, sourceFactory, encoderFactory, clock) { reason -> recorderStopped(fresh, reason) }
+            Recorder(link::sendOpus, sourceFactory, encoderFactory, clock, prewarmTimeoutMs) { reason ->
+                recorderStopped(fresh, reason)
+            }
         val old = synchronized(lock) {
             if (closed) return null
             recorder.also { recorder = fresh }
