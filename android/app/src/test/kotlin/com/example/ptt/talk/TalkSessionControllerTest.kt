@@ -4,10 +4,12 @@ import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import com.example.ptt.crypto.AudioSession
 import com.example.ptt.crypto.GrantOutcome
+import com.example.ptt.crypto.SignedObject
 import com.example.ptt.data.OutboxKind
 import com.example.ptt.data.PageRole
 import com.example.ptt.data.PttDatabase
 import com.example.ptt.data.TestDb
+import com.example.ptt.net.ClientMessage
 import com.example.ptt.net.CloseReaction
 import com.example.ptt.net.FakeTalkAuth
 import com.example.ptt.net.FakeTalkTransport
@@ -16,6 +18,7 @@ import com.example.ptt.net.InMemoryDeviceTokenStore
 import com.example.ptt.net.OWN
 import com.example.ptt.net.PEER_DEVICE
 import com.example.ptt.net.SessionEndReason
+import com.example.ptt.net.TalkCodec
 import com.example.ptt.net.WS_TOKEN
 import com.example.ptt.net.WsPageState
 import com.example.ptt.net.serverHello
@@ -24,6 +27,7 @@ import com.example.ptt.push.SelfPages
 import com.example.ptt.push.SessionKeys
 import com.example.ptt.push.SocketPageEvents
 import java.time.Clock
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
@@ -37,6 +41,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -47,6 +52,7 @@ private const val PAGE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 private const val SESSION = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 private const val STRANGER = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 private val KEY = ByteArray(32) { (it + 1).toByte() }
+private val SENDER_KEY = SignedObject(ByteArray(210) { (it + 7).toByte() }, OWN, ByteArray(64) { 5 })
 
 private class FakeSink : SocketPageEvents {
     val states = mutableListOf<WsPageState>()
@@ -76,6 +82,8 @@ class TalkSessionControllerTest {
     private var serviceStops = 0
     private val stoppedPages = mutableListOf<String>()
     private val tokens = InMemoryDeviceTokenStore(WS_TOKEN, OWN)
+    private var recover: suspend (String) -> String? = { null }
+    private val recoveryCalls = mutableListOf<String>()
 
     @Before
     fun setUp() {
@@ -100,6 +108,10 @@ class TalkSessionControllerTest {
             sink,
             selfPages,
             { page ->
+                recoveryCalls += page
+                recover(page)
+            },
+            { page ->
                 serviceStops++
                 stoppedPages += page
             },
@@ -116,6 +128,7 @@ class TalkSessionControllerTest {
             if (withKey) {
                 keys.put(PAGE, KEY.copyOf())
                 keys.putPeers(PAGE, setOf(PEER_DEVICE, STRANGER))
+                keys.putSenderKey(PAGE, SENDER_KEY)
             }
         }
 
@@ -134,11 +147,11 @@ class TalkSessionControllerTest {
         fun ws(index: Int = 0): FakeWs = transport.sockets[index]
 
         /** Opens the page, connects the first socket and completes hello; leaves `join` sent. */
-        fun connect(index: Int = 0): FakeWs {
+        fun connect(index: Int = 0, protocol: Int = 1): FakeWs {
             test.testScheduler.runCurrent()
             val ws = ws(index)
             ws.serverOpen()
-            ws.serverText(serverHello())
+            ws.serverText(serverHello(protocol = protocol))
             test.testScheduler.runCurrent()
             return ws
         }
@@ -236,6 +249,212 @@ class TalkSessionControllerTest {
         runCurrent()
         assertTrue(transport.sockets.isEmpty())
         assertEquals(listOf(PAGE, PAGE), stoppedPages)
+    }
+
+    // ---- the sender key (protocol 2) ----
+
+    private fun FakeWs.sent() = types().filterNot { it == "ping" }
+
+    private val senderKeyText = TalkCodec.encode(ClientMessage.SenderKey(SENDER_KEY))
+
+    @Test(timeout = 60_000)
+    fun aProtocolTwoSenderSendsItsKeyAfterEveryJoin() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect(protocol = 2)
+        assertEquals("not before the join is acknowledged", listOf("hello", "join"), first.sent())
+        rig.joined(first)
+        assertEquals(listOf("hello", "join", "sender_key"), first.sent())
+        assertEquals(senderKeyText, first.texts.last())
+        first.serverText("""{"type":"page_state","page_id":"$PAGE","state":"answered"}""")
+        runCurrent()
+        assertEquals("once per join", 1, first.types().count { it == "sender_key" })
+        first.serverClose(4503)
+        runCurrent()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1, protocol = 2)
+        rig.joined(second)
+        assertEquals(listOf("hello", "join", "sender_key"), second.sent())
+        assertEquals(senderKeyText, second.texts.last())
+    }
+
+    @Test(timeout = 60_000)
+    fun aRefusedJoinSendsNoKeyUntilTheRetrySucceeds() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 2)
+        ws.serverText("""{"type":"error","code":"not_found"}""")
+        runCurrent()
+        assertFalse(ws.types().contains("sender_key"))
+        advanceTimeBy(TalkSessionController.JOIN_RETRY_MS)
+        rig.joined(ws)
+        assertEquals(1, ws.types().count { it == "sender_key" })
+    }
+
+    @Test(timeout = 60_000)
+    fun theAnswererNeverSendsASenderKey() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        keys.putSenderKey(PAGE, SENDER_KEY)
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws, state = "answered")
+        assertFalse(ws.types().contains("sender_key"))
+    }
+
+    @Test(timeout = 60_000)
+    fun aProtocolOneSocketGetsNoSenderKeyAndHelloAdvertisesOne() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 1)
+        rig.joined(ws)
+        assertEquals(listOf("hello", "join"), ws.sent())
+        assertTrue(ws.texts.first().contains("\"protocol\":1"))
+    }
+
+    @Test(timeout = 60_000)
+    fun aSocketThatReconnectsOnProtocolOneStopsSendingTheKey() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect(protocol = 2)
+        rig.joined(first)
+        first.serverClose(4503)
+        runCurrent()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1, protocol = 1)
+        rig.joined(second)
+        assertFalse(second.types().contains("sender_key"))
+    }
+
+    @Test(timeout = 60_000)
+    fun aSenderWithoutAKeyObjectSendsNothingMore() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        keys.clear(PAGE)
+        keys.put(PAGE, KEY.copyOf())
+        keys.putPeers(PAGE, setOf(PEER_DEVICE))
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 2)
+        rig.joined(ws)
+        assertFalse(ws.types().contains("sender_key"))
+    }
+
+    // ---- recovering the key after the process died ----
+
+    private fun recovering(sessionId: String = SESSION, peers: Set<String> = setOf(PEER_DEVICE)) {
+        recover = { page ->
+            keys.put(page, KEY.copyOf())
+            keys.putPeers(page, peers)
+            keys.putSenderKey(page, SENDER_KEY)
+            sessionId
+        }
+    }
+
+    @Test(timeout = 60_000)
+    fun aSenderWithoutTheKeyRecoversItAndJoinsWithTheEnvelopesSessionId() = runTest {
+        val rig = Rig(this)
+        rig.sender(withKey = false)
+        recovering(sessionId = STRANGER)
+        rig.controller.open(PAGE)
+        val ws = rig.connect(protocol = 2)
+        assertEquals(listOf(PAGE), recoveryCalls)
+        assertTrue(ws.lastOf("join").contains(STRANGER))
+        assertTrue(keys.has(PAGE))
+        rig.joined(ws)
+        assertEquals(senderKeyText, ws.texts.last())
+        assertEquals(TalkConnection.LIVE, rig.controller.state.value.connection)
+        assertEquals(1, rig.controller.audioSessionsBuilt)
+    }
+
+    @Test(timeout = 60_000)
+    fun endingThePageWhileTheRecoveryIsInFlightLeavesNoKeyBehind() = runTest {
+        val rig = Rig(this)
+        rig.sender(withKey = false)
+        val release = CompletableDeferred<Unit>()
+        recover = { page ->
+            release.await()
+            keys.put(page, KEY.copyOf())
+            keys.putPeers(page, setOf(PEER_DEVICE))
+            keys.putSenderKey(page, SENDER_KEY)
+            SESSION
+        }
+        rig.controller.open(PAGE)
+        runCurrent()
+        keys.clear(PAGE)
+        rig.repo.end(PAGE)
+        release.complete(Unit)
+        runCurrent()
+        assertFalse(keys.has(PAGE))
+        assertNull(keys.senderKey(PAGE))
+        assertTrue(keys.peers(PAGE).isEmpty())
+    }
+
+    @Test(timeout = 60_000)
+    fun aSenderThatStillHoldsTheKeyAsksNobody() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        recovering()
+        rig.controller.open(PAGE)
+        rig.connect()
+        assertTrue(recoveryCalls.isEmpty())
+    }
+
+    @Test(timeout = 60_000)
+    fun theAnswererNeverRecovers() = runTest {
+        val rig = Rig(this)
+        rig.receiver(withKey = false)
+        recovering()
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        runCurrent()
+        assertTrue(recoveryCalls.isEmpty())
+        assertEquals(TalkConnection.UNAVAILABLE, rig.controller.state.value.connection)
+    }
+
+    @Test(timeout = 60_000)
+    fun aFailedRecoveryLeavesNoKeyNoSocketAndTheRowToEnd() = runTest {
+        val rig = Rig(this)
+        rig.sender(withKey = false)
+        rig.controller.open(PAGE)
+        runCurrent()
+        advanceTimeBy(10 * 60_000)
+        assertEquals("one attempt, no retry loop", listOf(PAGE), recoveryCalls)
+        assertTrue(transport.sockets.isEmpty())
+        assertFalse(keys.has(PAGE))
+        assertEquals(TalkConnection.UNAVAILABLE, rig.controller.state.value.connection)
+        assertEquals("the page can still be ended", PAGE, rig.repo.current()?.pageId)
+        assertFalse(rig.controller.requestEnd(PAGE))
+        rig.controller.open(PAGE)
+        runCurrent()
+        assertEquals("a reopen does not try again", listOf(PAGE), recoveryCalls)
+    }
+
+    @Test(timeout = 60_000)
+    fun aRecoveryWithNoPeerToTalkToMakesTalkUnavailable() = runTest {
+        val rig = Rig(this)
+        rig.sender(withKey = false)
+        recovering(peers = emptySet())
+        rig.controller.open(PAGE)
+        runCurrent()
+        assertTrue(transport.sockets.isEmpty())
+        assertEquals(TalkConnection.UNAVAILABLE, rig.controller.state.value.connection)
+    }
+
+    @Test(timeout = 60_000)
+    fun aSelfPageNeverRecovers() = runTest {
+        val rig = Rig(this)
+        rig.sender(withKey = false)
+        selfPages.add(PAGE)
+        recovering()
+        rig.controller.open(PAGE)
+        runCurrent()
+        assertTrue(recoveryCalls.isEmpty())
+        assertTrue(transport.sockets.isEmpty())
     }
 
     @Test(timeout = 60_000)

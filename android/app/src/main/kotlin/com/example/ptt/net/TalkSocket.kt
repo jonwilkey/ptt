@@ -297,7 +297,7 @@ class TalkSocket(
                 if (ready) return
                 ready = true
                 helloTimeout?.cancel()
-                channel.trySend(SocketEvent.Ready(message.deviceId, minOf(message.protocol, TALK_PROTOCOL)))
+                channel.trySend(SocketEvent.Ready(message.deviceId, minOf(message.protocol, MAX_TALK_PROTOCOL)))
                 startPings()
                 return
             }

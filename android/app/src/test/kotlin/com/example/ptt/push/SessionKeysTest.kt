@@ -1,8 +1,10 @@
 package com.example.ptt.push
 
+import com.example.ptt.crypto.SignedObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -41,5 +43,20 @@ class SessionKeysTest {
         keys.clear("a")
         assertArrayEquals(ByteArray(32) { 5 }, copy)
         assertNull(keys.copy("a"))
+    }
+
+    @Test
+    fun theSenderKeyLivesAndDiesWithTheKey() {
+        val keys = SessionKeys()
+        val senderKey = SignedObject(byteArrayOf(1), "a", ByteArray(64))
+        keys.put("a", ByteArray(32) { 5 })
+        keys.putSenderKey("a", senderKey)
+        assertSame(senderKey, keys.senderKey("a"))
+        assertNull(keys.senderKey("b"))
+        keys.clear("a")
+        assertNull(keys.senderKey("a"))
+        keys.putSenderKey("c", senderKey)
+        keys.clearAll()
+        assertNull(keys.senderKey("c"))
     }
 }

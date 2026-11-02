@@ -188,6 +188,7 @@ class TalkSessionController(
     private val outcomes: Flow<OutboxOutcome>,
     private val pageEvents: SocketPageEvents,
     private val selfPages: SelfPages,
+    private val recovery: SenderKeyRecovery,
     private val service: TalkServiceControl,
     private val scope: CoroutineScope,
     private val nowMs: () -> Long,
@@ -327,6 +328,10 @@ class TalkSessionController(
         @Volatile
         private var joined = false
 
+        /** The current socket's `hello` reply was protocol 2 or higher (section 13.1). */
+        @Volatile
+        private var protocol2 = false
+
         @Volatile
         private var pressed = false
 
@@ -374,8 +379,15 @@ class TalkSessionController(
                 byStopNow = true
                 throw e
             } finally {
+                withContext(NonCancellable) { clearKeysOfAnOverPage() }
                 cleanup(byStopNow)
             }
+        }
+
+        /** Recovery may have put keys back after the page was ended; whatever exit the Run takes, they go. */
+        private suspend fun clearKeysOfAnOverPage() {
+            val row = activePage.current()?.takeIf { it.pageId == pageId }
+            if (row == null || row.state in OVER_STATES) sessionKeys.clear(pageId)
         }
 
         private fun stageOf(row: ActivePageEntity) = if (row.role == PageRole.RECEIVER || row.state == STATE_ANSWERED) {
@@ -385,22 +397,27 @@ class TalkSessionController(
         }
 
         @Suppress("ReturnCount")
-        private fun prepare(row: ActivePageEntity): Boolean {
+        private suspend fun prepare(row: ActivePageEntity): Boolean {
             val own = tokens.deviceId() ?: return false
+            var session = row.sessionId
+            if (row.role == PageRole.SENDER && !sessionKeys.has(pageId)) {
+                // The process died since the page was sent: ask the server for the sender's own copy.
+                session = recovery.recover(pageId) ?: return false
+            }
             val peers = sessionKeys.peers(pageId)
             val key = sessionKeys.copy(pageId) ?: return false
             return try {
                 audioSessionsBuilt++
                 role = row.role
-                sessionId = row.sessionId
+                sessionId = session
                 audio = if (row.role == PageRole.RECEIVER) {
                     val from = peers.singleOrNull() ?: return false
                     if (from == own) return false
-                    AudioSession.forAnswerer(key, row.sessionId, own, from)
+                    AudioSession.forAnswerer(key, session, own, from)
                 } else {
                     val others = peers - own
                     if (others.isEmpty()) return false
-                    AudioSession.forSender(key, row.sessionId, own, others)
+                    AudioSession.forSender(key, session, own, others)
                 }
                 true
             } catch (_: ProtocolException) {
@@ -518,6 +535,7 @@ class TalkSessionController(
             for (event in s.events) {
                 when (event) {
                     is SocketEvent.Ready -> {
+                        protocol2 = event.protocol >= PROTOCOL_CLIP
                         readySince = nowMs()
                         sendJoin(s)
                     }
@@ -540,6 +558,12 @@ class TalkSessionController(
                 }
             }
             return Pumped(closed, readySince)
+        }
+
+        /** After every successful join of its own page, on a protocol-2 socket (section 13.7); no reply. */
+        private fun sendSenderKey(s: TalkSocket) {
+            if (role != PageRole.SENDER || !protocol2) return
+            sessionKeys.senderKey(pageId)?.let { s.send(ClientMessage.SenderKey(it)) }
         }
 
         /** `join`, then a `ping` whose `pong` marks the end of the join snapshot. */
@@ -610,7 +634,7 @@ class TalkSessionController(
         @Suppress("CyclomaticComplexMethod")
         private suspend fun handle(s: TalkSocket, m: ServerMessage) {
             when (m) {
-                is ServerMessage.PageState -> pageState(m)
+                is ServerMessage.PageState -> pageState(s, m)
                 is ServerMessage.PeerJoined -> peerJoined(m.deviceId)
                 is ServerMessage.PeerLeft -> peerLeft(m.deviceId)
                 is ServerMessage.FloorGranted -> granted(s, m)
@@ -622,12 +646,13 @@ class TalkSessionController(
             }
         }
 
-        private suspend fun pageState(m: ServerMessage.PageState) {
+        private suspend fun pageState(s: TalkSocket, m: ServerMessage.PageState) {
             if (m.pageId != pageId) return
             if (!joined) {
                 joined = true
                 joinRetry?.cancel()
                 mutableState.update { it.copy(connection = TalkConnection.LIVE) }
+                sendSenderKey(s)
             }
             if (role != PageRole.SENDER) return
             mutableState.update { it.copy(pageProgress = it.pageProgress.forward(m.state)) }
@@ -859,6 +884,7 @@ class TalkSessionController(
         private const val EVENT_BUFFER = 32
         private const val OPUS_BUFFER = 64
         private const val ACCEPTED_MEMORY = 16
+        private const val PROTOCOL_CLIP = 2
         private const val STATE_ENDED = "ended"
         private const val STATE_ANSWERED = "answered"
         private val OVER_STATES = setOf("ended", "failed", "missed")

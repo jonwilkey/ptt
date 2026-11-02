@@ -24,6 +24,7 @@ import com.example.ptt.net.DeviceTalkAuth
 import com.example.ptt.net.DeviceTokenStore
 import com.example.ptt.net.EnrollmentState
 import com.example.ptt.net.OkHttpTalkTransport
+import com.example.ptt.net.PttApi
 import com.example.ptt.net.TalkAuth
 import com.example.ptt.net.TalkTransport
 import com.example.ptt.outbox.Outbox
@@ -38,6 +39,8 @@ import com.example.ptt.setup.RosterSync
 import com.example.ptt.talk.AndroidTalkCues
 import com.example.ptt.talk.AndroidTalkServiceControl
 import com.example.ptt.talk.PageSender
+import com.example.ptt.talk.SenderKeyRecovery
+import com.example.ptt.talk.SenderRecovery
 import com.example.ptt.talk.ServiceTalkAudioSource
 import com.example.ptt.talk.TalkAudioSource
 import com.example.ptt.talk.TalkCues
@@ -151,6 +154,15 @@ object AlertModule {
 
     @Provides
     @Singleton
+    fun senderKeyRecovery(
+        api: PttApi,
+        keyStore: DeviceKeyStore,
+        tokens: DeviceTokenStore,
+        sessionKeys: SessionKeys
+    ): SenderKeyRecovery = SenderRecovery(api, keyStore, tokens, sessionKeys)
+
+    @Provides
+    @Singleton
     @Suppress("LongParameterList")
     fun talkSessionController(
         transport: TalkTransport,
@@ -161,6 +173,7 @@ object AlertModule {
         outbox: Outbox,
         events: SocketPageEvents,
         selfPages: SelfPages,
+        recovery: SenderKeyRecovery,
         service: TalkServiceControl,
         scope: CoroutineScope
     ) = TalkSessionController(
@@ -173,6 +186,7 @@ object AlertModule {
         outbox.outcomes,
         events,
         selfPages,
+        recovery,
         service,
         scope,
         // Only durations are measured with it (first-talker rule, RTT, dead-socket timeouts), so a monotonic clock.

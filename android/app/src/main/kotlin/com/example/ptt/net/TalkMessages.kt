@@ -1,5 +1,7 @@
 package com.example.ptt.net
 
+import com.example.ptt.crypto.B64u
+import com.example.ptt.crypto.SignedObject
 import com.example.ptt.crypto.Validation
 import com.example.ptt.crypto.ensure
 import kotlinx.serialization.SerializationException
@@ -11,8 +13,14 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
-/** The `hello.protocol` this build speaks (docs/protocol.md section 11.1). */
+/** The `hello.protocol` this build advertises (docs/protocol.md section 11.1). */
 const val TALK_PROTOCOL = 1
+
+/**
+ * The highest protocol this build's code can speak. [TALK_PROTOCOL] stays below it until the protocol-2 talker
+ * side lands; a server answering `hello` with up to this value is believed.
+ */
+const val MAX_TALK_PROTOCOL = 2
 
 /** Messages the phone sends over the WebSocket (docs/protocol.md section 11.2). The server is strict about them. */
 sealed interface ClientMessage {
@@ -28,6 +36,9 @@ sealed interface ClientMessage {
     data class FloorRelease(val transmissionId: String) : ClientMessage
 
     data object SessionEnd : ClientMessage
+
+    /** `sender_key` (protocol 2, section 13.2): the sender's signed copy of the session key. */
+    class SenderKey(val key: SignedObject) : ClientMessage
 
     data class Ping(val t: Long) : ClientMessage
 }
@@ -152,6 +163,21 @@ object TalkCodec {
                 }
 
                 ClientMessage.SessionEnd -> put("type", "session_end")
+
+                is ClientMessage.SenderKey -> {
+                    Validation.requireUuid(message.key.signer, "signer")
+                    ensure(message.key.payload.isNotEmpty()) { "payload is empty" }
+                    ensure(message.key.sig.size == SignedObject.SIGNATURE_BYTES) { "bad signature length" }
+                    put("type", "sender_key")
+                    put(
+                        "key",
+                        buildJsonObject {
+                            put("payload", B64u.encode(message.key.payload))
+                            put("signer", message.key.signer)
+                            put("sig", B64u.encode(message.key.sig))
+                        }
+                    )
+                }
 
                 is ClientMessage.Ping -> {
                     ensure(message.t in 0..MAX_SAFE_INT) { "t out of range" }

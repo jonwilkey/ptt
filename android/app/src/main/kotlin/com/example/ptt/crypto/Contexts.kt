@@ -4,4 +4,5 @@ package com.example.ptt.crypto
 object Contexts {
     const val ROSTER = "ptt-roster-v1"
     const val ENVELOPE = "ptt-envelope-v1"
+    const val SENDER_KEY = "ptt-sender-key-v1"
 }

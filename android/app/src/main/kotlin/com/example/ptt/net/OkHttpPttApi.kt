@@ -1,5 +1,6 @@
 package com.example.ptt.net
 
+import com.example.ptt.crypto.ProtocolException
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineDispatcher
@@ -68,6 +69,14 @@ class OkHttpPttApi(
             decode(CreatePageResponse.serializer(), it)
         }
 
+    override suspend fun getPage(pageId: String) = enrolledCall("GET", listOf("v1", "pages", pageId), null, STATUS_OK) {
+        try {
+            PageRecoveryResponse.parse(it)
+        } catch (_: ProtocolException) {
+            throw SerializationException("page response is not shaped as documented")
+        }
+    }
+
     override suspend fun delivered(pageId: String) =
         enrolledCall("POST", listOf("v1", "pages", pageId, "delivered"), EMPTY_BODY) {
             decode(DeliveredResponse.serializer(), it)
@@ -86,6 +95,7 @@ class OkHttpPttApi(
         method: String,
         segments: List<String>,
         body: RequestBody?,
+        onlyStatus: Int? = null,
         parse: (String) -> T
     ): ApiResult<T> {
         val needsReenrollment = state.needsReenrollment()
@@ -93,7 +103,7 @@ class OkHttpPttApi(
         return when {
             needsReenrollment -> ApiResult.NotEnrolled(NotEnrolledReason.NEEDS_REENROLLMENT)
             base == null -> ApiResult.NotEnrolled(NotEnrolledReason.NOT_ENROLLED)
-            else -> call(base, method, segments, body, authenticated = true, parse)
+            else -> call(base, method, segments, body, authenticated = true, onlyStatus, parse)
         }
     }
 
@@ -104,6 +114,7 @@ class OkHttpPttApi(
         segments: List<String>,
         body: RequestBody?,
         authenticated: Boolean,
+        onlyStatus: Int? = null,
         parse: (String) -> T
     ): ApiResult<T> {
         val url = base.newBuilder().apply { segments.forEach { addPathSegment(it) } }.build()
@@ -111,7 +122,7 @@ class OkHttpPttApi(
         return try {
             // `use` is outside withContext so the response is closed even if we are cancelled in between.
             client.newCall(request).await().use { response ->
-                withContext(io) { mapResponse(response, authenticated, parse) }
+                withContext(io) { mapResponse(response, authenticated, onlyStatus, parse) }
             }
         } catch (e: NotEnrolledException) {
             ApiResult.NotEnrolled(e.reason)
@@ -120,7 +131,12 @@ class OkHttpPttApi(
         }
     }
 
-    private fun <T> mapResponse(response: Response, authenticated: Boolean, parse: (String) -> T): ApiResult<T> {
+    private fun <T> mapResponse(
+        response: Response,
+        authenticated: Boolean,
+        onlyStatus: Int?,
+        parse: (String) -> T
+    ): ApiResult<T> {
         val status = response.code
         val text = try {
             response.peekBody(MAX_BODY_BYTES).string()
@@ -128,6 +144,9 @@ class OkHttpPttApi(
             return ApiResult.Retryable(status = null, cause = e)
         }
         return when {
+            response.isSuccessful && onlyStatus != null && status != onlyStatus ->
+                ApiResult.Final(status, ErrorCode.BAD_RESPONSE)
+
             response.isSuccessful -> parseSuccess(status, text, parse)
 
             status == STATUS_TOO_MANY_REQUESTS || status >= STATUS_SERVER_ERROR ->
@@ -167,6 +186,7 @@ class OkHttpPttApi(
         val JSON = "application/json".toMediaType()
         val EMPTY_BODY = ByteArray(0).toRequestBody(null)
         const val MAX_BODY_BYTES = 1L shl 20
+        const val STATUS_OK = 200
         const val STATUS_TOO_MANY_REQUESTS = 429
         const val STATUS_SERVER_ERROR = 500
         const val MAX_RETRY_AFTER_S = 3600L

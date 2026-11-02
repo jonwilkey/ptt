@@ -48,6 +48,31 @@ class TalkSocketTest {
     }
 
     @Test(timeout = 60_000)
+    fun aProtocolTwoReplyIsBelievedWhileHelloStillAdvertisesOne() = runTest {
+        val s = socket()
+        s.open()
+        runCurrent()
+        val ws = transport.sockets.single()
+        ws.serverOpen()
+        ws.serverText(serverHello(protocol = 2))
+        assertEquals(2, (s.events.receive() as SocketEvent.Ready).protocol)
+        assertEquals(1, TALK_PROTOCOL)
+        assertTrue(ws.texts.first().contains("\"protocol\":1"))
+        ws.serverClose(1000)
+    }
+
+    @Test(timeout = 60_000)
+    fun aReplyAboveWhatTheCodeSpeaksIsCapped() = runTest {
+        val s = socket()
+        s.open()
+        runCurrent()
+        val ws = transport.sockets.single()
+        ws.serverOpen()
+        ws.serverText(serverHello(protocol = 3))
+        assertEquals(MAX_TALK_PROTOCOL, (s.events.receive() as SocketEvent.Ready).protocol)
+    }
+
+    @Test(timeout = 60_000)
     fun pingsEveryTenSecondsAndMeasuresRtt() = runTest {
         val s = socket()
         s.open()
