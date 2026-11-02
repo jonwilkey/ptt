@@ -21,7 +21,7 @@ import (
 type out struct {
 	data   []byte
 	binary bool
-	// frame marks a relayed audio frame, the only kind of entry that may be dropped.
+	// frame marks an audio frame, the only kind of entry that may be dropped.
 	frame bool
 }
 
@@ -101,8 +101,8 @@ func newConn(h *Hub, sock *websocket.Conn) *conn {
 // socket is closed 4408 instead (a peer that is not reading, protocol section 11.7).
 func (c *conn) send(v any) { c.enqueue(out{data: encode(v)}) }
 
-// sendFrame queues a relayed audio frame byte for byte. It reports false, and drops
-// the frame, when maxQueuedFrames frames are already waiting.
+// sendFrame queues an audio frame (relayed live or replayed) byte for byte. It reports false,
+// and drops the frame, when maxQueuedFrames frames are already waiting.
 func (c *conn) sendFrame(frame []byte) bool {
 	return c.enqueue(out{data: frame, binary: true, frame: true})
 }
@@ -179,6 +179,9 @@ func (c *conn) writeLoop() {
 				c.frames--
 			}
 			c.qmu.Unlock()
+			if o.frame {
+				c.h.topUp(c) // room for one more frame: continue a clip replay (section 13.4)
+			}
 			typ := websocket.MessageText
 			if o.binary {
 				typ = websocket.MessageBinary
@@ -341,9 +344,10 @@ func (c *conn) onText(data []byte) {
 		c.onFloorRequest(m.transmissionID, m.clip)
 	case joined && m.typ == typeFloorRelease:
 		c.onFloorRelease(m.transmissionID)
-	case joined && (m.typ == typeHeard || m.typ == typeResume):
-		// Parsed and validated (protocol 2 only); the transmission buffer that acts on them is
-		// a later change.
+	case joined && m.typ == typeHeard:
+		c.onHeard(m.transmissionID, m.lastSeq)
+	case joined && m.typ == typeResume:
+		// Parsed and validated (protocol 2 only); resume is a later change.
 	case joined && m.typ == typeSenderKey:
 		c.onSenderKey(m.senderKey)
 	case joined && m.typ == typeSessionEnd:

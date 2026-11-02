@@ -185,6 +185,7 @@ func (a *App) registry() *prometheus.Registry {
 	a.pageMet.Register(reg)
 	metrics.RegisterWS(reg, a.hub.Sockets)
 	metrics.RegisterFrames(reg, a.hub.FrameCounts)
+	metrics.RegisterClips(reg, func() metrics.ClipCounts { return metrics.ClipCounts(a.hub.ClipCounts()) })
 	return reg
 }
 

@@ -17,6 +17,11 @@ import (
 // page row and every later one is ignored, so the resend after each join needs no reply.
 func (c *conn) onSenderKey(key signed.Object) {
 	h := c.h
+	ctx, cancel := context.WithTimeout(c.ctx, dbTimeout)
+	defer cancel()
+	if c.revokedCheck(ctx) {
+		return
+	}
 	h.mu.Lock()
 	s, r := c.sess, c.role
 	h.mu.Unlock()
@@ -30,11 +35,6 @@ func (c *conn) onSenderKey(key signed.Object) {
 		return
 	}
 	stored, _ := json.Marshal(key.Encode()) // plain strings: cannot fail
-	ctx, cancel := context.WithTimeout(c.ctx, dbTimeout)
-	defer cancel()
-	if c.revokedCheck(ctx) {
-		return
-	}
 	// A page that has ended meanwhile has no row to update: nothing is stored, nothing is wrong.
 	_, err = h.q.SetPageSenderKey(ctx, sqlcdb.SetPageSenderKeyParams{SenderKey: stored, ID: s.pageID})
 	if err != nil {

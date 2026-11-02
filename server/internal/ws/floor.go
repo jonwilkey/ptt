@@ -62,6 +62,8 @@ type floorState struct {
 	txRaw [audioframe.IDSize]byte
 	// clip is the clip flag of the granting floor_request (protocol 2; false on protocol 1).
 	clip bool
+	// tx is the buffered transmission of a grant on a protocol-2 socket, nil on protocol 1.
+	tx *transmission
 	// gen counts grants. A timer callback carries the generation it was armed for and does
 	// nothing if the floor has moved on, so a firing that was already past its timer's
 	// cancellation when the floor was released or re-granted is harmless.
@@ -102,7 +104,9 @@ func (s *session) floorDetachLocked(c *conn) {
 	}
 }
 
-// grantLocked gives the floor to c under tx. The caller has checked everything.
+// grantLocked gives the floor to c under tx. The caller has checked everything. A grant on a
+// protocol-2 socket starts a buffered transmission (section 13.3), gapped from the grant when
+// the listener is not joined or it is a clip transmission (section 13.4).
 func (s *session) grantLocked(c *conn, tx string, raw [audioframe.IDSize]byte, clip bool) {
 	f := &s.floor
 	now := s.h.clk.Now()
@@ -110,23 +114,47 @@ func (s *session) grantLocked(c *conn, tx string, raw [audioframe.IDSize]byte, c
 		f.used = map[[audioframe.IDSize]byte]struct{}{}
 	}
 	f.used[raw] = struct{}{}
-	f.talker, f.txID, f.txRaw, f.clip = c, tx, raw, clip
+	f.talker, f.txID, f.txRaw, f.clip, f.tx = c, tx, raw, clip, nil
 	f.gen++
 	f.grantedAt, f.lastFrame, f.hasFrame = now, time.Time{}, false
 	gen := f.gen
-	f.silence.reset(silenceBeforeData, func() { s.h.silenceFired(s, gen) })
+	f.silence.reset(f.firstFrameAllowance(), func() { s.h.silenceFired(s, gen) })
 	f.maxLen.reset(maxTransmission, func() { s.h.maxLengthFired(s, gen) })
+	s.h.clips.transmissions.Add(1)
 
+	peer := s.peerOf(c)
+	if c.protocol >= 2 {
+		f.tx = s.buf.grant(raw, tx, c.deviceID, s.otherOf(c.deviceID), clip)
+		f.tx.gapped = clip || peer == nil
+	}
 	msg := floorGrantedMsg{Type: "floor_granted", Talker: c.deviceID, TransmissionID: tx}
 	c.send(msg)
-	if peer := s.peerOf(c); peer != nil {
+	if peer != nil {
 		peer.send(msg)
+	} else if f.tx != nil {
+		s.gapLocked(f.tx) // right after the requester's floor_granted
 	}
 	s.resetIdleLocked()
 }
 
+// The silence allowances of section 11.6; a clip transmission gets 5 s for both (section 13.9).
+func (f *floorState) firstFrameAllowance() time.Duration {
+	if f.clip {
+		return clipSilenceLimit
+	}
+	return silenceBeforeData
+}
+
+func (f *floorState) nextFrameAllowance() time.Duration {
+	if f.clip {
+		return clipSilenceLimit
+	}
+	return silenceAfterFrame
+}
+
 // releaseLocked frees the floor and tells the participants still connected: both, except for
-// "disconnected", which goes to the peer only (the talker's socket is going away).
+// "disconnected", which goes to the peer only (the talker's socket is going away). A buffered
+// transmission closes on released and is left open otherwise (section 13.3).
 func (s *session) releaseLocked(reason string) {
 	f := &s.floor
 	talker := f.talker
@@ -134,8 +162,9 @@ func (s *session) releaseLocked(reason string) {
 		return
 	}
 	msg := floorReleasedMsg{Type: "floor_released", Talker: talker.deviceID, TransmissionID: f.txID, Reason: reason}
+	tx := f.tx
 	f.stop()
-	f.talker = nil
+	f.talker, f.tx = nil, nil
 	f.gen++
 	if reason != reasonDisconnected {
 		talker.send(msg)
@@ -144,6 +173,13 @@ func (s *session) releaseLocked(reason string) {
 		peer.send(msg)
 	}
 	s.resetIdleLocked()
+	switch {
+	case tx == nil:
+	case reason == reasonReleased:
+		s.finishTxLocked(tx)
+	default:
+		s.openTxLocked(tx)
+	}
 }
 
 // currentFloorLocked reports whether s is still live and gen is its floor's current grant.
@@ -161,9 +197,9 @@ func (h *Hub) silenceFired(s *session, gen uint64) {
 		return
 	}
 	f := &s.floor
-	deadline := f.grantedAt.Add(silenceBeforeData)
+	deadline := f.grantedAt.Add(f.firstFrameAllowance())
 	if f.hasFrame {
-		deadline = f.lastFrame.Add(silenceAfterFrame)
+		deadline = f.lastFrame.Add(f.nextFrameAllowance())
 	}
 	if wait := deadline.Sub(h.clk.Now()); wait > 0 {
 		f.silence.reset(wait, func() { h.silenceFired(s, gen) })
@@ -191,20 +227,22 @@ func (c *conn) onFloorRequest(transmissionID string, clip bool) {
 	if c.revokedCheck(ctx) {
 		return
 	}
-	if !validTransmissionID(transmissionID) {
-		c.send(errorMsg{Type: "error", Code: errBadTransmission})
-		return
-	}
-	raw := uuid.MustParse(transmissionID) // validated above
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s := c.sess
 	if s == nil || !c.joined || c.isClosing() {
 		return // gone, or closing: a grant to it would only be lost
 	}
+	s.closeOpenOfLocked(c.deviceID)
+	if !validTransmissionID(transmissionID) {
+		c.send(errorMsg{Type: "error", Code: errBadTransmission})
+		return
+	}
+	raw := uuid.MustParse(transmissionID) // validated above
 	// A session whose idle end is under way takes no new floor: the grant would be lost with
-	// the session (see idleFired).
-	if s.ending || s.self() || s.peerOf(c) == nil {
+	// the session (see idleFired). With the peer away only a protocol-2 requester in an
+	// answered session is granted (section 13.7).
+	if s.ending || s.self() || s.peerOf(c) == nil && (c.protocol < 2 || s.answerer == "") {
 		c.send(errorMsg{Type: "error", Code: errNoPeer})
 		return
 	}
@@ -223,44 +261,71 @@ func (c *conn) onFloorRequest(transmissionID string, clip bool) {
 	}
 }
 
-// onFloorRelease handles floor_release: only the current talker with the current id frees the
-// floor; anything else (a stale message that crossed the server's own release) is ignored.
+// onFloorRelease handles floor_release: the current talker with the current id frees the
+// floor, and the talker of an open transmission closes it (rule 1 of section 13.3); anything
+// else (a stale message that crossed the server's own release) is ignored.
 func (c *conn) onFloorRelease(transmissionID string) {
 	h := c.h
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if s := c.sess; s != nil && s.floor.talker == c && s.floor.txID == transmissionID {
+	s := c.sess
+	if s == nil {
+		return
+	}
+	if s.floor.talker == c && s.floor.txID == transmissionID {
 		s.releaseLocked(reasonReleased)
+		return
+	}
+	if id, err := uuid.Parse(transmissionID); err == nil {
+		if t := s.findOwnLocked(c.deviceID, id, txOpen); t != nil {
+			s.closeTxLocked(t)
+		}
 	}
 }
 
-// relayFrame receives a parsed audio frame from a joined socket (section 11.7). A frame from
-// the current talker under the current transmission id counts as activity for the silence timer
-// and goes to the peer, byte for byte, if the peer is joined; every other frame is dropped
-// silently. The ciphertext is never looked at. frame is the slice the reader allocated for
+// relayFrame receives a parsed audio frame from a joined socket. A frame of a live or open
+// protocol-2 transmission of the socket's device goes to the buffer (section 13.3). Otherwise, a
+// frame from the current protocol-1 talker under the current id counts as activity for the
+// silence timer and goes to the peer, byte for byte, if the peer is joined (section 11.7);
+// every other frame is dropped silently. The ciphertext is never looked at. frame is the slice the reader allocated for
 // this one message, so it can be queued as it is.
 func (h *Hub) relayFrame(c *conn, hdr audioframe.Header, frame []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s := c.sess
-	if s == nil || !c.joined || s.floor.talker != c || s.floor.txRaw != hdr.TransmissionID {
+	if s == nil || !c.joined {
 		h.dropped.Add(1)
 		return
 	}
-	fl := &s.floor
-	fl.lastFrame = h.clk.Now()
-	if !fl.hasFrame {
-		// The 3 s allowance of the grant is over with the first frame: from here on it is 1 s
-		// after the latest frame, so re-arm once (later frames only move lastFrame).
-		fl.hasFrame = true
-		gen := fl.gen
-		fl.silence.reset(silenceAfterFrame, func() { h.silenceFired(s, gen) })
+	// A live or open protocol-2 transmission of this device, from a protocol-2 socket of it
+	// (section 13.1: section 13 applies only on protocol-2 sockets).
+	if t := s.buf.find(hdr.TransmissionID); t != nil && t.talker == c.deviceID && t.state != txClosed && c.protocol >= 2 {
+		s.acceptFrameLocked(t, int(hdr.Seq), frame)
+		return
 	}
+	if s.floor.talker != c || s.floor.tx != nil || s.floor.txRaw != hdr.TransmissionID {
+		h.dropped.Add(1)
+		return
+	}
+	s.floorFrameLocked()
 	if peer := s.peerOf(c); peer != nil && peer.sendFrame(frame) {
 		h.relayed.Add(1)
 		return
 	}
 	h.dropped.Add(1)
+}
+
+// floorFrameLocked counts an accepted frame of the current transmission for the silence timer.
+func (s *session) floorFrameLocked() {
+	fl := &s.floor
+	fl.lastFrame = s.h.clk.Now()
+	if !fl.hasFrame {
+		// The allowance of the grant is over with the first frame: from here on it runs from
+		// the latest frame, so re-arm once (later frames only move lastFrame).
+		fl.hasFrame = true
+		gen := fl.gen
+		fl.silence.reset(fl.nextFrameAllowance(), func() { s.h.silenceFired(s, gen) })
+	}
 }
 
 // FrameCounts is the number of audio frames relayed and dropped so far, for the aggregate

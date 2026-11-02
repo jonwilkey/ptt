@@ -9,8 +9,9 @@
 // pages.Notifier (page transitions into the hub, implemented by *Hub) and Ender (session ends
 // out of the hub, implemented by *pages.Service), so the two packages do not import each other.
 //
-// Floor control and frame relay (protocol sections 11.6 and 11.7) live in floor.go; this
-// file authenticates, joins, queues and ends.
+// Floor control and frame relay (protocol sections 11.6 and 11.7) live in floor.go, the
+// protocol-2 transmission buffer (section 13.3) in buffer.go and its delivery to the listener
+// (sections 13.4 and 13.5) in delivery.go; this file authenticates, joins, queues and ends.
 //
 // Privacy (protocol section 1): nothing here logs, labels a metric with, or audits a page id,
 // session id or device id. The metrics are unlabelled gauges and frame counters.
@@ -153,6 +154,8 @@ type Hub struct {
 
 	// relayed and dropped count audio frames from talkers: aggregate only, never labelled.
 	relayed, dropped atomic.Uint64
+	// clips is the process-wide side of the transmission buffers (buffer.go).
+	clips *clipStore
 }
 
 // New returns a Hub. Call Start to run the revocation sweep and Shutdown at exit.
@@ -171,6 +174,7 @@ func New(o Options) *Hub {
 		q: sqlcdb.New(o.DB), auth: o.Auth, ender: o.Ender, logger: o.Logger, clk: o.Clock,
 		ctx: ctx, cancel: cancel, started: o.Clock.Now(),
 		conns: map[*conn]struct{}{}, socks: map[string]*conn{}, rooms: map[string]*session{},
+		clips: newClipStore(),
 	}
 }
 
@@ -218,7 +222,7 @@ func (h *Hub) Shutdown(ctx context.Context) {
 		c.closeNow(codeRestart)
 	}
 	for _, s := range h.rooms {
-		s.stopTimers()
+		s.discardLocked() // buffers are memory only: a restart loses them (section 13.11)
 	}
 	h.mu.Unlock()
 	// Stops the sweep and any pending call into the page lifecycle. The sockets' own contexts
