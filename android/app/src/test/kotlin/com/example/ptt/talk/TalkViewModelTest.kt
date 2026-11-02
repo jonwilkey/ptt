@@ -85,12 +85,18 @@ class TalkViewModelTest {
         db.close()
     }
 
-    private class Rig(val vm: TalkViewModel, val engine: AlertEngine, val repo: ActivePageRepository)
+    private class Rig(
+        val vm: TalkViewModel,
+        val engine: AlertEngine,
+        val repo: ActivePageRepository,
+        val cues: FakeCues
+    )
 
     private fun TestScope.rig(
         dao: ActivePageDao = db.activePageDao(),
         talk: TalkSessions = NoTalk,
-        audio: TalkAudioSource = FakeAudioSource()
+        audio: TalkAudioSource = FakeAudioSource(),
+        cues: FakeCues = FakeCues()
     ): Rig {
         val clock = VirtualClock { currentTime }
         // The outbox's send loop only runs when a test calls runCurrent, so queued rows stay put until then.
@@ -108,9 +114,10 @@ class TalkViewModelTest {
         // The sender row of a lost page says `failed`: the app-wide owner of that, as in PttApplication.
         LostPages(outbox, repo, keys).start(backgroundScope)
         return Rig(
-            TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock, talk, audio),
+            TalkViewModel(engine, repo, outbox, keys, notices, events, backgroundScope, clock, talk, audio, cues),
             engine,
-            repo
+            repo,
+            cues
         )
     }
 
@@ -166,7 +173,8 @@ class TalkViewModelTest {
                     currentTime
                 },
                 NoTalk,
-                FakeAudioSource()
+                FakeAudioSource(),
+                FakeCues()
             )
         second.show(PAGE, TalkIntents.MODE_ANSWER, null)
         runCurrent()
@@ -642,7 +650,9 @@ class TalkViewModelTest {
 
     // ---- live talk screen ----
 
-    private class Live(val rig: Rig, val talk: FakeTalk, val audio: FakeAudioSource)
+    private class Live(val rig: Rig, val talk: FakeTalk, val audio: FakeAudioSource) {
+        val cues: FakeCues get() = rig.cues
+    }
 
     private fun TestScope.receiverLive(): Live {
         val talk = FakeTalk()
@@ -776,6 +786,68 @@ class TalkViewModelTest {
     }
 
     @Test
+    fun sessionEventsPlayTheirCues() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.talk.events.emit(TalkEvent.PeerJoined)
+        runCurrent()
+        assertEquals(listOf(Cue.JOINED), l.cues.played)
+        l.talk.events.emit(TalkEvent.FloorGrantedToYou)
+        runCurrent()
+        assertEquals(Cue.GO, l.cues.played.last())
+        l.talk.events.emit(TalkEvent.FloorReleased(yours = false))
+        runCurrent()
+        assertEquals(Cue.OVER, l.cues.played.last())
+        l.talk.events.emit(TalkEvent.FloorBusy)
+        runCurrent()
+        assertEquals(Cue.BUSY, l.cues.played.last())
+        l.talk.events.emit(TalkEvent.NoPeer)
+        runCurrent()
+        assertEquals(listOf(Cue.JOINED, Cue.GO, Cue.OVER, Cue.BUSY, Cue.BUSY), l.cues.played)
+    }
+
+    @Test
+    fun aFloorYouReleasedAndUnrelatedEventsPlayNoCue() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.talk.events.emit(TalkEvent.FloorReleased(yours = true))
+        l.talk.events.emit(TalkEvent.PeerLeft)
+        l.talk.events.emit(TalkEvent.PeerStartedTalking)
+        l.talk.events.emit(TalkEvent.StopCapture)
+        l.talk.events.emit(TalkEvent.TalkUnavailable)
+        runCurrent()
+        assertEquals(emptyList<Cue>(), l.cues.played)
+    }
+
+    @Test
+    fun eventsForAnotherPagePlayNoCue() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation().copy(pageId = OTHER)
+        runCurrent()
+        l.talk.events.emit(TalkEvent.PeerJoined)
+        l.talk.events.emit(TalkEvent.FloorGrantedToYou)
+        l.talk.events.emit(TalkEvent.FloorBusy)
+        runCurrent()
+        assertEquals(emptyList<Cue>(), l.cues.played)
+    }
+
+    @Test
+    fun aFreshPressWhileThePeerTalksBuzzesButDoesNotPress() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation().copy(floor = TalkFloor.PEER_TALKING)
+        runCurrent()
+        assertTrue(l.rig.vm.live.value.talkEnabled)
+        assertFalse(l.rig.vm.pressTalk())
+        assertEquals(listOf(Cue.BUSY), l.cues.played)
+        assertEquals(emptyList<String>(), l.audio.calls)
+        // The buzz is not a hold: releasing changes nothing.
+        l.rig.vm.releaseTalk(HoldSource.BUTTON)
+        assertEquals(emptyList<String>(), l.audio.calls)
+    }
+
+    @Test
     fun pressAndReleaseReachTheAudioOnlyWhileTalkIsEnabled() = runTest {
         val l = receiverLive()
         val vm = l.rig.vm
@@ -785,8 +857,8 @@ class TalkViewModelTest {
         runCurrent()
         assertTrue(vm.pressTalk())
         assertFalse("a second press while held is not a new request", vm.pressTalk())
-        vm.releaseTalk()
-        vm.releaseTalk()
+        vm.releaseTalk(HoldSource.BUTTON)
+        vm.releaseTalk(HoldSource.BUTTON)
         assertEquals(listOf("press", "release"), l.audio.calls)
     }
 
@@ -797,7 +869,7 @@ class TalkViewModelTest {
         runCurrent()
         l.audio.pressResult = false
         assertFalse(l.rig.vm.pressTalk())
-        l.rig.vm.releaseTalk()
+        l.rig.vm.releaseTalk(HoldSource.BUTTON)
         assertEquals(listOf("press"), l.audio.calls)
     }
 
@@ -936,4 +1008,13 @@ class FakeAudioSource(var hosted: String? = null) : TalkAudioSource {
     override fun audio(pageId: String): TalkAudioPort? = port.takeIf { hosted == pageId }
 
     override fun audios(pageId: String): Flow<TalkAudioPort?> = flowOf(audio(pageId))
+}
+
+/** A cues seam that records the cues the view model asks to play. */
+class FakeCues : TalkCues {
+    val played = mutableListOf<Cue>()
+
+    override fun play(cue: Cue) {
+        played += cue
+    }
 }

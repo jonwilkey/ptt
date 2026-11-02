@@ -39,6 +39,6 @@ class TalkScreenTest {
         }
         state.value = state.value.copy(progress = SendProgress.ANSWERED)
         compose.waitForIdle()
-        compose.onNodeWithText("Live talk is not available yet.").assertExists()
+        compose.onNodeWithText("There is no live talk for a test alert.").assertExists()
     }
 }
