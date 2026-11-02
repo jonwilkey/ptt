@@ -21,6 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -170,10 +171,17 @@ class FamilyTest {
         compose.onNodeWithText("No one else is in the family yet.", substring = true).assertExists()
     }
 
-    /** The send runs on a real dispatcher: poll briefly instead of advancing virtual time. */
-    private fun awaitEvents(events: List<FamilyEvent>, count: Int) = poll { events.size >= count }
+    /**
+     * The send runs on a real dispatcher: poll briefly instead of advancing virtual time. A result is also the
+     * cue for the next tap, but the view model sends the event (or sets the question) before it accepts taps
+     * again, so each wait ends only once the send has finished.
+     */
+    private fun awaitEvents(events: List<FamilyEvent>, count: Int) = poll { events.size >= count && sendFinished() }
 
-    private fun awaitConfirm(vm: FamilyViewModel) = poll { vm.confirm.value != null }
+    private fun awaitConfirm(vm: FamilyViewModel) = poll { vm.confirm.value != null && sendFinished() }
+
+    /** Only the view model's sends may run on appScope here: a test that also does rig(appScope) would never finish. */
+    private fun sendFinished() = appScope.coroutineContext.job.children.none { it.isActive }
 
     private fun poll(condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + 10_000

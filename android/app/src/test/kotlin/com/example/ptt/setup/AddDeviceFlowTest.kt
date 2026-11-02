@@ -9,6 +9,7 @@ import com.example.ptt.crypto.RosterDevice
 import com.example.ptt.crypto.RosterVerifier
 import com.example.ptt.crypto.SignedObject
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
@@ -134,7 +135,9 @@ class AddDeviceFlowTest {
             if (matrix.get(x, y)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
         }
         val source = RGBLuminanceSource(width, matrix.height * scale, pixels)
-        val decoded = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)))
+        // A clean synthetic render is exactly what PURE_BARCODE is for; the default detector misses ~2% of payloads.
+        val hints = mapOf(DecodeHintType.PURE_BARCODE to true, DecodeHintType.TRY_HARDER to true)
+        val decoded = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)), hints)
         assertEquals(pending.qrText, decoded.text)
         // Dark modules on a light quiet zone: the corner is light.
         assertFalse(matrix.get(0, 0))
