@@ -488,10 +488,19 @@ code that is already released:
    the base release from the label by dropping the `+maint...` suffix.
 4. The same gates as a release: Trivy (reading `.trivyignore.yaml` from `main`, as
    `nightly-security` does, so a waiver merged after `T` applies), smoke test on the runner,
-   SBOM, cosign signature (the signing identity check accepts
-   `weekly-maintenance.yml@refs/heads/main` too).
+   SBOM, cosign signature. The workflow signs as `weekly-maintenance.yml@refs/heads/main` and
+   verifies with that identity; `server-release`'s check stays strict
+   ([ADR 0005](adr/0005-release-please-calls-server-release.md)). To verify any deployed image,
+   accept both workflows:
+   `^https://github\.com/OWNER/REPO/\.github/workflows/(server-release\.yml@refs/(heads/main|tags/server-v[0-9][0-9A-Za-z.+-]*)|weekly-maintenance\.yml@refs/heads/main)$`
+   with issuer `https://token.actions.githubusercontent.com`.
 5. Deploy with `deploy-prod.yml`, `environment: maintenance`, waiting for no active sessions and
-   rolling back automatically like any deploy.
+   rolling back automatically like any deploy. The run records the digest of the `deployed` tag
+   when it resolves the release (step 1) and passes it as `expect_previous`; `deploy-prod`
+   compares it with what the host runs, inside the `deploy-production` concurrency group and
+   before any change. If an approved release deployed in the meantime, the weekly deploy fails
+   with "production changed since this run resolved it" (and pings `ptt-weekly/fail`) instead of
+   downgrading production; nothing was changed, and next Monday's run rebuilds the new release.
 6. Ping `ptt-weekly` with the run's result.
 
 It deploys every week even when no digest moved. The restart is harmless (it waits for no
@@ -560,6 +569,15 @@ per known issue:
   (`gh api repos/{owner}/{repo}/issues/<n>/events`) is `github-actions[bot]`. An issue an admin closed
   is an accepted risk and stays closed; the waiver files are the place to record that, and an
   admin who wants it tracked again reopens it by hand.
+
+**Issue churn.** The marker is the scanner's own id, so the same weakness can have more than one
+issue. OSV-Scanner groups a vulnerability's aliases and the issue uses one id by a fixed rule
+(first `CVE-`, else `GHSA-`, else `GO-`, else the first sorted), so it does not change when the
+database adds or drops an alias; the other aliases are listed in the body. Across scanners it is
+not deduplicated: Trivy (the image; ecosystem `gobinary`, `debian`, ...), OSV-Scanner (the
+lockfiles; `Go`, `Maven`) and `govulncheck` (a `GO-` id) give different (id, package) keys, so a
+Go dependency flagged by two of them opens two issues. That is cheap to live with: each closes
+itself when its scanner stops reporting it, and the issue says which scanner and where.
 
 GitHub emails new issues to watchers, and both admins watch the repository, so a finding reaches
 both of them with no extra setup. The run pings `ptt-security` with its own success or failure;

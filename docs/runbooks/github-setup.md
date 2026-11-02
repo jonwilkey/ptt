@@ -1,7 +1,8 @@
 # Runbook: GitHub settings for CI/CD
 
 The repository settings, secrets, and variables that the `ci`, `release-please`,
-`server-release` (with `deploy-prod`), `rollback-drill`, and `infra` workflows need, and the
+`server-release` (with `deploy-prod`), `rollback-drill`, `weekly-maintenance`, `nightly-security`,
+and `infra` workflows need, and the
 order of the first deploy. Values come from [infra-bootstrap.md](infra-bootstrap.md) and the
 steps below; keep each one in the shared password-manager vault, never in the repository.
 
@@ -206,7 +207,7 @@ To rebuild and redeploy an existing release (for example after a failed deploy, 
 an older release): **Actions > server-release > Run workflow**, branch `main`, tag
 `server-vX.Y.Z`. It rebuilds and redeploys the tag as-is, with the same pinned base images from
 that tag's Dockerfile; base-image updates ship as a new release (Renovate PRs; the
-`weekly-maintenance` workflow in milestone 6). The rebuilt image has a new digest, and the
+`weekly-maintenance` workflow, section 10). The rebuilt image has a new digest, and the
 version tag in GHCR moves to it.
 
 Redeploying an **older** tag also copies that tag's `deploy/compose.yaml` and `deploy/Caddyfile`
@@ -239,6 +240,68 @@ In order:
 
 That is the milestone 1 exit check: a merged change passed the CI smoke tests and deployed to
 production after approval.
+
+## 10. Scheduled workflows: the `maintenance` environment and the ping key
+
+`weekly-maintenance` deploys at 03:00 on Mondays, when nobody can approve, so it deploys through a
+second environment without reviewers ([ADR 0012](../adr/0012-weekly-maintenance-deploys-without-approval.md)).
+Both admins accepted this on 2026-11-02. **Do this before merging the scheduled-workflows pull
+request**: scheduled workflows run from the default branch as soon as they are merged, and the
+first 03:00 Monday or 13:00 UTC run would fail without the environment and the secret. If the pull
+request is merged first, disable both workflows right away (**Actions > weekly-maintenance >
+... > Disable workflow**, and the same for `nightly-security`) and enable them once this section
+is done.
+
+### The `maintenance` environment
+
+**Settings > Environments > New environment** `maintenance`:
+
+GitHub creates an environment automatically the first time a workflow names it, with no
+deployment branch rule and no secrets. If `maintenance` already exists (a workflow run or a
+pull request's checks may have created it), edit it rather than creating it, and make sure the
+settings below are all in place; an environment without the `main` rule is open to every branch.
+
+- **Required reviewers: none.** That is the point of the environment.
+- **Deployment branches and tags: Selected branches and tags**, one rule: branch `main`. No tag
+  rule: only `main` may use it, and `weekly-maintenance` refuses to run from anywhere else.
+- **Environment secrets:** copies of the `production` environment's `TS_OAUTH_CLIENT_ID`,
+  `TS_OAUTH_SECRET`, `DEPLOY_SSH_KEY`, `PTT_DOMAIN` and `SOPS_AGE_KEY` (the same values, from the
+  password-manager vault; sections 4 to 6 say where each comes from). Nothing else: not
+  `ANSIBLE_SITE_VARS`, `VULTR_API_KEY`, or the AWS role, which only `infra` uses.
+
+The only job that uses it is `deploy-prod` / `deploy (maintenance)`, called by
+`weekly-maintenance`. **Rotations update both environments**: when you rotate the Tailscale OAuth
+client (section 4), the deploy key (section 5), the CI age key (section 6) or change the domain,
+replace the secret under `production` and under `maintenance`, or the next weekly run fails (and
+alerts, through `ptt-weekly`) with the old value.
+
+Anyone who can change a workflow on `main` can now deploy without an approval; keep `main`
+protected (section 1) and the admin list short.
+
+### The `HC_PING_KEY` repository secret
+
+`weekly-maintenance` and `nightly-security` ping their Healthchecks.io checks (`ptt-weekly`,
+`ptt-security`) with the project's ping key. **Settings > Secrets and variables > Actions >
+Secrets**: add `HC_PING_KEY` with the project's ping key (Healthchecks.io project settings >
+Ping key; [docs/operations.md](../operations.md#healthchecksio)). It is a repository secret, not
+an environment secret, because the nightly workflow uses no environment. The scripts never print
+it, and Actions masks it. Create the two checks first (period and grace in operations.md); if the
+secret is missing, the workflows warn and skip the ping, and the check goes down on its own
+because the ping is missing, which is the alert.
+
+The `nightly-security` workflow opens issues with the label `security`; it creates the label
+the first time. Both admins watching the repository get the emails.
+
+### Before the first scheduled run
+
+- A release has been deployed through `deploy-prod` (so the `deployed` tag exists), or the tag is
+  seeded by hand (Notes below). Otherwise `weekly-maintenance` fails in its first step and pings
+  `ptt-weekly/fail`, and `nightly-security` pings `ptt-security/fail` with no image scan.
+- **Actions > weekly-maintenance > Run workflow** on `main` once by hand at a quiet time, and
+  **nightly-security** the same, and watch both finish. A manual weekly run deploys.
+- GitHub disables scheduled workflows in a repository with no activity for 60 days; a push or
+  any manual run re-enables them. The `ptt-weekly` and `ptt-security` checks go down if that
+  happens, which is how it is noticed.
 
 ## Notes
 

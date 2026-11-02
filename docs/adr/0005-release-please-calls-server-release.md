@@ -29,7 +29,13 @@ The same limitation means release PRs, which release-please opens and updates wi
 - The image signature identity therefore differs by entry point
   (`.../server-release.yml@refs/heads/main` for the release-please and manual runs,
   `.../server-release.yml@refs/tags/server-v...` for a pushed tag). Verification accepts exactly
-  those two forms.
+  those two forms. That is `server-release.yml`'s own check of the image it just signed; it stays
+  strict.
+- Weekly rebuilds are signed by a different workflow, `weekly-maintenance.yml@refs/heads/main`
+  ([ADR 0012](0012-weekly-maintenance-deploys-without-approval.md)), which verifies its own
+  signature with its own identity. Anyone verifying any deployed image accepts all three forms:
+  `^https://github\.com/OWNER/REPO/\.github/workflows/(server-release\.yml@refs/(heads/main|tags/server-v[0-9][0-9A-Za-z.+-]*)|weekly-maintenance\.yml@refs/heads/main)$`
+  (OIDC issuer `https://token.actions.githubusercontent.com`).
 - Release PRs: before merging one, an admin closes and reopens it (an event by a person), which
   starts `ci` so the required checks report. This is documented in
   `docs/runbooks/github-setup.md`.

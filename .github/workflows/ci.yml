@@ -224,6 +224,11 @@ jobs:
       - name: Rollback decision tests
         run: .github/scripts/rollback-host-test.sh
 
+      # weekly-maintenance's 03:00 Pacific gate, version-label parsing and base-digest refresh,
+      # the Healthchecks ping, and nightly-security's issue open/close/reopen decisions.
+      - name: Scheduled workflow script tests
+        run: .github/scripts/scheduled-test.sh
+
   osv-scanner:
     name: osv-scanner
     runs-on: ubuntu-24.04

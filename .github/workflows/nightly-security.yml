@@ -1,0 +1,193 @@
+name: nightly-security
+
+# Daily, 05:00 or 06:00 Pacific. Rescans what is deployed and what main would ship for newly
+# published vulnerabilities, and opens an issue for each finding that would fail a release gate
+# (Trivy HIGH or CRITICAL, OSV CVSS >= 7.0 or unscored outside Go, every reachable govulncheck
+# finding; ADR 0014). Findings are not failures: the run pings the `ptt-security` Healthchecks.io
+# check with its own success or failure (a scanner broke, or there is no `deployed` tag).
+# Details: docs/operations.md, "nightly-security".
+#
+# Waivers (.trivyignore.yaml, osv-scanner.toml) are read from main, so a waived finding opens no
+# issue until its waiver expires. Three jobs keep the issue-writing token away from the scanners:
+# scan (read-only), report (issues: write, runs only our script), ping.
+
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: nightly-security
+  cancel-in-progress: false
+
+env:
+  # renovate: datasource=github-releases depName=aquasecurity/trivy
+  TRIVY_VERSION: v0.75.0
+  # renovate: datasource=go depName=golang.org/x/vuln
+  GOVULNCHECK_VERSION: v1.9.0
+
+jobs:
+  scan:
+    name: scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read # pull the deployed image if the package is private
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: server/go.mod
+          cache: false
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Pin the scan to the digest the tag names right now, so the findings say which image.
+      - name: Find the deployed image
+        id: deployed
+        run: |
+          set -euo pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}/pttd"
+          if digest="$(docker buildx imagetools inspect "${repo}:deployed" --format '{{json .Manifest}}' | jq -er .digest)"; then
+            echo "image=${repo}@${digest}" >> "$GITHUB_OUTPUT"
+            echo "Deployed image: ${repo}@${digest}"
+          else
+            echo "::error::No deployed tag (${repo}:deployed): scanning the lockfiles only. Deploy a release through deploy-prod.yml first (or seed the tag; docs/runbooks/github-setup.md)."
+          fi
+
+      # All severities are collected; only HIGH and CRITICAL count as findings (normalize step).
+      - name: Trivy on the deployed image
+        id: trivy
+        if: steps.deployed.outputs.image != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ steps.deployed.outputs.image }}
+          scanners: vuln
+          ignore-unfixed: false
+          exit-code: "0"
+          trivyignores: .trivyignore.yaml
+          format: json
+          output: trivy-results.json
+
+      # Exits non-zero on any finding; the normalize step applies the severity rule.
+      - name: OSV-Scanner on main's lockfiles
+        id: osv
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --format=json
+            --output-file=osv-results.json
+            --config=./osv-scanner.toml
+            --recursive
+            ./
+
+      # JSON output exits 0 whatever it finds; a non-zero exit means govulncheck itself broke.
+      - name: govulncheck on main's server module
+        id: govulncheck
+        continue-on-error: true
+        run: make -s -C server vuln GOVULNCHECK="go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} -format json" > govulncheck.json
+
+      - name: Findings at the release-gate level
+        id: normalize
+        env:
+          IMAGE: ${{ steps.deployed.outputs.image }}
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
+          OSV_OUTCOME: ${{ steps.osv.outcome }}
+          GOVULN_OUTCOME: ${{ steps.govulncheck.outcome }}
+        run: |
+          set -euo pipefail
+          args=(--out findings.json)
+          if [ "$TRIVY_OUTCOME" = success ]; then args+=(--trivy trivy-results.json --image-ref "$IMAGE"); fi
+          # OSV-Scanner's own exit status is non-zero with findings; the script judges the file.
+          if [ -s osv-results.json ]; then args+=(--osv osv-results.json --osv-outcome "$OSV_OUTCOME"); fi
+          if [ "$GOVULN_OUTCOME" = success ]; then args+=(--govulncheck govulncheck.json); fi
+          python3 -I .github/scripts/nightly-security.py normalize "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The report job reads the findings from this artifact (a job output or env var would hit
+      # the 128 KB limit on a single argument or variable).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: findings
+          path: findings.json
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    name: issues
+    needs: scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # the script, from main
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: findings
+
+      # Opens, closes and reopens issues; exits 1 when a scanner did not run or failed.
+      - name: Open, close and reopen issues
+        run: |
+          set -euo pipefail
+          python3 -I .github/scripts/nightly-security.py sync --findings findings.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+  ping:
+    name: ping ptt-security
+    needs: [scan, report]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # the ping script, from main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - name: Ping Healthchecks.io
+        env:
+          HC_PING_KEY: ${{ secrets.HC_PING_KEY }}
+          SCAN: ${{ needs.scan.result }}
+          REPORT: ${{ needs.report.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$SCAN" = success ] && [ "$REPORT" = success ]; then
+            .github/scripts/hc-ping.sh ptt-security ok "nightly-security scanned. ${RUN_URL}"
+          else
+            msg="nightly-security did not finish cleanly: scan ${SCAN}, issues ${REPORT} (a scanner failed, or there is no deployed tag)."
+            .github/scripts/hc-ping.sh ptt-security fail "${msg} ${RUN_URL}"
+            echo "::error::${msg}"
+            exit 1
+          fi
