@@ -1,3 +1,4 @@
+import com.android.build.api.variant.HostTestBuilder
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 
 plugins {
@@ -77,6 +78,13 @@ android {
         unitTests {
             isIncludeAndroidResources = true
         }
+    }
+}
+
+// AGP builds unit tests for the debug variant only; the release run proves the debug-only impairment is absent.
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) { variant ->
+        variant.hostTests[HostTestBuilder.UNIT_TEST_TYPE]?.enable = true
     }
 }
 

@@ -10,6 +10,8 @@ import com.example.ptt.talk.TalkEvent
 import com.example.ptt.talk.TalkFloor
 import com.example.ptt.talk.TalkSessionState
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
@@ -574,6 +576,57 @@ class TalkAudioTest {
         link.set(connection = TalkConnection.LIVE)
         link.pendingPressFires()
         await("recording") { sources.size == 2 && sources[1].started && sent.count.get() > 2 }
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipPressFiresOnAFreshRecorderWhileTheStoppedPrewarmIsStillClosing() {
+        val closing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val sent2 = SentLog()
+        val link2 = FakeLink(sent2)
+        val made = CopyOnWriteArrayList<FakeSource>()
+        val a = TalkAudio(
+            pageId = PAGE,
+            link = link2,
+            sourceFactory = {
+                if (made.isEmpty()) {
+                    object : FakeSource() {
+                        override fun close() {
+                            closing.countDown()
+                            release.await()
+                            super.close()
+                        }
+                    }.also { made += it }
+                } else {
+                    FakeSource().also { made += it }
+                }
+            },
+            encoderFactory = { FakeEncoder() },
+            decoderFactory = { TaDecoder() },
+            sinkFactory = { TaSink() },
+            platform = FakePlatform(),
+            clock = System::currentTimeMillis,
+            dispatcher = Dispatchers.Unconfined
+        )
+        try {
+            link2.set(
+                connection = TalkConnection.LIVE,
+                stage = SessionStage.CONVERSATION,
+                pageId = PAGE,
+                clipMode = true
+            )
+            assertTrue(a.press())
+            await("pre-warmed") { made.size == 1 }
+            link2.set(connection = TalkConnection.CONNECTING)
+            assertTrue(closing.await(20, TimeUnit.SECONDS))
+            link2.set(connection = TalkConnection.LIVE)
+            link2.pendingPressFires()
+            await("recording on a fresh recorder") { made.size == 2 && made[1].started && sent2.count.get() > 2 }
+            assertFalse(made[0].started)
+        } finally {
+            release.countDown()
+            a.close()
+        }
     }
 
     @Test(timeout = 60_000)

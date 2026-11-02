@@ -26,6 +26,7 @@ signing is not configured yet (milestone 6), so release builds stay unsigned.
 | `app/src/main/kotlin/com/example/ptt/alert/` | Notification channels, `PageNotifier` (every page notification), `AlertEngine` (ringing policy, free of Android classes), `AlertService` (foreground, `specialUse`), Android device adapters |
 | `app/src/main/kotlin/com/example/ptt/talk/` | `TalkActivity` stub and `TalkIntents`, the intent contract the real talk screen will implement |
 | `app/src/debug/kotlin/com/example/ptt/push/` | `FakePushReceiver`, debug builds only |
+| `app/src/debug/kotlin/com/example/ptt/net/` | The network impairment (`ImpairedTransport`, `ImpairmentReceiver`), debug builds only; `app/src/release/` holds the no-op seam |
 | `app/src/main/kotlin/com/example/ptt/di/` | Hilt wiring for the packages above |
 | `app/schemas/` | Room schema JSON, exported by KSP and checked in; commit the new `N.json` with every `@Database` version bump |
 | `buildSrc/` | `AppVersion` (parses `version.txt`, computes `versionCode`) and `DependencyFloors` (security version floors), with unit tests |
@@ -85,6 +86,52 @@ adb shell am broadcast -a com.example.ptt.debug.FAKE_PUSH -n com.example.ptt/.pu
 
 A real `page` (signed envelope, `delivered`, active page) is covered by the `PushDispatcherTest` cases; on a
 device it needs the server and Firebase configured.
+
+## Network impairment (debug builds)
+
+Debug builds can add delay and frame loss to the talk WebSocket, for the clip-mode device test (spec, Testing;
+docs/protocol.md section 13.9). The delay is added to each direction (every text and binary message, in order);
+the loss drops that percentage of received audio frames only. Outgoing frames and text messages are never
+dropped. Delay applies to the close handshake too. The code is in the debug source set (`ImpairedTransport`,
+`ImpairmentReceiver`, and the readout `DebugReadout`); `TalkTransport` is wired through `impairTransport(...)`,
+which in the release source set returns the transport unchanged. Like `FakePushReceiver`, the receiver is
+guarded by `DUMP`, so only `adb` can reach it.
+
+The setting is held in memory: killing the app process (or a crash) clears it, so set it again after a
+restart. The talk screen shows the setting in force and the last RTT sample in debug builds. Both phones need
+the debug build and their own setting; a setting on one phone does not affect the other.
+
+```sh
+# Find the serial of each phone (use -s <serial> on every command below when more than one is attached):
+adb devices
+# 300 ms each way and 5% loss of received audio frames (prints data="delay_ms=300 loss_pct=5"):
+adb -s <serial> shell am broadcast -a com.example.ptt.debug.IMPAIR -n com.example.ptt/.net.ImpairmentReceiver \
+  --ei delay_ms 300 --ei loss_pct 5
+# Clear it:
+adb -s <serial> shell am broadcast -a com.example.ptt.debug.IMPAIR -n com.example.ptt/.net.ImpairmentReceiver \
+  --ei delay_ms 0 --ei loss_pct 0
+```
+
+An extra that is left out keeps its current value; delay is limited to 10000 ms and loss to 100%. A new
+setting applies to the next message, on the open socket. A ping that gets no pong counts as one sample above
+the threshold and shows in the readout as "Last RTT: timed out".
+
+### Exit check for clip mode (two phones)
+
+1. Install the debug build on both phones. Each phone decides clip mode for itself and its RTT includes only
+   its own delay, so set the impairment on each phone. Confirm it on each phone's talk-screen readout (shown
+   only during an active session).
+2. Join a conversation. Clip mode needs 3 consecutive samples above 800 ms and pings go out every 2 s while
+   joined, so expect it 6-8 s after joining.
+3. Expected RTT is about 2 x delay plus the real link RTT. If 300 ms each way does not cross 800 ms on LTE,
+   note the readout values: the thresholds or the test setting then change by ADR (section 13.9). Meanwhile a
+   larger delay (for example 500 ms) exercises clip mode.
+4. The 5% loss applies to received clip frames too. A clip may pause up to about 3 s at a dropped frame and then
+   continue. Short gaps are expected and not a failure (a real TCP link does not lose frames like this).
+5. Order check: speak "one", "two", "three" in back-to-back presses. The listener plays them in that order.
+6. Clear the setting with delay 0 and loss 0; a process restart also clears it.
+
+Known limit: a phone call (audio focus loss) during clip playback drops the rest of that clip.
 
 ## Alerting notes
 

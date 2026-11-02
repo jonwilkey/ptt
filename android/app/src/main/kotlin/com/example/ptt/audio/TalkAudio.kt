@@ -241,15 +241,18 @@ class TalkAudio(
         if (closed || !mayCapture(s)) return
         val current = synchronized(lock) { recorder }
         when (current?.phase) {
-            Recorder.Phase.PREWARM, Recorder.Phase.IDLE -> startCapture(current)
+            Recorder.Phase.PREWARM, Recorder.Phase.IDLE ->
+                if (!startCapture(current)) swapRecorder()?.let(::startCapture)
+
             Recorder.Phase.CAPTURING -> Unit
+
             Recorder.Phase.DONE, null -> swapRecorder()?.let(::startCapture)
         }
     }
 
-    private fun startCapture(r: Recorder) {
+    private fun startCapture(r: Recorder): Boolean {
         capture.value = CaptureStatus.CAPTURING
-        r.start(clock())
+        return r.start(clock())
     }
 
     /** The controller captures, the socket is up, and the state is this page's. */

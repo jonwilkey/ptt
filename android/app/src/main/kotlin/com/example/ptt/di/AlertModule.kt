@@ -27,6 +27,7 @@ import com.example.ptt.net.OkHttpTalkTransport
 import com.example.ptt.net.PttApi
 import com.example.ptt.net.TalkAuth
 import com.example.ptt.net.TalkTransport
+import com.example.ptt.net.impairTransport
 import com.example.ptt.outbox.Outbox
 import com.example.ptt.push.PageEvent
 import com.example.ptt.push.PushDispatcher
@@ -131,7 +132,8 @@ object AlertModule {
 
     @Provides
     @Singleton
-    fun talkTransport(client: OkHttpClient, state: EnrollmentState): TalkTransport = OkHttpTalkTransport(client, state)
+    fun talkTransport(client: OkHttpClient, state: EnrollmentState): TalkTransport =
+        impairTransport(OkHttpTalkTransport(client, state))
 
     @Provides
     @Singleton

@@ -2,6 +2,7 @@ package com.example.ptt.talk
 
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -43,41 +44,44 @@ fun TalkScreen(
         if (state.over) delay(OVER_CLOSE_DELAY_MS)
         if (state.over || state.phase == TalkPhase.DONE) onClose()
     }
-    Column(
-        Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        when (state.phase) {
-            TalkPhase.OPENING, TalkPhase.DONE -> Unit
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize().padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            when (state.phase) {
+                TalkPhase.OPENING, TalkPhase.DONE -> Unit
 
-            TalkPhase.OUTGOING -> if (live.active) {
-                Conversation(state, live, onEnd, onPress, onRelease)
-            } else {
-                Outgoing(state, onEnd)
+                TalkPhase.OUTGOING -> if (live.active) {
+                    Conversation(state, live, onEnd, onPress, onRelease)
+                } else {
+                    Outgoing(state, onEnd)
+                }
+
+                TalkPhase.INCOMING -> {
+                    Text(stringResource(R.string.talk_urgent_page), style = MaterialTheme.typography.titleLarge)
+                    Caller(state)
+                    BigButton(R.string.talk_answer, onAnswer)
+                }
+
+                TalkPhase.ANSWERED -> if (live.active) {
+                    Conversation(state, live, onEnd, onPress, onRelease)
+                } else {
+                    Caller(state)
+                    Text(stringResource(R.string.talk_answered), style = MaterialTheme.typography.titleLarge)
+                    Text(stringResource(R.string.talk_live_unavailable))
+                    if (state.microphoneMissing) Text(stringResource(R.string.talk_microphone_missing))
+                    BigButton(R.string.talk_end, onEnd, enabled = !state.ending)
+                }
+
+                TalkPhase.ENDED -> Text(endedLine(state), style = MaterialTheme.typography.titleLarge)
+
+                TalkPhase.ANSWERED_ELSEWHERE ->
+                    Text(stringResource(R.string.talk_answered_elsewhere), style = MaterialTheme.typography.titleLarge)
             }
-
-            TalkPhase.INCOMING -> {
-                Text(stringResource(R.string.talk_urgent_page), style = MaterialTheme.typography.titleLarge)
-                Caller(state)
-                BigButton(R.string.talk_answer, onAnswer)
-            }
-
-            TalkPhase.ANSWERED -> if (live.active) {
-                Conversation(state, live, onEnd, onPress, onRelease)
-            } else {
-                Caller(state)
-                Text(stringResource(R.string.talk_answered), style = MaterialTheme.typography.titleLarge)
-                Text(stringResource(R.string.talk_live_unavailable))
-                if (state.microphoneMissing) Text(stringResource(R.string.talk_microphone_missing))
-                BigButton(R.string.talk_end, onEnd, enabled = !state.ending)
-            }
-
-            TalkPhase.ENDED -> Text(endedLine(state), style = MaterialTheme.typography.titleLarge)
-
-            TalkPhase.ANSWERED_ELSEWHERE ->
-                Text(stringResource(R.string.talk_answered_elsewhere), style = MaterialTheme.typography.titleLarge)
         }
+        if (live.active) DebugReadout(live.rttMillis, live.rttTimedOut)
     }
 }
 
