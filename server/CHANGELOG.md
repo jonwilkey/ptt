@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0](https://github.com/jonwilkey/ptt/compare/server-v0.4.0...server-v0.5.0) (2026-11-02)
+
+
+### Features
+
+* **ci:** automatic deploy rollback and rollback drill ([#68](https://github.com/jonwilkey/ptt/issues/68)) ([c5937d9](https://github.com/jonwilkey/ptt/commit/c5937d9647ea0fe9f545893950fae64193808693))
+* **server:** app update endpoints and admin snapshot ([#65](https://github.com/jonwilkey/ptt/issues/65)) ([c12d2df](https://github.com/jonwilkey/ptt/commit/c12d2df0e4b003eaf80423daed548c91b9d8afdc))
+* **server:** healthchecks monitoring, check_in and phone heartbeat ([#63](https://github.com/jonwilkey/ptt/issues/63)) ([5e030c6](https://github.com/jonwilkey/ptt/commit/5e030c67b92c7964cc1a3d5bdafbb939a4652a38))
+
 ## [0.4.0](https://github.com/jonwilkey/ptt/compare/server-v0.3.0...server-v0.4.0) (2026-11-02)
 
 
