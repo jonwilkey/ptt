@@ -398,11 +398,11 @@ Migrations follow expand-then-contract: add new columns or tables in one release
 
 ## Operations
 
-The system watches itself and emails both admins only when something needs a person. Routine upkeep is about 30 minutes a month.
+The system watches itself and emails both admins only when something needs a person. Routine upkeep is about 30 minutes a month. [operations.md](operations.md) has the design of the checks, the snapshot, deploy rollback, and the scheduled workflows.
 
 **Monitoring**
 
-- **Uptime:** an external monitor (Healthchecks.io free tier) expects a ping from `pttd` every 5 minutes; a missed ping emails and texts both admins. Email/SMS is used because the app can't page anyone when its own server is down.
+- **Uptime:** an external monitor (Healthchecks.io free tier) expects a ping from `pttd` every 5 minutes; a missed ping emails both admins ([ADR 0013](adr/0013-healthchecks-carries-every-alert.md): the free tier has no SMS). Email is used because the app can't page anyone when its own server is down.
 - **Push path:** every 6 hours `pttd` sends an FCM validate-only request to confirm the service-account key still works.
 - **Phone heartbeat:** once a day the server sends a silent check-in push (normal priority, so it needs no visible notification); each phone replies with its app version and permission checklist status. A phone silent for 48 hours, or with a red checklist item, triggers an email to both admins naming the device. This catches the most common real failure: a phone whose battery saver or a permission change stopped alerts from arriving.
 - **Metrics:** page delivery time, answer time, FCM errors, active sessions, and clip-fallback rate at `/metrics`, viewable over Tailscale. Metrics are aggregate counters with no per-person labels. `pttd admin status` prints a one-screen summary.

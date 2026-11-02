@@ -1,16 +1,18 @@
-# Wire protocol — milestones 2, 4 and 5 (enrollment, paging, live talk and clip fallback)
+# Wire protocol — milestones 2, 4, 5 and 6 (enrollment, paging, live talk, clip fallback and app updates)
 
 This is the wire-format contract shared by the Go server (`pttd`) and the Android app for
-milestone 2 (enrollment and paging), milestone 4 (live talk) and milestone 5 (clip fallback). It
-covers the REST API, the page state machine, the FCM data messages (§1-§10), the WebSocket control
-protocol and the end-to-end-encrypted audio frames of live talk (§11-§12), and clip fallback, which
-is protocol 2 of the WebSocket (§13). Where this document lists more than
+milestone 2 (enrollment and paging), milestone 4 (live talk), milestone 5 (clip fallback) and
+milestone 6 (check-in and app updates). It covers the REST API, the page state machine, the FCM
+data messages (§1-§10), the WebSocket control protocol and the end-to-end-encrypted audio frames
+of live talk (§11-§12), clip fallback, which is protocol 2 of the WebSocket (§13), and app
+updates (§14). Where this document lists more than
 [`spec.md`](spec.md) (for example the FCM message list in §9), it **extends** the spec; the spec
 remains authoritative for everything this document does not cover.
 
-**Scope.** This document covers enrollment, paging, live talk and clip fallback. The in-app-update
-endpoints
-(`GET /v1/app/latest`, `GET /v1/app/apk/<version>`) are defined in the spec but omitted here.
+**Scope.** This document covers enrollment, paging, live talk, clip fallback, the daily
+`check_in` (§9) and the in-app-update endpoints (§14). How an APK reaches the server, the
+monitoring that consumes `check_in` replies, and the other operations of milestone 6 are in
+[`operations.md`](operations.md).
 Test devices and two pre-provisioned test accounts are server-side details; they never appear in
 `GET /v1/contacts` or in the family roster, and this document does not give them a wire form.
 
@@ -264,6 +266,8 @@ require the caller's **user** to be an admin.
 | `POST /v1/pages/{id}/acknowledge` | device in envelope |
 | `POST /v1/pages/{id}/answer` | device in envelope |
 | `POST /v1/pages/{id}/cancel` | sender (and answering device after an answer) |
+| `GET /v1/app/latest` | device (§14) |
+| `GET /v1/app/apk/{version}` | device (§14) |
 | `GET /healthz` | none |
 
 ### `POST /v1/enrollment-codes` (admin)
@@ -351,6 +355,18 @@ device.
 
 All fields optional; absent fields are unchanged. A `false` checklist item drives the `warning`
 presence in `GET /v1/contacts`. → `204`.
+
+`checklist` is a JSON object of at most 32 entries, each a key of at most 64 characters mapped to
+a boolean (`true` = green, `false` = red). A present `checklist` **replaces** the stored one
+(it is not merged), so the phone always sends every item it can evaluate; an item it cannot
+evaluate is left out and counts as neither red nor green. The server stores the object as JSON
+in `devices.checklist_status`. The keys the app sends today (`ChecklistItem.wireKey`, never
+renamed): `notifications`, `lock_screen`, `microphone`, `full_screen`, `dnd_access`, `battery`,
+`install_packages`. The server does not interpret keys: any `false` value is red, for
+`GET /v1/contacts` and for the heartbeat alert ([operations.md](operations.md#phone-heartbeat)).
+
+Like every authenticated call, this one refreshes `devices.last_seen_at` (written at most once a
+minute per device); it is the reply to a `check_in` push (§9, "`check_in`").
 
 ### `POST /v1/devices/{id}/revoke` (admin)
 
@@ -634,7 +650,7 @@ fields listed below. Field names never use FCM reserved keys (`from`, `message_t
 | `page_state` | sender device | normal | `page_id`, `state`: `delivered` \| `acknowledged` \| `not_delivered` \| `missed` \| `failed` \| `ended` |
 | `roster` | all non-revoked devices | normal | `version` |
 | `test` | one device (`pttd admin test-push`) | high | — (a "Test push" notification) |
-| `check_in` | all non-revoked devices (milestone 6) | normal | — |
+| `check_in` | all non-revoked, non-test devices with an FCM token (milestone 6) | normal | — (see "`check_in`" below) |
 
 - **Every high-priority message must lead to a visible notification change.**
 - **`page_cancel` still shows something:** the phone replaces the page notification with a short
@@ -646,7 +662,7 @@ fields listed below. Field names never use FCM reserved keys (`from`, `message_t
 - `failed` = every push for the page failed permanently; the page then ends.
 - A token FCM reports as unregistered is cleared from the device.
 - **FCM time-to-live:** a `page` push is 15 min when `level` is `normal`, 24 h when `urgent`;
-  every other message is 15 min, except `roster`, which is 24 h.
+  every other message is 15 min, except `roster` and `check_in`, which are 24 h.
 - **`delivered` before alerting:** the receiver posts `POST /v1/pages/{id}/delivered` *before*
   it starts alerting, and acts on the returned `state`: `ringing` → alert as usual;
   `acknowledged` → another device already acknowledged, so post the notification silently (the
@@ -654,6 +670,36 @@ fields listed below. Field names never use FCM reserved keys (`from`, `message_t
   not ring. `410 page_ended` (the page ended or another device answered; also a stale or
   replayed push) → drop the page silently. If `delivered` fails for network reasons, it alerts
   anyway and retries the post via its outbox.
+
+### `check_in`
+
+The daily heartbeat of the spec's Operations section. It is a normal-priority data message
+(`{"type": "check_in"}`, nothing else, TTL 24 h), so it needs and gets **no visible
+notification**.
+
+**Server.** Once a day at 11:00 America/Los_Angeles, `pttd` sends `check_in` to every
+non-revoked device with `is_test = 0` and a non-null `fcm_token`. A fixed local time (not "24 h
+after start") keeps weekly restarts from postponing it indefinitely; a day the server is down
+at 11:00 is simply skipped. Sends use the roster broadcast's machinery (bounded concurrency, an
+unregistered token is cleared). Nothing is recorded about the send itself.
+
+**Phone.** On `check_in`, `FcmService` enqueues a one-time WorkManager job (network required,
+not expedited) and returns. The job re-evaluates the setup checklist, then sends
+`PUT /v1/devices/me` with **every** field it has, `app_version`, `checklist`, `fcm_token` and
+`device_name`, ignoring the "send only what changed" cache that other syncs use. The PUT is the
+reply: its authentication refreshes `last_seen_at`, and the body refreshes `app_version` and
+`checklist_status`. A failed PUT is retried by WorkManager with its default backoff; a reply that
+arrives a day late is still a reply.
+
+**Not only FCM.** `last_seen_at` moves on **any** authenticated request (REST, or the WebSocket
+`hello`), so the 48-hour rule does not rest on FCM alone. Besides the `check_in` reply, two
+requests reach the server on a phone's own schedule: the roster sync (`GET /v1/roster`) on every
+app start and every return to the app, and the daily update check (§14, `GET /v1/app/latest`).
+Registration sync does not count: it sends `PUT /v1/devices/me` only when a field changed and
+sends nothing otherwise, so an unchanged phone refreshes nothing through it. A phone whose FCM
+delivery broke but whose WorkManager still runs therefore
+stays "seen"; broken push shows up instead as a red checklist item, a cleared FCM token
+(reported by the heartbeat as "no push token"), or a failed Test alert.
 
 ## 10. Admin CLI
 
@@ -1781,3 +1827,122 @@ resent frames, frames past `last_seq`, a clip of the phone's own transmission na
 clip naming the phone itself, the clip talkers an answering device and a sender accept (the
 sender's peer set by its first `peer_joined` or `clip`), a recovered sender hearing clips before
 the peer joins, a grant of a clipped id, and live and clip frames interleaved.
+
+## 14. App updates
+
+The app updates itself from our own server (spec, "App updates"): the network security config
+trusts only ISRG Root X1 and X2, so it cannot download from GitHub. Both endpoints need a device
+token; there is no anonymous download. How a release APK gets onto the server is in
+[`operations.md`](operations.md#publishing-an-apk) ([ADR 0011](adr/0011-apk-published-over-the-deploy-path.md)).
+
+Names marked *(new)* do not exist in the app yet; the milestone 6 Android PR adds them under
+these names.
+
+### 14.1 Versions
+
+`android/version.txt` (bumped by release-please) is the single source of both versions, and an
+`android-vX.Y.Z` tag always builds `X.Y.Z`:
+
+| Field | Value | Example |
+| --- | --- | --- |
+| version name | `X.Y.Z`, each part 0-999 (`AppVersion` in `android/buildSrc`) | `0.5.0` |
+| version code | `X * 1_000_000 + Y * 1_000 + Z` (`0.0.0` builds as 1) | `5000` |
+
+The scheme holds for every version release-please can produce here: the largest code,
+`999.999.999`, is 999 999 999, below Android's limit of 2 100 000 000, and the code grows with
+every bump, including a major one. A version is published once: rebuilding a tag must not put
+different bytes on the server under the same version (the publish step refuses it,
+[operations.md](operations.md#publishing-an-apk)). A broken release is fixed by a newer patch
+version, never by going back: Android does not install a lower version code over a higher one.
+
+`app_version` in `PUT /v1/devices/me` and in the WebSocket `hello` is the version name.
+
+### 14.2 `GET /v1/app/latest` (device)
+
+```json
+{
+  "version_name": "0.5.0",
+  "version_code": 5000,
+  "sha256": "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+  "size": 15728640,
+  "min_supported_version_code": 4000,
+  "download_path": "/v1/app/apk/0.5.0"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `version_name`, `version_code` | The newest published APK (§14.1) |
+| `sha256` | SHA-256 of the APK file, 64 lowercase hex digits. Hex, not b64u (§1), so it reads the same as `sha256sum` and the `.sha256` file on the GitHub Release |
+| `size` | APK size in bytes |
+| `min_supported_version_code` | The spec's `min_supported_version`, as a version code: an installed app with a lower code must update (§14.5). `0` when every version is supported. Never higher than `version_code` |
+| `download_path` | Path of the APK on this server, always `/v1/app/apk/<version_name>`. The phone appends it to the server URL it enrolled with; it never builds the path itself |
+
+→ `200`, with `Cache-Control: no-store`. When no APK has been published (no metadata file, or one
+that fails validation), → `404 not_found`; the phone treats that as "nothing to update" and
+"nothing required", which is also what an older server without this endpoint answers.
+`401 unauthorized` as for every device endpoint.
+
+The server reads the metadata on each request (it is a few hundred bytes), so a newly published
+APK is offered at once, without restarting `pttd`.
+
+### 14.3 `GET /v1/app/apk/{version}` (device)
+
+`{version}` is a version name matching `^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$`;
+anything else → `404 not_found` (never a path lookup). The server serves the file of that version
+if it is still on the server: the newest one and up to two earlier ones are kept, so a phone that
+read `latest` just before a publish can still finish its download.
+
+- `200`, body the APK bytes, `Content-Type: application/vnd.android.package-archive`,
+  `Content-Length` set, `Cache-Control: no-store`, `Last-Modified` from the file.
+- `Range` is supported (one range, `206`; `416` if unsatisfiable), with `If-Range` against
+  `Last-Modified`, because Go's `http.ServeContent` does it for free. The app does not resume
+  downloads in milestone 6; it restarts a failed download on the next check.
+- Unknown or pruned version → `404 not_found`; `401 unauthorized` as usual.
+- The handler lifts the public listener's 30-second write timeout for this response (to 10
+  minutes, with `http.ResponseController.SetWriteDeadline`), so a slow cellular download is not
+  cut off.
+
+### 14.4 The update check (phone)
+
+A periodic WorkManager job *(new)* runs once a day (network required); the `update` package
+*(new)* also runs it on app start at most once every 6 hours.
+
+1. `GET /v1/app/latest`. On `404`, stop: nothing is offered and nothing is required.
+2. Check `min_supported_version_code` against the installed code (§14.5) and remember the result.
+3. If `version_code` is not **strictly higher** than the installed version code, stop.
+4. Download `download_path` into the app's no-backup files directory, hashing while writing.
+   Discard the file unless its length equals `size` and its SHA-256 equals `sha256`.
+5. Inspect the file with `PackageManager.getPackageArchiveInfo(..., GET_SIGNING_CERTIFICATES)` and
+   discard it unless all of these hold:
+   - its package name is the app's own;
+   - its `longVersionCode` equals `version_code` (and so is strictly higher than the installed one);
+   - its signing certificates (`signingInfo.apkContentsSigners`) are exactly the installed app's,
+     compared as SHA-256 digests of the encoded certificates. Android enforces this too, but
+     checking first gives a clear reason and never starts an install that must fail.
+6. Install with a `PackageInstaller` session. On Android 12+ the session asks for
+   `USER_ACTION_NOT_REQUIRED`; Android grants it only once this app is the installer of record,
+   so the first update shows the system Install prompt and later ones can complete silently. When
+   a prompt is needed, the app posts an "Update ready" notification (low-importance channel)
+   that opens the prompt, rather than interrupting the user.
+7. An install never starts while a page is alerting or a talk session is active; the job defers
+   to its next run. The downloaded file is deleted after the install succeeds or fails.
+
+Any failure is logged by class only and retried on the next run; nothing is reported to the
+server beyond the `app_version` the next registration sends.
+
+### 14.5 `min_supported_version_code`
+
+If the installed version code is below `min_supported_version_code`, the app shows a blocking
+"Update required" screen in place of its home screen, with an Update button that runs the update
+check at once (and the install prompt if needed). While it shows:
+
+- incoming pages still alert, can be acknowledged and answered, and the talk screen works for
+  them, so an outdated phone is never unreachable;
+- sending a page (from the app or the widget) opens the "Update required" screen instead;
+- `check_in` replies and registration continue as usual, so the heartbeat sees the old version.
+
+The minimum is set per release in `android/min-supported-version.txt` *(new)* (a version name; `0.0.0`
+means none) and published with the APK. Raising it is a deliberate PR. It never helps the server
+drop an old API sooner: the spec's compatibility rule (the server supports the previous app
+version's API for at least 30 days after a new app release) still applies.
