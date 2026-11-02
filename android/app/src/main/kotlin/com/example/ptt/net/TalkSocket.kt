@@ -36,6 +36,9 @@ interface TransportSocket {
 
     fun sendBinary(bytes: ByteArray): Boolean
 
+    /** Bytes queued on the connection and not yet transmitted. */
+    fun queuedBytes(): Long
+
     /** A graceful close with [code]. */
     fun close(code: Int)
 
@@ -72,6 +75,8 @@ class OkHttpTalkTransport(client: OkHttpClient, private val state: EnrollmentSta
         override fun sendText(text: String) = ws.send(text)
 
         override fun sendBinary(bytes: ByteArray) = ws.send(bytes.toByteString())
+
+        override fun queuedBytes() = ws.queueSize()
 
         override fun close(code: Int) {
             ws.close(code, null)
@@ -135,8 +140,11 @@ sealed interface SocketEvent {
 
     class Frame(val bytes: ByteArray) : SocketEvent
 
-    /** A round-trip time measured from a `pong`. */
-    data class Rtt(val millis: Long) : SocketEvent
+    /**
+     * One RTT sample (section 13.9): a `pong`, or on a joined protocol-2 socket a `ping` left unanswered for 800 ms.
+     * A `pong` that comes after its ping's timeout is no sample; every `pong` is also delivered as a [Message].
+     */
+    data class Rtt(val sample: RttSample) : SocketEvent
 
     /** The last event of a socket. */
     data class Closed(val reaction: CloseReaction, val code: Int?, val httpStatus: Int?) : SocketEvent
@@ -177,7 +185,8 @@ enum class CloseReaction {
 
 /**
  * One physical WebSocket to the server: sends `hello` first (strict codec), reports the server's messages in
- * order on [events], pings every [PING_INTERVAL_MS] for RTT and liveness, and ends with exactly one
+ * order on [events], pings every [PING_INTERVAL_MS] for RTT and liveness (faster once [joined] on protocol 2), and
+ * ends with exactly one
  * [SocketEvent.Closed]. Reconnecting is the caller's business (a new [TalkSocket] each time). Never logs.
  */
 class TalkSocket(
@@ -206,7 +215,16 @@ class TalkSocket(
     @Volatile
     private var sentToken: String? = null
     private var helloTimeout: Job? = null
+
+    /** Guards [pinger], [watchdog] and [clipTimers]: a timer is never started once [finish] has cancelled them. */
+    private val timers = Any()
     private var pinger: Job? = null
+    private var watchdog: Job? = null
+    private val rtt = RttSamples()
+
+    @Volatile
+    private var protocol = 1
+    private var clipTimers = false
     private val started = AtomicBoolean(false)
 
     /** Opens the connection. Once. */
@@ -243,11 +261,47 @@ class TalkSocket(
         } catch (_: ProtocolException) {
             return false
         }
-        return socket?.sendText(text) ?: false
+        val sent = socket?.sendText(text) ?: false
+        if (sent && message is ClientMessage.Ping) synchronized(rtt) { rtt.pingSent(message.t) }
+        return sent
+    }
+
+    /**
+     * The join was acknowledged. On a protocol-2 socket the client now pings every [CLIP_PING_INTERVAL_MS] and
+     * treats [CLIP_DEAD_AFTER_MS] without any server message as a dead socket (section 13.9); otherwise nothing
+     * changes.
+     */
+    fun joined() {
+        synchronized(timers) {
+            if (protocol < CLIP_PROTOCOL || finished.get() || clipTimers) return
+            clipTimers = true
+            pinger?.cancel()
+            pinger = scope.launch {
+                while (true) {
+                    delay(RttSamples.TIMEOUT_MS)
+                    synchronized(rtt) { rtt.expire(nowMs()) }.forEach { channel.trySend(SocketEvent.Rtt(it)) }
+                    delay(CLIP_PING_INTERVAL_MS - RttSamples.TIMEOUT_MS)
+                    send(ClientMessage.Ping(nowMs()))
+                }
+            }
+            watchdog = scope.launch {
+                while (true) {
+                    val quiet = nowMs() - lastInboundMs
+                    if (quiet >= CLIP_DEAD_AFTER_MS) {
+                        finish(CloseReaction.RECONNECT, null, null)
+                        return@launch
+                    }
+                    delay(CLIP_DEAD_AFTER_MS - quiet)
+                }
+            }
+        }
     }
 
     /** Sends one sealed audio frame (a binary frame). */
     fun sendFrame(frame: ByteArray): Boolean = ready && (socket?.sendBinary(frame) ?: false)
+
+    /** Bytes handed to the socket and not yet transmitted (the talker's 16 KB backlog rule, section 13.6). */
+    val unsentBytes: Long get() = socket?.queuedBytes() ?: 0L
 
     /** Closes gracefully (client-initiated, code 1000); no further events except the final [SocketEvent.Closed]. */
     fun close() {
@@ -268,7 +322,10 @@ class TalkSocket(
         if (!finished.compareAndSet(false, true)) return
         ready = false
         helloTimeout?.cancel()
-        pinger?.cancel()
+        synchronized(timers) {
+            pinger?.cancel()
+            watchdog?.cancel()
+        }
         if (notifyAuth && reaction == CloseReaction.UNAUTHORIZED) sentToken?.let(auth::rejected)
         sentToken = null
         socket?.cancel()
@@ -297,14 +354,14 @@ class TalkSocket(
                 if (ready) return
                 ready = true
                 helloTimeout?.cancel()
-                channel.trySend(SocketEvent.Ready(message.deviceId, minOf(message.protocol, TALK_PROTOCOL)))
+                protocol = minOf(message.protocol, MAX_TALK_PROTOCOL)
+                channel.trySend(SocketEvent.Ready(message.deviceId, protocol))
                 startPings()
                 return
             }
             if (!ready) return
             if (message is ServerMessage.Pong) {
-                channel.trySend(SocketEvent.Rtt((nowMs() - message.t).coerceAtLeast(0)))
-                return
+                synchronized(rtt) { rtt.pong(message.t, nowMs()) }?.let { channel.trySend(SocketEvent.Rtt(it)) }
             }
             channel.trySend(SocketEvent.Message(message))
         }
@@ -320,13 +377,16 @@ class TalkSocket(
     }
 
     private fun startPings() {
-        pinger = scope.launch {
-            while (true) {
-                send(ClientMessage.Ping(nowMs()))
-                delay(PING_INTERVAL_MS)
-                if (nowMs() - lastInboundMs > DEAD_AFTER_MS) {
-                    finish(CloseReaction.RECONNECT, null, null)
-                    return@launch
+        synchronized(timers) {
+            if (finished.get()) return
+            pinger = scope.launch {
+                while (true) {
+                    send(ClientMessage.Ping(nowMs()))
+                    delay(PING_INTERVAL_MS)
+                    if (nowMs() - lastInboundMs > DEAD_AFTER_MS) {
+                        finish(CloseReaction.RECONNECT, null, null)
+                        return@launch
+                    }
                 }
             }
         }
@@ -338,6 +398,13 @@ class TalkSocket(
 
         /** No message of any kind from the server for this long: the connection is dead. */
         const val DEAD_AFTER_MS = 30_000L
+
+        /** Ping interval while joined on a protocol-2 socket (section 13.9). */
+        const val CLIP_PING_INTERVAL_MS = 2_000L
+
+        /** A joined protocol-2 socket with no server message for this long is dead (section 13.9). */
+        const val CLIP_DEAD_AFTER_MS = 6_000L
+        private const val CLIP_PROTOCOL = 2
         private const val NORMAL_CLOSE = 1000
         private const val CLOSE_GRACE_MS = 2_000L
     }

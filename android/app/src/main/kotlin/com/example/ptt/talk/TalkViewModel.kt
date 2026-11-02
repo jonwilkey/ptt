@@ -362,7 +362,7 @@ class TalkViewModel @Inject constructor(
     /** The cue a session event makes, if any — the screen hears only its own page's events. */
     private fun cueFor(event: TalkEvent): Cue? = when (event) {
         is TalkEvent.PeerJoined -> Cue.JOINED
-        is TalkEvent.FloorGrantedToYou -> Cue.GO
+        is TalkEvent.FloorGrantedToYou, is TalkEvent.RecordingClip -> Cue.GO
         is TalkEvent.FloorReleased -> if (event.yours) null else Cue.OVER
         is TalkEvent.FloorBusy, is TalkEvent.NoPeer -> Cue.BUSY
         else -> null

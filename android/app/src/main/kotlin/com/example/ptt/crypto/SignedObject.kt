@@ -13,8 +13,11 @@ class SignedObject(val payload: ByteArray, val signer: String, val sig: ByteArra
         const val SIGNATURE_BYTES = 64
 
         /** Strictly decodes wire JSON; throws [ProtocolException] unless it is shaped as section 3 requires. */
-        fun fromWire(wire: ByteArray): SignedObject {
-            val obj = StrictJson.parse(wire).asObject("signed object").exactly("payload", "signer", "sig")
+        fun fromWire(wire: ByteArray): SignedObject = fromJson(StrictJson.parse(wire))
+
+        /** Like [fromWire] for a signed object already read from a larger document. */
+        fun fromJson(value: JsonValue): SignedObject {
+            val obj = value.asObject("signed object").exactly("payload", "signer", "sig")
             val payload = B64u.decode(obj.string("payload"))
             ensure(payload.isNotEmpty()) { "signed object payload is empty" }
             val signer = obj.string("signer")

@@ -69,8 +69,16 @@ class EnvelopePayload(
     }
 }
 
-/** A freshly built envelope and the session key it carries (kept by the sender for the audio session). */
-class BuiltEnvelope(val signed: SignedObject, val payload: EnvelopePayload, val sessionKey: ByteArray)
+/**
+ * A freshly built envelope and the session key it carries (kept by the sender for the audio session), with the
+ * sender's own signed copy of the key ([senderKey]), which never travels with the envelope.
+ */
+class BuiltEnvelope(
+    val signed: SignedObject,
+    val payload: EnvelopePayload,
+    val sessionKey: ByteArray,
+    val senderKey: SignedObject
+)
 
 /** The push fields a receiver compares against the envelope. [fromUser] is the server-reported sender user. */
 class PagePush(val pageId: String, val level: String, val fromUser: String)
@@ -134,7 +142,8 @@ object PageEnvelopes {
         val bytes = payload.encode()
         // Reject anything the server or a receiver would reject, before it is signed.
         EnvelopePayload.parse(bytes)
-        return BuiltEnvelope(keys.signObject(Contexts.ENVELOPE, senderId, bytes), payload, sessionKey)
+        val senderKey = SenderKeys.build(keys, senderId, pageId, sessionId, sessionKey)
+        return BuiltEnvelope(keys.signObject(Contexts.ENVELOPE, senderId, bytes), payload, sessionKey, senderKey)
     }
 
     /**

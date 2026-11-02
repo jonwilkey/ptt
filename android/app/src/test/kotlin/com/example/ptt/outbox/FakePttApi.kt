@@ -10,6 +10,7 @@ import com.example.ptt.net.DeliveredResponse
 import com.example.ptt.net.EnrollRequest
 import com.example.ptt.net.EnrollResponse
 import com.example.ptt.net.EnrollmentCodeStatusResponse
+import com.example.ptt.net.PageRecoveryResponse
 import com.example.ptt.net.PttApi
 import com.example.ptt.net.RosterResponse
 import com.example.ptt.net.UpdateDeviceRequest
@@ -44,6 +45,14 @@ class FakePttApi : PttApi {
         calls += "page:${request.id}"
         pageRequests += request
         return pageResults.next(ApiResult.Success(CreatePageResponse(request.id, "ringing")))
+    }
+
+    /** What `GET /v1/pages/{id}` answers; the page ids asked for are in [calls] as `get:<id>`. */
+    var pageResult: ApiResult<PageRecoveryResponse> = ApiResult.Final(404, "not_found")
+
+    override suspend fun getPage(pageId: String): ApiResult<PageRecoveryResponse> {
+        calls += "get:$pageId"
+        return pageResult
     }
 
     override suspend fun delivered(pageId: String): ApiResult<DeliveredResponse> {

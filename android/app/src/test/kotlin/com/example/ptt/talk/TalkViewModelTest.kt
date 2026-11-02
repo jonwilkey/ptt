@@ -706,6 +706,35 @@ class TalkViewModelTest {
     }
 
     @Test
+    fun onProtocolTwoTheAnswererTalksWithThePeerAway() = runTest {
+        val l = receiverLive()
+        val vm = l.rig.vm
+        l.talk.state.value = conversation(peer = false).copy(protocol2 = true)
+        runCurrent()
+        assertTrue(vm.live.value.waitingForPeer)
+        assertTrue("granted with the peer away (section 13.7)", vm.live.value.talkEnabled)
+    }
+
+    @Test
+    fun onProtocolTwoTheFirstTalkerLockStillHoldsWithThePeerAway() = runTest {
+        val sender = senderLive()
+        sender.talk.state.value = conversation(peer = false).copy(protocol2 = true, firstTalkerLocked = true)
+        runCurrent()
+        assertTrue(sender.rig.vm.live.value.firstTalkerLocked)
+        assertFalse(sender.rig.vm.live.value.talkEnabled)
+    }
+
+    @Test
+    fun theOwnTransmissionsLineAndStillCapturingShowAsYou() = runTest {
+        val l = receiverLive()
+        val vm = l.rig.vm
+        l.talk.state.value = conversation().copy(capturing = true, ownNotice = OwnNotice.SENDING_AS_CLIP)
+        runCurrent()
+        assertEquals(Speaker.YOU, vm.live.value.speaker)
+        assertEquals(OwnNotice.SENDING_AS_CLIP, vm.live.value.ownNotice)
+    }
+
+    @Test
     fun aStaleSessionOfAnotherPageShowsNothing() = runTest {
         val l = receiverLive()
         l.talk.state.value = conversation(rtt = 50).copy(pageId = OTHER, floor = TalkFloor.PEER_TALKING)
@@ -805,6 +834,29 @@ class TalkViewModelTest {
         l.talk.events.emit(TalkEvent.NoPeer)
         runCurrent()
         assertEquals(listOf(Cue.JOINED, Cue.GO, Cue.OVER, Cue.BUSY, Cue.BUSY), l.cues.played)
+    }
+
+    @Test
+    fun aClipModePressChirpsAtOnce() = runTest {
+        val l = receiverLive()
+        l.talk.state.value = conversation()
+        runCurrent()
+        l.talk.events.emit(TalkEvent.RecordingClip)
+        runCurrent()
+        assertEquals(listOf(Cue.GO), l.cues.played)
+    }
+
+    @Test
+    fun clipModeFollowsTheSession() = runTest {
+        val l = receiverLive()
+        val vm = l.rig.vm
+        l.talk.state.value = conversation().copy(clipMode = true, protocol2 = true)
+        runCurrent()
+        assertTrue(vm.live.value.clipMode)
+        assertTrue("talk works in clip mode", vm.live.value.talkEnabled)
+        l.talk.state.value = conversation().copy(clipMode = false, protocol2 = true)
+        runCurrent()
+        assertFalse(vm.live.value.clipMode)
     }
 
     @Test

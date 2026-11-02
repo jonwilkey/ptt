@@ -1,5 +1,8 @@
 package com.example.ptt.net
 
+import com.example.ptt.crypto.AudioFrame
+import com.example.ptt.crypto.B64u
+import com.example.ptt.crypto.SignedObject
 import com.example.ptt.crypto.Validation
 import com.example.ptt.crypto.ensure
 import kotlinx.serialization.SerializationException
@@ -11,8 +14,11 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
-/** The `hello.protocol` this build speaks (docs/protocol.md section 11.1). */
-const val TALK_PROTOCOL = 1
+/** The `hello.protocol` this build advertises (docs/protocol.md section 11.1). */
+const val TALK_PROTOCOL = 2
+
+/** The highest protocol this build's code can speak; a server answering `hello` with up to this value is believed. */
+const val MAX_TALK_PROTOCOL = TALK_PROTOCOL
 
 /** Messages the phone sends over the WebSocket (docs/protocol.md section 11.2). The server is strict about them. */
 sealed interface ClientMessage {
@@ -23,11 +29,21 @@ sealed interface ClientMessage {
 
     data class Join(val sessionId: String) : ClientMessage
 
-    data class FloorRequest(val transmissionId: String) : ClientMessage
+    /** [clip] is required on a protocol-2 socket and not allowed on a protocol-1 one (null there, section 13.2). */
+    data class FloorRequest(val transmissionId: String, val clip: Boolean? = null) : ClientMessage
 
     data class FloorRelease(val transmissionId: String) : ClientMessage
 
     data object SessionEnd : ClientMessage
+
+    /** `sender_key` (protocol 2, section 13.2): the sender's signed copy of the session key. */
+    class SenderKey(val key: SignedObject) : ClientMessage
+
+    /** `heard` (protocol 2, section 13.5): every frame 0 .. [lastSeq] of [transmissionId] was accepted. */
+    data class Heard(val transmissionId: String, val lastSeq: Int) : ClientMessage
+
+    /** `resume` (protocol 2, section 13.6): where to continue the talker's unfinished transmission. */
+    data class Resume(val transmissionId: String) : ClientMessage
 
     data class Ping(val t: Long) : ClientMessage
 }
@@ -105,6 +121,15 @@ sealed interface ServerMessage {
     data class Error(val code: WsErrorCode) : ServerMessage
 
     data class Pong(val t: Long, val serverTime: Long) : ServerMessage
+
+    /** Protocol 2 (section 13.2): the frames of [transmissionId] that follow are a replay, ending at [lastSeq]. */
+    data class Clip(val talker: String, val transmissionId: String, val lastSeq: Int) : ServerMessage
+
+    /** Protocol 2, to the talker only: the listener did not get [transmissionId] live (section 13.4). */
+    data class ListenerGap(val transmissionId: String) : ServerMessage
+
+    /** Protocol 2, the reply to `resume`: the highest seq the server holds, -1 for none (section 13.6). */
+    data class ResumeFrom(val lastSeq: Int) : ServerMessage
 }
 
 /**
@@ -118,6 +143,9 @@ object TalkCodec {
     const val MAX_TEXT_BYTES = 1024
     private const val MAX_SAFE_INT = 9_007_199_254_740_991L
     private const val TOKEN_LENGTH = 43
+
+    /** A transmission has at most 3000 frames (section 13.10), so a `clip.last_seq` is 0 to 2999. */
+    private const val MAX_CLIP_SEQ = 2999L
     private val json = Json
 
     @Suppress("CyclomaticComplexMethod")
@@ -143,6 +171,7 @@ object TalkCodec {
                     Validation.requireUuid(message.transmissionId, "transmission id")
                     put("type", "floor_request")
                     put("transmission_id", message.transmissionId)
+                    message.clip?.let { put("clip", it) }
                 }
 
                 is ClientMessage.FloorRelease -> {
@@ -152,6 +181,35 @@ object TalkCodec {
                 }
 
                 ClientMessage.SessionEnd -> put("type", "session_end")
+
+                is ClientMessage.SenderKey -> {
+                    Validation.requireUuid(message.key.signer, "signer")
+                    ensure(message.key.payload.isNotEmpty()) { "payload is empty" }
+                    ensure(message.key.sig.size == SignedObject.SIGNATURE_BYTES) { "bad signature length" }
+                    put("type", "sender_key")
+                    put(
+                        "key",
+                        buildJsonObject {
+                            put("payload", B64u.encode(message.key.payload))
+                            put("signer", message.key.signer)
+                            put("sig", B64u.encode(message.key.sig))
+                        }
+                    )
+                }
+
+                is ClientMessage.Heard -> {
+                    Validation.requireUuid(message.transmissionId, "transmission id")
+                    ensure(message.lastSeq in 0..AudioFrame.MAX_SEQ) { "last_seq out of range" }
+                    put("type", "heard")
+                    put("transmission_id", message.transmissionId)
+                    put("last_seq", message.lastSeq)
+                }
+
+                is ClientMessage.Resume -> {
+                    Validation.requireUuid(message.transmissionId, "transmission id")
+                    put("type", "resume")
+                    put("transmission_id", message.transmissionId)
+                }
 
                 is ClientMessage.Ping -> {
                     ensure(message.t in 0..MAX_SAFE_INT) { "t out of range" }
@@ -204,6 +262,18 @@ object TalkCodec {
 
             "pong" -> ServerMessage.Pong(obj.long("t") ?: return null, obj.long("server_time") ?: return null)
 
+            "clip" -> ServerMessage.Clip(
+                obj.uuid("talker") ?: return null,
+                obj.uuid("transmission_id") ?: return null,
+                obj.long("last_seq")?.takeIf { it <= MAX_CLIP_SEQ }?.toInt() ?: return null
+            )
+
+            "listener_gap" -> ServerMessage.ListenerGap(obj.uuid("transmission_id") ?: return null)
+
+            "resume_from" -> ServerMessage.ResumeFrom(
+                obj.signed("last_seq")?.takeIf { it in -1L..MAX_CLIP_SEQ }?.toInt() ?: return null
+            )
+
             else -> null
         }
     }
@@ -219,9 +289,11 @@ object TalkCodec {
     private fun JsonObject.str(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
-    private fun JsonObject.long(key: String): Long? {
+    private fun JsonObject.long(key: String): Long? = signed(key)?.takeIf { it >= 0 }
+
+    private fun JsonObject.signed(key: String): Long? {
         val p = this[key] as? JsonPrimitive ?: return null
-        return if (p.isString) null else p.longOrNull?.takeIf { it >= 0 }
+        return if (p.isString) null else p.longOrNull
     }
 
     private fun JsonObject.uuid(key: String): String? = str(key)?.takeIf(Validation::isUuid)

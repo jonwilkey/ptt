@@ -14,7 +14,7 @@ fun await(what: String, condition: () -> Boolean) {
 }
 
 /** A microphone that never runs dry. [pace] sleeps in [read] so loops that wait for a trigger do not spin. */
-class FakeSource(private val clock: AtomicLong? = null, private val paceMs: Long = 1) : PcmSource {
+open class FakeSource(private val clock: AtomicLong? = null, private val paceMs: Long = 1) : PcmSource {
     @Volatile var started = false
 
     @Volatile var closed = false

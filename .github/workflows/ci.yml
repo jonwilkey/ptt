@@ -108,6 +108,10 @@ jobs:
       - name: ktlint, detekt, Android Lint, unit and Robolectric tests, debug build
         run: ./gradlew --no-daemon ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug
 
+      # The release variant must compile without the debug-only code (network impairment, fake push).
+      - name: Release compile and release-only checks
+        run: ./gradlew --no-daemon compileReleaseKotlin testReleaseUnitTest --tests 'com.example.ptt.net.ReleaseHasNoImpairmentTest'
+
       - name: Upload reports
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

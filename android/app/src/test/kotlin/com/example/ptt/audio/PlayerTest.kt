@@ -1,9 +1,13 @@
 package com.example.ptt.audio
 
+import com.example.ptt.talk.ClipStarted
 import com.example.ptt.talk.IncomingOpus
+import com.example.ptt.talk.LiveEnded
+import java.util.BitSet
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -111,6 +115,44 @@ class PlayerTest {
     }
 
     @Test(timeout = 60_000)
+    fun aClipPlaysWithItsOwnDecoderOnceTheLiveTransmissionHasPlayedOut() {
+        player.handleFrame(frame("a", 0), 0)
+        player.handleFrame(frame("a", 1), 20)
+        player.handleEvent(ClipStarted("c", 1, BitSet()), 30)
+        player.handleFrame(frame("c", 0, 7), 30)
+        player.handleFrame(frame("c", 1, 8), 30)
+        player.handleEvent(LiveEnded("a"), 40)
+        for (t in 0L..2_000L step 10) player.tick(t)
+        assertEquals(listOf(1, 2, 7, 8), played())
+        assertEquals(2, decoders.size)
+        assertTrue(decoders.all { it.closed })
+    }
+
+    @Test(timeout = 60_000)
+    fun liveAudioArrivingWhileAClipWaitsPlaysAfterTheClip() {
+        player.handleEvent(ClipStarted("c", 1, BitSet()), 0)
+        player.handleFrame(frame("c", 0, 7), 0)
+        player.handleFrame(frame("b", 0, 3), 10)
+        player.handleFrame(frame("c", 1, 8), 20)
+        player.handleFrame(frame("b", 1, 4), 30)
+        player.handleEvent(LiveEnded("b"), 40)
+        for (t in 0L..2_000L step 10) player.tick(t)
+        assertEquals(listOf(7, 8, 3, 4), played())
+    }
+
+    @Test(timeout = 60_000)
+    fun nothingQueuedPlaysWhileThisPhoneTalks() {
+        player.handleBusy(true)
+        player.handleEvent(ClipStarted("c", 0, BitSet()), 0)
+        player.handleFrame(frame("c", 0, 7), 0)
+        for (t in 0L..5_000L step 10) player.tick(t)
+        assertEquals(emptyList<Int>(), played())
+        player.handleBusy(false)
+        for (t in 5_000L..6_000L step 10) player.tick(t)
+        assertEquals(listOf(7), played())
+    }
+
+    @Test(timeout = 60_000)
     fun flushDiscardsWhatIsBufferedAndFreesTheDecoder() {
         player.handleFrame(frame("a", 0), 0)
         player.handleFlush()
@@ -149,6 +191,28 @@ class PlayerTest {
         assertEquals("ptt-playout", threads.single().name)
         assertTrue(sinks.single().closed)
         assertTrue(decoders.single().closed)
+    }
+
+    @Test(timeout = 60_000)
+    fun aClipReplayFasterThanPlayoutLosesNoFrameAndNoBoundary() {
+        val now = AtomicLong()
+        val real = Player(
+            decoderFactory = { FakeDecoder(log).also { decoders += it } },
+            sinkFactory = { FakeSink(it).also { s -> sinks += s } },
+            clock = now::get
+        )
+        real.enqueue(ClipStarted("c", 399, BitSet()))
+        for (seq in 0..399) real.enqueue(frame("c", seq, seq % 100))
+        real.enqueue(ClipStarted("d", 9, BitSet()))
+        for (seq in 0..9) real.enqueue(frame("d", seq, 100 + seq))
+        real.start()
+        val expected = (0..399).map { it % 100 } + (100..109)
+        await("both clips to play") {
+            now.addAndGet(AudioSpec.FRAME_MS.toLong())
+            played().size >= expected.size
+        }
+        real.close()
+        assertEquals(expected, played())
     }
 
     @Test(timeout = 60_000)

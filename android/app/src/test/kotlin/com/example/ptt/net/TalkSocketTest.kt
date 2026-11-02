@@ -27,7 +27,7 @@ class TalkSocketTest {
         assertFalse(s.send(ClientMessage.Join(OWN)))
         ws.serverOpen()
         assertEquals(listOf("hello"), ws.types())
-        assertTrue(ws.texts.single().contains("\"protocol\":1"))
+        assertTrue(ws.texts.single().contains("\"protocol\":2"))
         assertFalse("not before hello is answered", s.send(ClientMessage.Join(OWN)))
         ws.serverText(serverHello())
         assertEquals(SocketEvent.Ready(OWN, 1), s.events.receive())
@@ -48,6 +48,31 @@ class TalkSocketTest {
     }
 
     @Test(timeout = 60_000)
+    fun helloAdvertisesTwoAndAProtocolTwoReplyIsBelieved() = runTest {
+        val s = socket()
+        s.open()
+        runCurrent()
+        val ws = transport.sockets.single()
+        ws.serverOpen()
+        ws.serverText(serverHello(protocol = 2))
+        assertEquals(2, (s.events.receive() as SocketEvent.Ready).protocol)
+        assertEquals(2, TALK_PROTOCOL)
+        assertTrue(ws.texts.first().contains("\"protocol\":2"))
+        ws.serverClose(1000)
+    }
+
+    @Test(timeout = 60_000)
+    fun aReplyAboveWhatTheCodeSpeaksIsCapped() = runTest {
+        val s = socket()
+        s.open()
+        runCurrent()
+        val ws = transport.sockets.single()
+        ws.serverOpen()
+        ws.serverText(serverHello(protocol = 3))
+        assertEquals(MAX_TALK_PROTOCOL, (s.events.receive() as SocketEvent.Ready).protocol)
+    }
+
+    @Test(timeout = 60_000)
     fun pingsEveryTenSecondsAndMeasuresRtt() = runTest {
         val s = socket()
         s.open()
@@ -62,8 +87,14 @@ class TalkSocketTest {
         runCurrent()
         assertEquals(2, ws.types().count { it == "ping" })
         // The pong echoes t; 40 ms later the RTT is 40.
-        ws.serverText("""{"type":"pong","t":${testScheduler.currentTime - 40},"server_time":1}""")
-        assertEquals(SocketEvent.Rtt(40), s.events.receive())
+        val sent = testScheduler.currentTime
+        advanceTimeBy(40)
+        ws.serverText("""{"type":"pong","t":$sent,"server_time":1}""")
+        assertEquals(SocketEvent.Rtt(RttSample(sent + 40, 40, false)), s.events.receive())
+        assertEquals(ServerMessage.Pong(sent, 1), (s.events.receive() as SocketEvent.Message).message)
+        ws.serverText("""{"type":"pong","t":$sent,"server_time":1}""")
+        assertTrue("a repeated pong is no second sample", s.events.receive() is SocketEvent.Message)
+        assertTrue(s.events.tryReceive().isFailure)
         // Keep the connection alive and check the cadence continues.
         advanceTimeBy(9_000)
         ws.serverText("""{"type":"pong","t":${testScheduler.currentTime},"server_time":1}""")
@@ -150,6 +181,117 @@ class TalkSocketTest {
         advanceTimeBy(TalkSocket.DEAD_AFTER_MS + TalkSocket.PING_INTERVAL_MS)
         runCurrent()
         assertTrue(s.events.receive() is SocketEvent.Closed)
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.ready(s: TalkSocket, protocol: Int): FakeWs {
+        s.open()
+        runCurrent()
+        val ws = transport.sockets.single()
+        ws.serverOpen()
+        ws.serverText(serverHello(protocol = protocol))
+        s.events.receive()
+        runCurrent()
+        return ws
+    }
+
+    private fun FakeWs.pings() = types().count { it == "ping" }
+
+    /** The next event that is not an RTT sample (a joined protocol-2 socket makes one per unanswered ping). */
+    private suspend fun TalkSocket.nextNonRtt(): SocketEvent {
+        while (true) {
+            val e = events.receive()
+            if (e !is SocketEvent.Rtt) return e
+        }
+    }
+
+    private fun TalkSocket.anyNonRtt(): Boolean {
+        while (true) {
+            val e = events.tryReceive().getOrNull() ?: return false
+            if (e !is SocketEvent.Rtt) return true
+        }
+    }
+
+    @Test(timeout = 60_000)
+    fun joinedOnProtocolTwoPingsEveryTwoSecondsAndASixSecondSilenceIsDead() = runTest {
+        val s = socket()
+        val ws = ready(s, protocol = 2)
+        s.joined()
+        assertEquals(1, ws.pings())
+        advanceTimeBy(TalkSocket.CLIP_PING_INTERVAL_MS)
+        runCurrent()
+        assertEquals(2, ws.pings())
+        advanceTimeBy(TalkSocket.CLIP_PING_INTERVAL_MS)
+        runCurrent()
+        assertEquals(3, ws.pings())
+        // a server message restarts the 6 s
+        ws.serverText("""{"type":"floor_busy"}""")
+        assertTrue(s.nextNonRtt() is SocketEvent.Message)
+        advanceTimeBy(TalkSocket.CLIP_DEAD_AFTER_MS - 1)
+        runCurrent()
+        assertFalse("still alive at 5.999 s", s.anyNonRtt())
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(SocketEvent.Closed(CloseReaction.RECONNECT, null, null), s.nextNonRtt())
+        assertTrue(ws.cancelled)
+    }
+
+    @Test(timeout = 60_000)
+    fun protocolOneKeepsTheMilestoneFourTimersWhenJoined() = runTest {
+        val s = socket()
+        val ws = ready(s, protocol = 1)
+        s.joined()
+        advanceTimeBy(TalkSocket.PING_INTERVAL_MS - 1)
+        runCurrent()
+        assertEquals(1, ws.pings())
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(2, ws.pings())
+        advanceTimeBy(TalkSocket.CLIP_DEAD_AFTER_MS * 3)
+        runCurrent()
+        assertTrue("6 s of silence is not dead on protocol 1", s.events.tryReceive().isFailure)
+    }
+
+    @Test(timeout = 60_000)
+    fun anUnjoinedProtocolTwoSocketKeepsTheMilestoneFourTimers() = runTest {
+        val s = socket()
+        val ws = ready(s, protocol = 2)
+        advanceTimeBy(TalkSocket.CLIP_DEAD_AFTER_MS + 1)
+        runCurrent()
+        assertEquals(1, ws.pings())
+        assertTrue(s.events.tryReceive().isFailure)
+    }
+
+    @Test(timeout = 60_000)
+    fun rttSamplesCountAnUnansweredPingOnceAndIgnoreItsLatePong() = runTest {
+        val s = socket()
+        val ws = ready(s, protocol = 2)
+        val first = testScheduler.currentTime
+        ws.serverText("""{"type":"pong","t":$first,"server_time":1}""")
+        assertEquals(SocketEvent.Rtt(RttSample(first, 0, false)), s.events.receive())
+        assertTrue(s.events.receive() is SocketEvent.Message)
+        s.joined()
+        advanceTimeBy(TalkSocket.CLIP_PING_INTERVAL_MS)
+        runCurrent()
+        val unanswered = testScheduler.currentTime
+        advanceTimeBy(RttSamples.TIMEOUT_MS)
+        runCurrent()
+        assertEquals(
+            SocketEvent.Rtt(RttSample(unanswered + RttSamples.TIMEOUT_MS, 800, true)),
+            s.events.receive()
+        )
+        ws.serverText("""{"type":"pong","t":$unanswered,"server_time":1}""")
+        assertEquals(
+            "a late pong is no second sample, but it is still delivered",
+            ServerMessage.Pong(unanswered, 1),
+            (s.events.receive() as SocketEvent.Message).message
+        )
+        assertTrue(s.events.tryReceive().isFailure)
+        advanceTimeBy(TalkSocket.CLIP_PING_INTERVAL_MS - RttSamples.TIMEOUT_MS)
+        runCurrent()
+        val answered = testScheduler.currentTime
+        advanceTimeBy(50)
+        ws.serverText("""{"type":"pong","t":$answered,"server_time":1}""")
+        assertEquals(SocketEvent.Rtt(RttSample(answered + 50, 50, false)), s.events.receive())
     }
 
     @Test(timeout = 60_000)

@@ -68,6 +68,9 @@ class Recorder(
     @Volatile
     private var stopRequested = false
 
+    /** Set under the lock by the capture thread once it will read no more commands; [start] then refuses. */
+    private var expired = false
+
     @Volatile
     var phase = Phase.IDLE
         private set
@@ -92,10 +95,16 @@ class Recorder(
      * The floor was granted: begin recording and sending. Ignored once finished; starts the pre-warm if needed.
      * [grantedAtMs] (on [clock]) is when the grant reached this phone; the 59.5 s cap counts from it, not from the
      * moment the microphone happens to start delivering.
+     *
+     * Returns false when this recorder can no longer capture (its pre-warm timed out or it finished): the caller
+     * needs a fresh one. A true return means the capture thread will see the command.
      */
-    fun start(grantedAtMs: Long = clock()) {
+    @Synchronized
+    fun start(grantedAtMs: Long = clock()): Boolean {
         prewarm()
+        if (expired) return false
         commands.add(Command.Start(grantedAtMs))
+        return true
     }
 
     /** Ends the pre-warm or the capture. Safe from any thread, any number of times. */
@@ -114,7 +123,7 @@ class Recorder(
             source = sourceFactory()
             stage = StopReason.CODEC_UNAVAILABLE
             encoder = encoderFactory()
-            val command = commands.poll(prewarmTimeoutMs, TimeUnit.MILLISECONDS)
+            val command = nextCommand()
             if (command is Command.Start && !stopRequested) {
                 phase = Phase.CAPTURING
                 reason = capture(source, encoder, command.grantedAtMs)
@@ -127,11 +136,25 @@ class Recorder(
             // Codec and audio-device failures are all unchecked; an audio thread must never crash the app.
             reason = stage
         } finally {
+            expire()
             closeQuietly(source)
             closeQuietly(encoder)
             phase = Phase.DONE
         }
         if (reason != StopReason.REQUESTED) onStopped(reason)
+    }
+
+    /** Waits for the first command. On a timeout it takes one that raced in, else expires under [start]'s lock. */
+    private fun nextCommand(): Command? {
+        commands.poll(prewarmTimeoutMs, TimeUnit.MILLISECONDS)?.let { return it }
+        return synchronized(this) {
+            commands.poll().also { if (it == null) expired = true }
+        }
+    }
+
+    @Synchronized
+    private fun expire() {
+        expired = true
     }
 
     @Suppress("ReturnCount")

@@ -1,6 +1,8 @@
 package com.example.ptt.audio
 
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -132,6 +134,47 @@ class RecorderTest {
         assertFalse(sources.single().started)
         assertEquals(0, sent.threads.size)
         assertTrue(stops.isEmpty())
+    }
+
+    @Test(timeout = 60_000)
+    fun aStartAfterThePrewarmTimedOutIsRefusedNotQueuedForNobody() {
+        val closing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val r = Recorder(
+            sendOpus = sent::send,
+            sourceFactory = {
+                object : PcmSource {
+                    override fun start() = Unit
+
+                    override fun read(buffer: ShortArray) = -1
+
+                    override fun close() {
+                        closing.countDown()
+                        release.await()
+                    }
+                }
+            },
+            encoderFactory = { FakeEncoder() },
+            clock = clock::get,
+            prewarmTimeoutMs = 20,
+            onStopped = { stops += it }
+        )
+        r.prewarm()
+        assertTrue(closing.await(20, TimeUnit.SECONDS))
+        assertEquals("the thread is still shutting down", Recorder.Phase.PREWARM, r.phase)
+        assertFalse(r.start())
+        release.countDown()
+        await("done") { r.phase == Recorder.Phase.DONE }
+        assertEquals(0, sent.threads.size)
+        assertFalse(r.start())
+    }
+
+    @Test(timeout = 60_000)
+    fun startReturnsTrueWhileTheRecorderIsLive() {
+        val r = recorder()
+        assertTrue(r.start())
+        await("packets") { sent.count.get() >= 3 }
+        r.stop()
     }
 
     @Test(timeout = 60_000)

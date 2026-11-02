@@ -1,5 +1,10 @@
 package com.example.ptt.net
 
+import com.example.ptt.crypto.ProtocolException
+import com.example.ptt.crypto.SignedObject
+import com.example.ptt.crypto.StrictJson
+import com.example.ptt.crypto.asObject
+import com.example.ptt.crypto.exactly
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -110,6 +115,25 @@ data class CreatePageRequest(
 /** Response of `POST /v1/pages`: `ringing`, or `ended` for a failed or already-ended page. */
 @Serializable
 data class CreatePageResponse(val id: String, val state: String)
+
+/**
+ * Response of `GET /v1/pages/{id}` (docs/protocol.md section 6): exactly `envelope` and `sender_key`, each exactly
+ * `payload`, `signer` and `sig`. The signatures are checked by the caller, with its own keys.
+ */
+class PageRecoveryResponse(val envelope: SignedObject, val senderKey: SignedObject) {
+    override fun toString() = "PageRecoveryResponse(signer=${envelope.signer})"
+
+    companion object {
+        /** Throws [ProtocolException] unless [text] has exactly the documented shape. */
+        fun parse(text: String): PageRecoveryResponse {
+            val top = StrictJson.parse(text).asObject("page").exactly("envelope", "sender_key")
+            return PageRecoveryResponse(
+                SignedObject.fromJson(top.members.getValue("envelope")),
+                SignedObject.fromJson(top.members.getValue("sender_key"))
+            )
+        }
+    }
+}
 
 /** Response of `POST /v1/pages/{id}/delivered`: `ringing`, `acknowledged` or `answered`. */
 @Serializable

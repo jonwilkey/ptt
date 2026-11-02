@@ -3,11 +3,14 @@ package com.example.ptt.talk
 import com.example.ptt.alert.AlertEngine
 import com.example.ptt.alert.IncomingPage
 import com.example.ptt.crypto.B64u
+import com.example.ptt.crypto.DeviceKeys
 import com.example.ptt.crypto.DropReason
 import com.example.ptt.crypto.EnvelopePayload
 import com.example.ptt.crypto.PageEnvelopes
 import com.example.ptt.crypto.PagePush
 import com.example.ptt.crypto.ReceiveResult
+import com.example.ptt.crypto.RecoveryResult
+import com.example.ptt.crypto.SenderKeys
 import com.example.ptt.crypto.SignedObject
 import com.example.ptt.data.OutboxDao
 import com.example.ptt.data.OutboxEntity
@@ -67,6 +70,8 @@ class PageSenderTest {
 
     private suspend fun rows() = f.db.outboxDao().all()
 
+    private fun requestOf(row: OutboxEntity) = Json.decodeFromString(CreatePageRequest.serializer(), row.body)
+
     private fun toSigned(request: CreatePageRequest) = SignedObject(
         B64u.decode(request.envelope.payload),
         request.envelope.signer,
@@ -98,6 +103,30 @@ class PageSenderTest {
         assertArrayEquals(gotA.sessionKey, keys.get(request.id))
         val outsider = PageEnvelopes.receive(roster, LEE, h.leeKeys, signed, push) as ReceiveResult.Dropped
         assertEquals(DropReason.NOT_FOR_THIS_USER, outsider.reason)
+    }
+
+    @Test
+    fun theSenderKeyIsKeptInMemoryNextToTheKeyAndNeverSentOrStored() = runTest {
+        val rig = rig()
+        val pageId = (rig.sender.send(ADMIN_USER, "normal") as SendResult.Sent).pageId
+        val senderKey = keys.senderKey(pageId)!!
+        assertEquals(SELF, senderKey.signer)
+        val own = DeviceKeys.load(f.keyStore)
+        val result = SenderKeys.recover(
+            SELF,
+            own.ed25519Public,
+            own,
+            pageId,
+            toSigned(requestOf(rows().single())),
+            senderKey
+        )
+        assertArrayEquals(keys.get(pageId), (result as RecoveryResult.Recovered).sessionKey)
+        val everything = rows().joinToString("\n") { it.body } + f.activePage.current().toString()
+        listOf(B64u.encode(senderKey.payload), B64u.encode(senderKey.sig), B64u.encode(keys.get(pageId)!!)).forEach {
+            assertFalse("persisted state leaks the sender key or the session key", it in everything)
+        }
+        keys.clear(pageId)
+        assertNull(keys.senderKey(pageId))
     }
 
     @Test
@@ -243,6 +272,7 @@ class PageSenderTest {
         assertEquals(setOf(SELF), EnvelopePayload.parse(toSigned(request).payload).keys.keys)
         // The receive path refuses a page whose key is already held, so the sender must not hold it.
         assertFalse(keys.has(result.pageId))
+        assertNull("nothing to send: a self page has no live session", keys.senderKey(result.pageId))
         assertEquals(PageRole.SENDER, f.activePage.current()?.role)
     }
 
