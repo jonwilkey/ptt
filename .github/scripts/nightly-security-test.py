@@ -99,6 +99,23 @@ class Normalize(unittest.TestCase):
         self.assertEqual([(x["id"], x["package"], x["installed"], x["fixed"]) for x in found],
                          [("GO-2026-0001", "Go/stdlib", "v1.27.3", "v1.2.3")])
 
+    def test_osv_id_rule(self):
+        self.assertEqual(ns.pick_id(["GO-2026-1", "GHSA-x", "CVE-2026-9"]), "CVE-2026-9")
+        self.assertEqual(ns.pick_id(["GO-2026-1", "GHSA-x", "BIT-1"]), "GHSA-x")
+        self.assertEqual(ns.pick_id(["GO-2026-1", "PYSEC-1"]), "GO-2026-1")
+        self.assertEqual(ns.pick_id(["PYSEC-2", "BIT-1"]), "BIT-1")
+
+    def test_body_is_inert(self):
+        x = ns.make("Trivy", "CVE-1", "Go", "m", "HIGH", "1.0 | @everyone\n`x`", "2.0", "deployed image @org/team|`y`")
+        text = ns.body(x, "https://example.com/run")
+        row = next(l for l in text.splitlines() if l.startswith("| Installed"))
+        self.assertEqual(row.count("|"), 3)  # no extra cell
+        self.assertEqual(row, "| Installed | `1.0   @everyone x` |")  # one code span, | and ` gone
+        found = next(l for l in text.splitlines() if l.startswith("| Found in"))
+        self.assertEqual(found.count("|"), 3)
+        self.assertNotIn("\n", row)
+        self.assertEqual(found.count("`"), 2)
+
     def test_markers_are_inert(self):
         x = ns.make("t", "CVE-1", "Go", "evil-->pkg <script>", "HIGH", "1", "", "w")
         self.assertNotIn(">", x["package"])

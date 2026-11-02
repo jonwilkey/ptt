@@ -81,6 +81,8 @@ jobs:
       version: ${{ steps.release.outputs.version }}+maint.${{ steps.date.outputs.day }}
       ghcr_tag: ${{ steps.release.outputs.version }}-maint.${{ steps.date.outputs.day }}
       repo: ${{ steps.meta.outputs.repo }}
+      # What production runs now; deploy-prod fails instead of overwriting a different image.
+      expect_previous: ${{ steps.release.outputs.expect_previous }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,6 +120,9 @@ jobs:
           label="$(docker image inspect "${REPO}:deployed" \
             --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
           .github/scripts/deployed-release.sh "$label" | tee -a "$GITHUB_OUTPUT"
+          digest="$(docker buildx imagetools inspect "${REPO}:deployed" --format '{{json .Manifest}}' | jq -er .digest)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::${REPO}:deployed has digest '${digest}'."; exit 1; }
+          echo "expect_previous=${REPO}@${digest}" | tee -a "$GITHUB_OUTPUT"
           echo "Production runs ${label}." | tee -a "$GITHUB_STEP_SUMMARY"
 
   build:
@@ -397,6 +402,7 @@ jobs:
       image: ${{ needs.build.outputs.image }}
       tag: ${{ needs.resolve.outputs.base_tag }}
       environment: maintenance
+      expect_previous: ${{ needs.resolve.outputs.expect_previous }}
 
   ping:
     name: ping ptt-weekly

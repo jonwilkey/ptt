@@ -45,5 +45,11 @@ gates (Trivy, smoke test, signature) and the same automatic rollback as any depl
   covers every other deploy.
 - The five deploy secrets live in two environments, so each rotation updates both
   (`docs/runbooks/github-setup.md` must say so).
+- Weekly images are signed by `weekly-maintenance.yml@refs/heads/main`, not `server-release.yml`.
+  [ADR 0005](0005-release-please-calls-server-release.md) gives the identity regex that accepts
+  both for anyone verifying a deployed image; `server-release` keeps its strict check.
+- The weekly deploy passes the image it saw deployed at 03:00 as `expect_previous`; `deploy-prod`
+  fails ("production changed since this run resolved it") instead of replacing a release that was
+  approved and deployed in the meantime. The next week's run picks up the new release.
 - A weekly deploy that fails rolls back and alerts both admins through the `ptt-weekly`
   Healthchecks.io check.

@@ -33,10 +33,6 @@ jobs:
     name: scan
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    outputs:
-      # The normalized findings (one line of JSON, well under the 1 MB output limit); the report
-      # job reads them from here so it needs no artifact action.
-      findings: ${{ steps.normalize.outputs.findings }}
     permissions:
       contents: read
       packages: read # pull the deployed image if the package is private
@@ -124,8 +120,9 @@ jobs:
           if [ -s osv-results.json ]; then args+=(--osv osv-results.json --osv-outcome "$OSV_OUTCOME"); fi
           if [ "$GOVULN_OUTCOME" = success ]; then args+=(--govulncheck govulncheck.json); fi
           python3 -I .github/scripts/nightly-security.py normalize "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "findings=$(jq -c . findings.json)" >> "$GITHUB_OUTPUT"
 
+      # The report job reads the findings from this artifact (a job output or env var would hit
+      # the 128 KB limit on a single argument or variable).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: findings
@@ -152,13 +149,14 @@ jobs:
           sparse-checkout-cone-mode: true
           persist-credentials: false
 
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: findings
+
       # Opens, closes and reopens issues; exits 1 when a scanner did not run or failed.
       - name: Open, close and reopen issues
-        env:
-          FINDINGS: ${{ needs.scan.outputs.findings }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$FINDINGS" > findings.json
           python3 -I .github/scripts/nightly-security.py sync --findings findings.json | tee -a "$GITHUB_STEP_SUMMARY"
 
   ping:

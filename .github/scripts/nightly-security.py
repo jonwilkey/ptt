@@ -37,6 +37,27 @@ def clean(value):
     return re.sub(r"[^A-Za-z0-9._/@+:~-]", "_", str(value))
 
 
+ID_PREFERENCE = ("CVE-", "GHSA-", "GO-")
+
+
+def pick_id(ids):
+    """The issue id of an OSV group: CVE, else GHSA, else GO, else the first sorted. Stable when
+    the database adds or drops an alias, so the issue (keyed by id) is not duplicated."""
+    ids = sorted(ids)
+    for prefix in ID_PREFERENCE:
+        for i in ids:
+            if i.startswith(prefix):
+                return i
+    return ids[0]
+
+
+def inert(value):
+    """A scanner-derived value for a public issue's table: one code span, no pipes, backticks or
+    line breaks, so it cannot break the table or @-mention anyone."""
+    text = re.sub(r"[|`\r\n\t]+", " ", str(value)).strip()
+    return f"`{text}`" if text else "-"
+
+
 def make(scanner, vuln_id, ecosystem, package, severity, installed, fixed, where):
     return {
         "scanner": scanner,
@@ -87,6 +108,7 @@ def osv_findings(doc):
                 ids = sorted(group.get("ids") or [])
                 if not ids:
                     continue
+                primary = pick_id(ids)
                 raw = group.get("max_severity") or ""
                 try:
                     score = float(raw) if raw != "" else None
@@ -94,12 +116,12 @@ def osv_findings(doc):
                     score = None
                 eco = p.get("ecosystem", "?")
                 if score is None and eco == "Go":
-                    warnings.append(f"Unscored Go advisory {ids[0]} in Go/{p.get('name')} (govulncheck gates these)")
+                    warnings.append(f"Unscored Go advisory {primary} in Go/{p.get('name')} (govulncheck gates these)")
                     continue
                 if score is not None and score < 7.0:
                     continue
                 fixed = ""
-                found.append(make("OSV-Scanner", ids[0], eco, p.get("name", "?"),
+                found.append(make("OSV-Scanner", primary, eco, p.get("name", "?"),
                                   raw or "unscored", p.get("version"), fixed, f"lockfile {src}"))
                 found[-1]["aliases"] = ids
     return found, warnings
@@ -196,14 +218,15 @@ def marker(f):
 
 def body(f, run_url):
     aliases = f.get("aliases") or []
+    others = [a for a in aliases if a != f["id"]]
     rows = [
-        ("Advisory", f["id"] + (f" (also {', '.join(a for a in aliases if a != f['id'])})" if len(aliases) > 1 else "")),
-        ("Package", f["package"]),
-        ("Scanner", f["scanner"]),
-        ("Severity", f["severity"]),
-        ("Installed", f["installed"] or "unknown"),
-        ("Fixed in", f["fixed"] or "no fix known"),
-        ("Found in", "; ".join(f["where"])),
+        ("Advisory", inert(f["id"]) + (f" (also {', '.join(inert(a) for a in others)})" if others else "")),
+        ("Package", inert(f["package"])),
+        ("Scanner", inert(f["scanner"])),
+        ("Severity", inert(f["severity"])),
+        ("Installed", inert(f["installed"]) if f["installed"] else "unknown"),
+        ("Fixed in", inert(f["fixed"]) if f["fixed"] else "no fix known"),
+        ("Found in", "; ".join(inert(w) for w in f["where"])),
     ]
     table = "\n".join(f"| {k} | {v} |" for k, v in rows)
     return (

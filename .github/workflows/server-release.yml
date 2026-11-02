@@ -295,11 +295,10 @@ jobs:
         id: verify
         run: |
           set -euo pipefail
-          # Matches ADR 0005: main (release-please, manual runs) or a pushed server-v* tag. Also
-          # weekly-maintenance.yml on main, so one check verifies any image that was deployed.
+          # Matches ADR 0005: main (release-please, manual runs) or a pushed server-v* tag.
           server_re="${GITHUB_SERVER_URL//./\\.}"
           repo_re="${GITHUB_REPOSITORY//./\\.}"
-          identity="^${server_re}/${repo_re}/\.github/workflows/(server-release\.yml@refs/(heads/main|tags/server-v[0-9][0-9A-Za-z.+-]*)|weekly-maintenance\.yml@refs/heads/main)$"
+          identity="^${server_re}/${repo_re}/\.github/workflows/server-release\.yml@refs/(heads/main|tags/server-v[0-9][0-9A-Za-z.+-]*)$"
           issuer="https://token.actions.githubusercontent.com"
           cosign verify "$IMAGE" \
             --certificate-identity-regexp "$identity" --certificate-oidc-issuer "$issuer" > /dev/null

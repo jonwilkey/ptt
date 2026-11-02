@@ -24,4 +24,9 @@ summary). The scheduled workflows add `maintenance-gate.sh` (the 03:00 Pacific c
 `deployed-release.sh`, `refresh-base-digests.sh`, `hc-ping.sh` (Healthchecks.io pings) and
 `nightly-security.py` (findings and issues); `scheduled-test.sh` tests them.
 
+`weekly-maintenance`'s `build`, `scan`, `smoke` and `sign` jobs are copies of `server-release`'s.
+When one changes (a Trivy flag, the smoke steps, the signing commands), change the other in the
+same pull request; only what is built (the tag's tree with refreshed base digests, version
+`<T>+maint.<YYYYMMDD>`) and the signing identity differ.
+
 Repository settings, environments, secrets, and variables: [docs/runbooks/github-setup.md](../../docs/runbooks/github-setup.md).

@@ -2,7 +2,7 @@ name: deploy-prod
 
 # Deploys a pttd image to production and rolls back automatically if it fails
 # (docs/operations.md, "Server deploys and automatic rollback"). Called by server-release (and by
-# weekly-maintenance with environment: maintenance, and rollback-drill with drill: true).
+# weekly-maintenance with environment: maintenance and expect_previous, and rollback-drill with drill: true).
 #
 #   1. Records the deployed image, waits for no active sessions, and records before_schema and
 #      deploy_start (the host's UTC time, in the snapshot timestamp format).
@@ -43,6 +43,11 @@ on:
         required: false
         type: boolean
         default: false
+      expect_previous:
+        description: "Optional <repo>@sha256:<digest> the caller saw deployed; the job fails before any change if production runs another image"
+        required: false
+        type: string
+        default: ""
     outputs:
       previous_image:
         description: "Image that was deployed before this run (empty on the first deploy)"
@@ -90,8 +95,10 @@ jobs:
         env:
           ENVIRONMENT: ${{ inputs.environment }}
           DRILL: ${{ inputs.drill }}
+          EXPECT_PREVIOUS: ${{ inputs.expect_previous }}
         run: |
           set -euo pipefail
+          [ -z "$EXPECT_PREVIOUS" ] || [[ "$EXPECT_PREVIOUS" =~ ^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$ ]] || { echo "::error::expect_previous '$EXPECT_PREVIOUS' is not <repo>@sha256:<digest>."; exit 1; }
           [[ "$IMAGE" =~ ^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$ ]] || { echo "::error::image '$IMAGE' is not pinned by digest."; exit 1; }
           [[ "$TAG" =~ ^server-v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "::error::'$TAG' is not a server release tag."; exit 1; }
           case "$ENVIRONMENT/$DRILL" in
@@ -118,11 +125,17 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: .github/scripts/ssh-setup.sh
 
+      # Inside the deploy-production concurrency group and before any change to the host: a caller
+      # that resolved production earlier (weekly-maintenance) must not overwrite a deploy that
+      # went out while it was queued.
       - name: Record the deployed image
         id: previous
+        env:
+          EXPECT_PREVIOUS: ${{ inputs.expect_previous }}
         run: |
           set -euo pipefail
           image="$(.github/scripts/deployed-image.sh)"
+          .github/scripts/check-expected-previous.sh "$EXPECT_PREVIOUS" "$image"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
           echo "Deployed now: ${image:-(nothing; first deploy)}"
           echo "Deploying:    ${IMAGE}"

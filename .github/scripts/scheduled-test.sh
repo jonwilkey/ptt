@@ -18,7 +18,8 @@ check() { # check <name> <expected> <actual>
 }
 
 # --- maintenance-gate.sh: 03:00 Los Angeles across both DST changes (2026: Mar 8, Nov 1) ---
-gate() { EVENT_NAME=schedule SCHEDULE="$1" MAINT_NOW="$2" ./maintenance-gate.sh 2> /dev/null | grep '^run='; }
+# env -u GITHUB_OUTPUT: in Actions the script writes there instead of stdout.
+gate() { env -u GITHUB_OUTPUT EVENT_NAME=schedule SCHEDULE="$1" MAINT_NOW="$2" ./maintenance-gate.sh 2> /dev/null | grep '^run='; }
 check "gate: Mon 2026-03-02 (PST) 11:00 fires"      run=true  "$(gate '0 11 * * 1' '2026-03-02 11:02 UTC')"
 check "gate: Mon 2026-03-02 (PST) 10:00 skips"      run=false "$(gate '0 10 * * 1' '2026-03-02 10:03 UTC')"
 check "gate: Mon 2026-03-09 (PDT) 10:00 fires"      run=true  "$(gate '0 10 * * 1' '2026-03-09 10:05 UTC')"
@@ -29,7 +30,7 @@ check "gate: Mon 2026-11-02 (PST) 11:00 fires"      run=true  "$(gate '0 11 * * 
 check "gate: Mon 2026-11-02 (PST) 10:00 skips"      run=false "$(gate '0 10 * * 1' '2026-11-02 10:10 UTC')"
 check "gate: Mon 2027-03-15 (PDT) 10:00 fires"      run=true  "$(gate '0 10 * * 1' '2027-03-15 10:00 UTC')"
 check "gate: Mon 2027-11-08 (PST) 11:00 fires"      run=true  "$(gate '0 11 * * 1' '2027-11-08 11:00 UTC')"
-check "gate: manual run always proceeds" run=true "$(EVENT_NAME=workflow_dispatch ./maintenance-gate.sh | grep '^run=')"
+check "gate: manual run always proceeds" run=true "$(env -u GITHUB_OUTPUT EVENT_NAME=workflow_dispatch ./maintenance-gate.sh | grep '^run=')"
 if EVENT_NAME=schedule SCHEDULE='0 12 * * 1' ./maintenance-gate.sh > /dev/null 2>&1; then
   check "gate: unknown schedule fails" fail ran
 else check "gate: unknown schedule fails" fail fail; fi
@@ -41,10 +42,23 @@ else check "gate: other events fail" fail fail; fi
 check "label: plain release"  "version=1.2.3 tag=server-v1.2.3"         "$(./deployed-release.sh 1.2.3 | xargs)"
 check "label: +maint dropped" "version=1.2.3 tag=server-v1.2.3"         "$(./deployed-release.sh 1.2.3+maint.20261102 | xargs)"
 check "label: prerelease kept" "version=1.2.3-rc.1 tag=server-v1.2.3-rc.1" "$(./deployed-release.sh 1.2.3-rc.1+maint.20261109 | xargs)"
-for bad in "" dev "1.2" "v1.2.3" "1.2.3+" "1.2.3 +x"; do
+for bad in "" dev "1.2" "v1.2.3" "1.2.3+" "1.2.3 +x" "1.2.3+drill.5" "1.2.3+maint" "1.2.3+maint.2026110" "1.2.3+maint.202611021" "1.2.3+maint.20261102+x"; do
   if ./deployed-release.sh "$bad" > /dev/null 2>&1; then check "label: '$bad' rejected" rejected accepted
   else check "label: '$bad' rejected" rejected rejected; fi
 done
+
+# --- check-expected-previous.sh: weekly must not overwrite a production that changed under it ---
+d1=sha256:$(printf '1%.0s' {1..64}) d2=sha256:$(printf '2%.0s' {1..64})
+exp() { ./check-expected-previous.sh "$@" > /dev/null 2>&1 && echo ok || echo changed; }
+check "expect: unset allows anything"        ok      "$(exp '' "ghcr.io/o/r/pttd@$d1")"
+check "expect: unset allows first deploy"    ok      "$(exp '' '')"
+check "expect: same digest"                  ok      "$(exp "ghcr.io/o/r/pttd@$d1" "ghcr.io/o/r/pttd@$d1")"
+check "expect: same digest, other spelling"  ok      "$(exp "ghcr.io/o/r/pttd@$d1" "GHCR.io/o/r/pttd@$d1")"
+check "expect: different digest fails"       changed "$(exp "ghcr.io/o/r/pttd@$d1" "ghcr.io/o/r/pttd@$d2")"
+check "expect: nothing deployed fails"       changed "$(exp "ghcr.io/o/r/pttd@$d1" '')"
+check "expect: tag-only actual fails"        changed "$(exp "ghcr.io/o/r/pttd@$d1" 'ghcr.io/o/r/pttd:1.2.3')"
+check "expect: malformed expectation fails"  changed "$(exp 'ghcr.io/o/r/pttd:deployed' "ghcr.io/o/r/pttd@$d1")"
+check "expect: message names the problem" 1 "$(./check-expected-previous.sh "ghcr.io/o/r/pttd@$d1" "ghcr.io/o/r/pttd@$d2" 2>&1 | grep -c 'production changed since this run resolved it' || true)"
 
 # --- refresh-base-digests.sh with a fake docker ---
 old1=sha256:$(printf 'a%.0s' {1..64}) new1=sha256:$(printf 'b%.0s' {1..64}) same=sha256:$(printf 'c%.0s' {1..64})

@@ -245,12 +245,21 @@ production after approval.
 
 `weekly-maintenance` deploys at 03:00 on Mondays, when nobody can approve, so it deploys through a
 second environment without reviewers ([ADR 0012](../adr/0012-weekly-maintenance-deploys-without-approval.md)).
-Both admins accepted this on 2026-11-02. Do this before the first scheduled run; scheduled
-workflows run only from the default branch once they are merged.
+Both admins accepted this on 2026-11-02. **Do this before merging the scheduled-workflows pull
+request**: scheduled workflows run from the default branch as soon as they are merged, and the
+first 03:00 Monday or 13:00 UTC run would fail without the environment and the secret. If the pull
+request is merged first, disable both workflows right away (**Actions > weekly-maintenance >
+... > Disable workflow**, and the same for `nightly-security`) and enable them once this section
+is done.
 
 ### The `maintenance` environment
 
 **Settings > Environments > New environment** `maintenance`:
+
+GitHub creates an environment automatically the first time a workflow names it, with no
+deployment branch rule and no secrets. If `maintenance` already exists (a workflow run or a
+pull request's checks may have created it), edit it rather than creating it, and make sure the
+settings below are all in place; an environment without the `main` rule is open to every branch.
 
 - **Required reviewers: none.** That is the point of the environment.
 - **Deployment branches and tags: Selected branches and tags**, one rule: branch `main`. No tag
