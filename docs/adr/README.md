@@ -34,3 +34,7 @@ ADR that supersedes the old one.
 - [0008 — sops secrets are encrypted to one admin key until the second admin has one](0008-sops-secrets-one-admin-recipient.md)
 - [0009 — Firebase Installations may use the system CAs](0009-firebase-installations-trust-exception.md)
 - [0010 — The sender wraps the session key for itself](0010-sender-wraps-session-key-for-itself.md)
+- [0011 — Release APKs reach the server over the deploy path](0011-apk-published-over-the-deploy-path.md)
+- [0012 — Weekly maintenance deploys through an environment without reviewers](0012-weekly-maintenance-deploys-without-approval.md)
+- [0013 — Healthchecks.io carries every alert, by email only](0013-healthchecks-carries-every-alert.md)
+- [0014 — nightly-security opens issues only for findings a release gate would fail](0014-nightly-security-reports-release-gate-findings.md)

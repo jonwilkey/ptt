@@ -8,11 +8,15 @@ Contents: the FCM service-account key, `fcm-service-account.sops.json`, created 
 [docs/runbooks/firebase-setup.md](../../docs/runbooks/firebase-setup.md). Each file is listed in
 `app_secrets` (see `infra/ansible/inventory/group_vars/prod/main.yml`) to be deployed.
 
-Encrypt with `sops --encrypt --age <admin1>,<admin2>,<ci> --output <name>.sops.json <plaintext>`:
+Name each file `<name>.sops.<ext>`, where `<ext>` is the plaintext's format, because sops picks
+its file format from the extension: `.json` for a JSON document (stored as encrypted JSON
+values), `.txt` for a bare value such as a token (`.txt` is not a format sops knows, so it stores
+the whole file as one encrypted blob and decrypts it byte for byte). Encrypt with
+`sops --encrypt --age <admin1>,<admin2>,<ci> --output <name>.sops.<ext> <plaintext>`:
 the age public key of each admin plus the CI key (docs/runbooks/github-setup.md, "The CI age
 key"), because CI decrypts these files during deploys (only one admin key for now:
 [ADR 0008](../../docs/adr/0008-sops-secrets-one-admin-recipient.md)). Each encrypted file records its
 recipients' age public keys in its `sops` metadata; public keys are safe to publish. No
 `.sops.yaml` is committed, so always pass `--age` explicitly. Edit later with
-`sops <name>.sops.json`. Name decrypted working copies `*.dec.*` or `*.plain.*` so git ignores
+`sops <name>.sops.<ext>`. Name decrypted working copies `*.dec.*` or `*.plain.*` so git ignores
 them, and delete them when done.
