@@ -89,7 +89,7 @@ func (m *Migrator) snapshot(ctx context.Context, snapshotDir string, now time.Ti
 	}
 	now = now.UTC()
 
-	existing, err := listPreMigrate(snapshotDir)
+	existing, err := listSnapshots(snapshotDir, preMigratePrefix)
 	if err != nil {
 		return "", fmt.Errorf("list snapshots: %w", err)
 	}
@@ -129,9 +129,9 @@ type snapshotFile struct {
 	version int64
 }
 
-// parseSnapshotName parses "pre-migrate-<timestamp>-v<version>.db".
-func parseSnapshotName(name string) (snapshotFile, bool) {
-	rest, ok := strings.CutPrefix(name, preMigratePrefix)
+// parseSnapshotName parses "<prefix><timestamp>-v<version>.db".
+func parseSnapshotName(prefix, name string) (snapshotFile, bool) {
+	rest, ok := strings.CutPrefix(name, prefix)
 	if !ok {
 		return snapshotFile{}, false
 	}
@@ -154,9 +154,9 @@ func parseSnapshotName(name string) (snapshotFile, bool) {
 	return snapshotFile{name: name, at: at, version: version}, true
 }
 
-// listPreMigrate returns the pre-migration snapshots in dir, oldest first. Files whose names
+// listSnapshots returns the snapshots in dir named with prefix, oldest first. Files whose names
 // don't parse are ignored (and therefore never pruned).
-func listPreMigrate(dir string) ([]snapshotFile, error) {
+func listSnapshots(dir, prefix string) ([]snapshotFile, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -169,7 +169,7 @@ func listPreMigrate(dir string) ([]snapshotFile, error) {
 		if !e.Type().IsRegular() {
 			continue
 		}
-		if s, ok := parseSnapshotName(e.Name()); ok {
+		if s, ok := parseSnapshotName(prefix, e.Name()); ok {
 			out = append(out, s)
 		}
 	}
@@ -183,7 +183,7 @@ func listPreMigrate(dir string) ([]snapshotFile, error) {
 // version is the true pre-deploy state; later ones at the same version come from restarts.
 // Other files in dir (such as the nightly snapshots) are left alone.
 func PrunePreMigrateSnapshots(dir string, keep, keepVersions int) error {
-	snaps, err := listPreMigrate(dir)
+	snaps, err := listSnapshots(dir, preMigratePrefix)
 	if err != nil {
 		return err
 	}

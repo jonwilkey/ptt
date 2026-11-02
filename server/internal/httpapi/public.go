@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/jonwilkey/ptt/server/internal/apk"
 	"github.com/jonwilkey/ptt/server/internal/auth"
 )
 
@@ -66,6 +67,8 @@ type PublicOptions struct {
 	// OnRevoke is called with the device id after POST /v1/devices/{id}/revoke succeeds (also
 	// when the device was already revoked), so the WebSocket hub can close its socket at once.
 	OnRevoke func(deviceID string)
+	// APK serves GET /v1/app/latest and GET /v1/app/apk/{version}; nil answers 404 to both.
+	APK *apk.Store
 }
 
 // NewPublic returns the public API handler.
@@ -96,6 +99,7 @@ func NewPublic(opts PublicOptions) http.Handler {
 	if opts.DB != nil {
 		a := newAPI(opts.DB, logger, opts.Now, opts.Auth, opts.RosterNotifier, opts.Pages)
 		a.onRevoke = opts.OnRevoke
+		a.apks = opts.APK
 		a.routes(r)
 		if opts.WS != nil {
 			r.Method(http.MethodGet, "/v1/ws", a.upgradeLimit(opts.WS))

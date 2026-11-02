@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -220,5 +221,31 @@ func adminTestPush(ctx context.Context, args []string, env Env) error {
 		return nil
 	}
 	_, err = fmt.Fprintf(env.Stdout, "Sent a test push to device %s.\n", id)
+	return err
+}
+
+func adminSnapshot(ctx context.Context, args []string, env Env) error {
+	fs := newFlagSet("admin snapshot", env)
+	if err := parseFlags(fs, args, 0, "no positional arguments"); err != nil {
+		return err
+	}
+	cfg, err := config.Load(env.Lookup)
+	if err != nil {
+		return err
+	}
+	d, err := openAdminDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	m, err := db.NewMigrator(d, nil)
+	if err != nil {
+		return err
+	}
+	path, size, err := db.NightlySnapshot(ctx, m, cfg.SnapshotDir, env.Now())
+	if err != nil {
+		return fmt.Errorf("admin snapshot: %w", err)
+	}
+	_, err = fmt.Fprintf(env.Stdout, "%s %d bytes\n", filepath.Base(path), size)
 	return err
 }

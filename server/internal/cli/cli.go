@@ -31,6 +31,7 @@ Commands:
                            Print a QR to enroll the first admin; --reset first revokes every device
   admin devices [--json]   List devices and their people
   admin revoke <device-id> Revoke one device
+  admin snapshot           Write a verified nightly copy of the database to PTTD_SNAPSHOT_DIR, keep 7
   admin test-push <device-id>
                            Send a "test" push to one device (prints it instead in fake mode)
   version                  Print the version
@@ -255,7 +256,7 @@ func printMigrationStatus(ctx context.Context, w io.Writer, m *db.Migrator) erro
 
 func adminCmd(ctx context.Context, args []string, env Env) error {
 	if len(args) == 0 {
-		return usageErr("admin needs a subcommand: status, bootstrap, devices, revoke, test-push")
+		return usageErr("admin needs a subcommand: status, bootstrap, devices, revoke, snapshot, test-push")
 	}
 	switch args[0] {
 	case "status":
@@ -266,6 +267,8 @@ func adminCmd(ctx context.Context, args []string, env Env) error {
 		return adminDevices(ctx, args[1:], env)
 	case "revoke":
 		return adminRevoke(ctx, args[1:], env)
+	case "snapshot":
+		return adminSnapshot(ctx, args[1:], env)
 	case "test-push":
 		return adminTestPush(ctx, args[1:], env)
 	default:

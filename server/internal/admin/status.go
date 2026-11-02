@@ -53,6 +53,7 @@ func PrintStatus(w io.Writer, s *httpapi.Status) error {
 		{"schema version", schemaLine(s)},
 		{"active sessions", fmt.Sprint(s.ActiveSessions)},
 		{"active pages", fmt.Sprint(s.ActivePages)},
+		{"app latest", appLatest(s)},
 	}
 	for _, r := range rows {
 		if _, err := fmt.Fprintf(w, "%-16s %s\n", r[0]+":", r[1]); err != nil {
@@ -87,4 +88,11 @@ func schemaLine(s *httpapi.Status) string {
 	default:
 		return fmt.Sprintf("%d (newer than binary's %d; rollback mode)", s.SchemaVersion, s.BinarySchemaVersion)
 	}
+}
+
+func appLatest(s *httpapi.Status) string {
+	if s.AppLatest == nil {
+		return "none"
+	}
+	return *s.AppLatest
 }

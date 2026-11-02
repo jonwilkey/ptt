@@ -14,6 +14,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/jonwilkey/ptt/server/internal/apk"
 	"github.com/jonwilkey/ptt/server/internal/auth"
 	"github.com/jonwilkey/ptt/server/internal/cleanup"
 	"github.com/jonwilkey/ptt/server/internal/clock"
@@ -49,6 +50,8 @@ type App struct {
 	authn    *auth.Authenticator
 	hub      *ws.Hub
 
+	apks *apk.Store
+
 	monitoring bool
 	pinger     *monitor.Pinger
 
@@ -76,6 +79,11 @@ func WithClock(c clock.Clock) Option {
 // pings when p is non-nil). Without this option Start runs none of them.
 func WithMonitoring(p *monitor.Pinger) Option {
 	return func(a *App) { a.monitoring, a.pinger = true, p }
+}
+
+// WithAPKDir serves the APKs published in dir; without it the app-update endpoints answer 404.
+func WithAPKDir(dir string) Option {
+	return func(a *App) { a.apks = apk.NewStore(dir, a.logger) }
 }
 
 // New returns an App over an open, migrated database.
@@ -191,6 +199,7 @@ func (a *App) PublicHandler() http.Handler {
 		Auth:           a.authn,
 		WS:             a.hub,
 		OnRevoke:       a.hub.CloseDevice,
+		APK:            a.apks,
 	})
 }
 
@@ -210,6 +219,7 @@ func (a *App) InternalHandler() http.Handler {
 		ActivePages:         a.queries.CountActivePages,
 		BinarySchemaVersion: a.migrator.LatestVersion(),
 		FakeFCM:             fakeHandler(a.fake),
+		APK:                 a.apks,
 	})
 }
 
@@ -260,6 +270,7 @@ func Serve(ctx context.Context, cfg config.Config, logger *slog.Logger, version 
 			slog.Int64("schema_version", current), slog.Int64("binary_schema_version", latest))
 	}
 
+	opts = append(opts, WithAPKDir(cfg.APKDir))
 	a := New(version, logger, sqlDB, migrator, opts...)
 	a.Start()
 	servers := []*http.Server{

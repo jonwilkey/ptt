@@ -9,6 +9,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/jonwilkey/ptt/server/internal/apk"
 )
 
 // Status is the /internal/status body, shared with `pttd admin status`.
@@ -22,6 +24,8 @@ type Status struct {
 	// BinarySchemaVersion is the newest migration this build carries; deploy tooling compares
 	// it with schema_version.
 	BinarySchemaVersion int64 `json:"binary_schema_version"`
+	// AppLatest is the version name of the published APK, or null when none is offered.
+	AppLatest *string `json:"app_latest"`
 }
 
 // InternalOptions configures the internal handler.
@@ -40,6 +44,8 @@ type InternalOptions struct {
 	ActivePages   func(ctx context.Context) (int64, error)
 	// BinarySchemaVersion is reported as-is.
 	BinarySchemaVersion int64
+	// APK backs app_latest; nil reports null.
+	APK *apk.Store
 	// FakeFCM, when set, is served at /internal/fake-fcm (GET lists, DELETE clears). Only the
 	// fake FCM sender provides it.
 	FakeFCM http.Handler
@@ -80,6 +86,9 @@ func status(opts InternalOptions, logger *slog.Logger) http.HandlerFunc {
 			UptimeSeconds:       int64(opts.Now().Sub(opts.Started).Seconds()),
 			DBOK:                true,
 			BinarySchemaVersion: opts.BinarySchemaVersion,
+		}
+		if latest, err := opts.APK.Latest(); err == nil {
+			s.AppLatest = &latest.VersionName
 		}
 		if opts.ActiveSessions != nil {
 			s.ActiveSessions = opts.ActiveSessions()

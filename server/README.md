@@ -57,7 +57,8 @@ The image is built only in CI: `docker buildx build --platform linux/amd64 --bui
 | `PTTD_LISTEN_ADDR` | `:8080` | Public listener; Caddy proxies to it |
 | `PTTD_INTERNAL_ADDR` | `:9090` | `/metrics` and `/internal/status`; publish only on loopback or the tailnet, never via Caddy |
 | `PTTD_DB_PATH` | `/data/pttd.db` | SQLite database (WAL mode; `-wal` and `-shm` files sit beside it) |
-| `PTTD_SNAPSHOT_DIR` | `/data/snapshots` | Pre-migration snapshots |
+| `PTTD_SNAPSHOT_DIR` | `/data/snapshots` | Pre-migration (`pre-migrate-*`) and nightly (`nightly-*`) snapshots |
+| `PTTD_APK_DIR` | unset | Directory of published APKs and `latest.json`, read-only (compose mounts `/apk`). Unset: `GET /v1/app/latest` and `GET /v1/app/apk/{version}` answer `404 not_found` |
 | `PTTD_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `PTTD_PUBLIC_URL` | unset | The address phones reach the server at, e.g. `https://ptt.example.com` (absolute `https` URL, no path or query; `http` only for `localhost`/`127.0.0.1`). Optional; `pttd admin bootstrap` requires it, to put it in the enrollment QR |
 | `PTTD_FCM_CREDENTIALS_FILE` | unset | Path of the Firebase service-account JSON; selects the real FCM sender (a secret file, see below; empty counts as unset) |
@@ -84,7 +85,8 @@ pattern, status, duration).
 | `pttd serve` (or no command) | Open the DB, snapshot if migrations are pending on an existing DB, migrate, serve; SIGTERM/SIGINT drains for up to 15 s |
 | `pttd healthcheck` | Exit 0 if `GET /healthz` on the local public listener returns 200 (the image's `HEALTHCHECK`) |
 | `pttd migrate up\|down\|status` | Manage the schema of `PTTD_DB_PATH`; `up` and `down` (one step) snapshot first; `status` and `down` refuse to create a missing database |
-| `pttd admin status [--json]` | Summary from the running server's `/internal/status` |
+| `pttd admin status [--json]` | Summary from the running server's `/internal/status`, including `app_latest` (the published app version, or `none`) |
+| `pttd admin snapshot` | Write `nightly-<UTC timestamp>-v<schema version>.db` to `PTTD_SNAPSHOT_DIR` with `VACUUM INTO`, run `PRAGMA quick_check` on the copy (delete it and fail unless `ok`), then keep only the 7 newest `nightly-*` files; `pre-migrate-*` and other files are never touched. Refuses a missing database. Prints the file name and size |
 | `pttd admin bootstrap [--reset] <name>` | Mint a 24 h single-use enrollment code that makes `<name>` an admin and print it as `pttenroll1:` text plus a terminal QR. Opens the database directly. Refuses if an admin user already exists; `--reset` first revokes every device, deletes the roster and retires outstanding codes (the whole family must re-enroll). Needs `PTTD_PUBLIC_URL`. The QR is drawn for a dark-background terminal (light modules are the filled blocks); use a dark-background terminal, because the QR is inverted, and may not scan, on a light one |
 | `pttd admin devices [--json]` | List every device with its person, admin flag, name, app version, last seen and revocation time |
 | `pttd admin revoke <device-id>` | Revoke one device (revoking twice is a no-op). Audit-logged |
@@ -121,6 +123,12 @@ Inside the container: `docker compose exec pttd /pttd admin status`. The `bootst
   - `POST /v1/devices/{id}/revoke` (admin): idempotent, audited with the acting device.
   - `GET /v1/contacts`: people with a live non-test device and their presence
     (`ok`/`warning`/`offline`).
+  - `GET /v1/app/latest` and `GET /v1/app/apk/{version}` (docs/protocol.md section 14; code in
+    `internal/apk`): the newest published APK's metadata (re-read from `latest.json` on every
+    request, `no-store`; `404 not_found` when unset or invalid) and the APK itself via
+    `http.ServeContent` (Range supported). `{version}` must match the strict version regex, and the
+    file name is built from it, never from the request. The handler raises the write deadline to
+    10 minutes for the download.
   - `GET /v1/roster`: the accepted signed object as its canonical re-encoding `{payload, signer, sig}` (the payload bytes unchanged, so the signature still verifies), or `404 not_found` before the
     first one.
   - `PUT /v1/roster` (admin): body is the signed object. A malformed envelope is
