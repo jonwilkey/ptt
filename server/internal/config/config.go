@@ -26,6 +26,7 @@ const (
 	EnvSnapshotDir  = "PTTD_SNAPSHOT_DIR"
 	EnvLogLevel     = "PTTD_LOG_LEVEL"
 	EnvPublicURL    = "PTTD_PUBLIC_URL"
+	EnvAPKDir       = "PTTD_APK_DIR"
 
 	// EnvFCMCredentials is the secret name for the Firebase service-account JSON; the file path
 	// is PTTD_FCM_CREDENTIALS_FILE (see ReadSecret). EnvFCMFake selects the in-memory fake
@@ -64,6 +65,9 @@ type Config struct {
 	// "https://ptt.example.com". Optional: only `pttd admin bootstrap` needs it, to put it in the
 	// enrollment QR.
 	PublicURL string
+	// APKDir holds the published APKs and latest.json (read-only). Empty: both app-update
+	// endpoints answer 404.
+	APKDir string
 }
 
 // Load reads and validates the configuration. Unset or empty variables take their defaults.
@@ -81,6 +85,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		InternalAddr: get(EnvInternalAddr, DefaultInternalAddr),
 		DBPath:       get(EnvDBPath, DefaultDBPath),
 		SnapshotDir:  get(EnvSnapshotDir, DefaultSnapshotDir),
+		APKDir:       get(EnvAPKDir, ""),
 	}
 
 	var errs []error

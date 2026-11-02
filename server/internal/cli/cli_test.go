@@ -139,6 +139,7 @@ func TestAdminStatus(t *testing.T) {
 		"schema version:  1",
 		"active sessions: 0",
 		"active pages:    2",
+		"app latest:      none",
 	} {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("output missing %q:\n%s", want, r.stdout)
@@ -488,5 +489,85 @@ func TestAdminTestPush(t *testing.T) {
 	vars[config.EnvFCMCredentials+"_FILE"] = cred
 	if r := run(t, vars, "admin", "test-push", "dev-ok"); r.code != 1 || !strings.Contains(r.stderr, "both set") {
 		t.Errorf("both = %+v", r)
+	}
+}
+
+func TestAdminSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	vars := map[string]string{
+		config.EnvDBPath:      filepath.Join(dir, "pttd.db"),
+		config.EnvSnapshotDir: filepath.Join(dir, "snapshots"),
+		config.EnvLogLevel:    "error",
+	}
+	if r := run(t, vars, "migrate", "up"); r.code != 0 {
+		t.Fatalf("migrate up = %+v", r)
+	}
+	files, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snaps := vars[config.EnvSnapshotDir]
+	if err := os.MkdirAll(snaps, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keep := []string{"pre-migrate-20260101T000000.000Z-v1.db", "restored-20260101T000000.000Z.db"}
+	for i := range 8 {
+		keep = append(keep, fmt.Sprintf("nightly-2026010%dT020000.000Z-v1.db", i+1))
+	}
+	for _, n := range keep {
+		if err := os.WriteFile(filepath.Join(snaps, n), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := run(t, vars, "admin", "snapshot")
+	if r.code != 0 {
+		t.Fatalf("snapshot = %+v", r)
+	}
+	name := fmt.Sprintf("nightly-20261024T150405.000Z-v%d.db", len(files))
+	info, err := os.Stat(filepath.Join(snaps, name))
+	if err != nil {
+		t.Fatalf("snapshot file: %v\n%+v", err, r)
+	}
+	if want := fmt.Sprintf("%s %d bytes\n", name, info.Size()); r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+	entries, err := os.ReadDir(snaps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nightly := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "nightly-") {
+			nightly++
+		}
+	}
+	if nightly != 7 || len(entries) != 7+2 {
+		t.Errorf("snapshot dir has %d entries (%d nightly), want 9 (7 nightly): %v", len(entries), nightly, entries)
+	}
+	for _, n := range keep[:2] {
+		if _, err := os.Stat(filepath.Join(snaps, n)); err != nil {
+			t.Errorf("%s was touched: %v", n, err)
+		}
+	}
+}
+
+func TestAdminSnapshotRefusesMissingDatabase(t *testing.T) {
+	dir := t.TempDir()
+	vars := map[string]string{
+		config.EnvDBPath:      filepath.Join(dir, "missing.db"),
+		config.EnvSnapshotDir: filepath.Join(dir, "snapshots"),
+	}
+	r := run(t, vars, "admin", "snapshot")
+	if r.code != 1 || !strings.Contains(r.stderr, "does not exist") {
+		t.Errorf("snapshot = %+v", r)
+	}
+	for _, p := range []string{vars[config.EnvDBPath], vars[config.EnvSnapshotDir]} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s was created: %v", p, err)
+		}
+	}
+	if r := run(t, vars, "admin", "snapshot", "extra"); r.code != 2 {
+		t.Errorf("extra argument = %+v", r)
 	}
 }

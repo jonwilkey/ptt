@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/jonwilkey/ptt/server/internal/apk"
 	"github.com/jonwilkey/ptt/server/internal/metrics"
 )
 
@@ -268,7 +269,7 @@ func TestInternalStatus(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"version", "uptime_seconds", "active_sessions", "active_pages", "db_ok", "schema_version", "binary_schema_version"} {
+	for _, k := range []string{"version", "uptime_seconds", "active_sessions", "active_pages", "db_ok", "schema_version", "binary_schema_version", "app_latest"} {
 		if _, ok := raw[k]; !ok {
 			t.Errorf("status JSON missing %q: %s", k, rec.Body)
 		}
@@ -331,5 +332,28 @@ func TestInternalNotFound(t *testing.T) {
 	}
 	if got := decode[ErrorResponse](t, rec); got.Error != "not_found" {
 		t.Errorf("body = %+v", got)
+	}
+}
+
+func TestInternalStatusAppLatest(t *testing.T) {
+	dir := t.TempDir()
+	opts := InternalOptions{
+		Registry:       metrics.New("dev", func() int { return 0 }),
+		Started:        time.Now(),
+		ActiveSessions: func() int { return 0 },
+		DBPing:         func(context.Context) error { return nil },
+		SchemaVersion:  func(context.Context) (int64, error) { return 1, nil },
+		ActivePages:    func(context.Context) (int64, error) { return 0, nil },
+		APK:            apk.NewStore(dir, nil),
+	}
+	rec := do(t, NewInternal(opts), http.MethodGet, "/internal/status", nil)
+	if got := decode[Status](t, rec); got.AppLatest != nil || !strings.Contains(rec.Body.String(), `"app_latest":null`) {
+		t.Errorf("nothing published: %s", rec.Body)
+	}
+
+	publishDir(t, dir, "0.5.0", 5000, 0)
+	rec = do(t, NewInternal(opts), http.MethodGet, "/internal/status", nil)
+	if got := decode[Status](t, rec); got.AppLatest == nil || *got.AppLatest != "0.5.0" {
+		t.Errorf("published: %s", rec.Body)
 	}
 }

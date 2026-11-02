@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/jonwilkey/ptt/server/internal/apk"
 	"github.com/jonwilkey/ptt/server/internal/auth"
 	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 	"github.com/jonwilkey/ptt/server/internal/ratelimit"
@@ -35,6 +36,7 @@ type api struct {
 
 	notifier RosterNotifier
 	pages    PageService // nil: the page endpoints are not served
+	apks     *apk.Store  // nil: no APK is published
 
 	auth          *auth.Authenticator
 	onRevoke      func(deviceID string)
@@ -75,6 +77,8 @@ func (a *api) routes(r chi.Router) {
 		r.Put("/v1/devices/me", a.updateSelf)
 		r.Get("/v1/contacts", a.contacts)
 		r.Get("/v1/roster", a.getRoster)
+		r.Get("/v1/app/latest", a.appLatest)
+		r.Get("/v1/app/apk/{version}", a.appAPK)
 		if a.pages != nil {
 			a.pageRoutes(r)
 		}

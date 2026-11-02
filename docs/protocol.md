@@ -712,7 +712,8 @@ pttd admin bootstrap --reset <name>    # revokes every device, deletes the roste
 pttd admin devices                     # list devices and users
 pttd admin revoke <device id>          # revoke one device (its open WebSocket is closed by the server's periodic check, within 5 s, §11.9)
 pttd admin test-push <device id>       # send the `test` FCM message to one device
-pttd admin status                      # page/roster/token counters
+pttd admin status                      # page/roster/token counters, and the published app version
+pttd admin snapshot                    # write a verified nightly copy of the database and keep the newest 7 (operations.md, "Nightly snapshot")
 ```
 
 
