@@ -159,10 +159,22 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      contents: read # sparse checkout of .trivyignore.yaml from main
       packages: read # pull the image if the package is private
     steps:
+      # Waivers come from main, not the tag's tree: the weekly scan reads main's too, a waiver
+      # added or expired after the tag was cut applies to the next release candidate, and an
+      # older tag (workflow_dispatch redeploy) has no waiver file at all.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          sparse-checkout: .trivyignore.yaml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       # High or critical findings fail the release (spec, "Supply chain"), fixed or not: an
-      # unfixed high finding in the image still needs a person to look at it.
+      # unfixed high finding in the image still needs a person to look at it. A finding is
+      # waived only by an unexpired entry in .trivyignore.yaml.
       - name: Scan the pushed image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
@@ -176,6 +188,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: false
           exit-code: "1"
+          trivyignores: .trivyignore.yaml
           format: table
 
   smoke:

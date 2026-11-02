@@ -1,0 +1,8 @@
+# OSV-Scanner waivers, read by ci / osv-scanner (--config) and later by the scheduled scans.
+# Empty on purpose. A waiver is added by pull request, so a person decides, and ci / waivers
+# fails if `ignoreUntil` is more than 90 days away or `reason` is missing.
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2027-01-31
+# reason = "False positive: the vulnerable code path is not part of our build. Tracked in #123."

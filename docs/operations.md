@@ -560,13 +560,16 @@ findings are not failures.
 Spec, "Supply chain": "`govulncheck`, OSV-Scanner on both lockfiles, and Trivy on the container
 image; high or critical findings fail the build."
 
-| Gate | Where today | Fails on | Gap |
+| Gate | Where before milestone 6 | Fails on | Gap (closed by the changes below) |
 | --- | --- | --- | --- |
 | `govulncheck` | `ci` / `server` (`make vuln`), a required check | any reachable vulnerability, any severity | none |
 | OSV-Scanner | `ci` / `osv-scanner`, a required check. The scan step has `continue-on-error: true` only so the next step can apply the threshold; that step fails the job | CVSS 7.0 or higher | unscored advisories only warn. For Go that is intended (`govulncheck` gates them by reachability); for Gradle they are not gated at all |
 | Trivy | `server-release` / `scan` only (HIGH, CRITICAL, `ignore-unfixed: false`, `exit-code: 1`) | high or critical in the release image | not run on pull requests, so a base-image or dependency PR that brings in a high finding merges green and fails only at release time |
 
-Changes (the CI PR):
+Changes (the CI PR). Beyond the list, `ci` / `waivers` runs `.github/scripts/check-waivers.py`,
+which fails a waiver that has no statement or reason or whose date is past the 30-day
+(`.trivyignore.yaml`) or 90-day (`osv-scanner.toml`) limit. `server-release` / `scan` reads
+`.trivyignore.yaml` from `main`, not the tag's tree, as the weekly scan will.
 
 1. **Trivy on pull requests.** Add a Trivy step to `ci` / `server-image` against the `pttd:ci`
    image it already builds, with the same settings and pinned version as `server-release`. The job
