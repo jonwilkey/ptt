@@ -169,7 +169,8 @@ class TalkSessionControllerTest {
         assertTrue("no socket before the 2xx", transport.sockets.isEmpty())
         rig.accepted(OutboxKind.PAGE)
         val ws = rig.connect()
-        assertEquals(listOf("hello", "join", "ping"), ws.types())
+        // The ping right behind the join marks the end of its snapshot (its pong comes after it).
+        assertEquals(listOf("hello", "join", "ping"), ws.types().take(3))
         assertTrue(ws.lastOf("join").contains(SESSION))
     }
 
@@ -756,6 +757,12 @@ class TalkSessionControllerTest {
         """{"type":"floor_released","talker":"$PEER_DEVICE","transmission_id":"$id","reason":"released"}"""
     )
 
+    /** The server's answer to the ping sent behind the join: the join snapshot is complete. */
+    private fun TestScope.pong(ws: FakeWs) {
+        ws.serverText("""{"type":"pong","t":$currentTime,"server_time":1}""")
+        runCurrent()
+    }
+
     @Test(timeout = 60_000)
     fun aPeerAlreadyThereAtJoinLocksTheSenderForTenSecondsOfSilence() = runTest {
         val rig = Rig(this)
@@ -804,7 +811,7 @@ class TalkSessionControllerTest {
     }
 
     @Test(timeout = 60_000)
-    fun theSendersSocketDroppingWhileThePeerTalksEndsTheirTurn() = runTest {
+    fun aRejoinSnapshotWithoutTheGrantEndsThePeersTurnAtThePong() = runTest {
         val rig = Rig(this)
         rig.sender()
         rig.controller.open(PAGE)
@@ -813,11 +820,99 @@ class TalkSessionControllerTest {
         peerTalks(first)
         first.serverClose(1006)
         runCurrent()
-        assertFalse("no release will ever come for that transmission", rig.controller.locked())
-        // The rejoin snapshot has no grant; the lock stays lifted.
+        assertTrue("suspended, not over: the rejoin may resume it", rig.controller.locked())
         advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
-        rig.joined(rig.connect(1))
+        val second = rig.connect(1)
+        rig.joined(second)
+        assertTrue("the snapshot may still carry the grant", rig.controller.locked())
+        assertEquals(listOf("hello", "join", "ping"), second.types().take(3))
+        pong(second)
+        assertFalse("no release will ever come for that transmission", rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun aRejoinSnapshotThatResumesThePeersFirstTransmissionKeepsTheLock() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect()
+        rig.joined(first)
+        val id = peerTalks(first)
+        advanceTimeBy(4_000)
+        first.serverClose(1006)
+        runCurrent()
+        assertTrue(rig.controller.locked())
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1)
+        rig.joined(second)
+        second.grant(PEER_DEVICE, id)
+        pong(second)
+        assertEquals(TalkFloor.PEER_TALKING, rig.controller.state.value.floor)
+        assertTrue("the receiver is still speaking first", rig.controller.locked())
+        advanceTimeBy(2 * FirstTalkerRule.WINDOW_MS)
+        pong(second)
+        assertTrue(rig.controller.locked())
+        second.peerReleased(id)
+        runCurrent()
         assertFalse(rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun aRejoinSnapshotWithTheReceiversNextTransmissionUnlocks() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect()
+        rig.joined(first)
+        peerTalks(first)
+        first.serverClose(1006)
+        runCurrent()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1)
+        rig.joined(second)
+        peerTalks(second)
+        assertEquals(TalkFloor.PEER_TALKING, rig.controller.state.value.floor)
+        assertFalse("a new id means the first transmission finished", rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun aPongBeforeTheRejoinIsAcknowledgedDoesNotEndTheSuspension() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect()
+        rig.joined(first)
+        val id = peerTalks(first)
+        first.serverClose(1006)
+        runCurrent()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1)
+        // A ping the socket sent before the join is answered ahead of the snapshot.
+        pong(second)
+        assertTrue(rig.controller.locked())
+        rig.joined(second)
+        second.grant(PEER_DEVICE, id)
+        pong(second)
+        assertTrue(rig.controller.locked())
+    }
+
+    @Test(timeout = 60_000)
+    fun theSessionEndingWhileSuspendedEndsTalk() = runTest {
+        val rig = Rig(this)
+        rig.sender()
+        rig.controller.open(PAGE)
+        val first = rig.connect()
+        rig.joined(first)
+        peerTalks(first)
+        first.serverClose(1006)
+        runCurrent()
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1)
+        rig.joined(second)
+        second.serverText("""{"type":"session_end","reason":"idle"}""")
+        runCurrent()
+        assertEquals(SessionStage.ENDED, rig.controller.state.value.stage)
+        assertFalse(rig.controller.pressTalk())
     }
 
     @Test(timeout = 60_000)
@@ -863,6 +958,27 @@ class TalkSessionControllerTest {
         val ws = rig.connect()
         assertFalse(rig.controller.locked())
         rig.joined(ws, state = "answered")
+        assertFalse(rig.controller.locked())
+        assertTrue(rig.controller.pressTalk())
+    }
+
+    @Test(timeout = 60_000)
+    fun theReceiverIsNeverLockedAcrossAReconnect() = runTest {
+        val rig = Rig(this)
+        rig.receiver()
+        rig.accepted(OutboxKind.ANSWER)
+        rig.controller.open(PAGE)
+        val first = rig.connect()
+        rig.joined(first, state = "answered")
+        first.grant(PEER_DEVICE, AudioSession.forSender(KEY.copyOf(), SESSION, PEER_DEVICE, setOf(OWN)).requestFloor())
+        runCurrent()
+        first.serverClose(1006)
+        runCurrent()
+        assertFalse(rig.controller.locked())
+        advanceTimeBy(TalkSessionController.RECONNECT_CAP_MS)
+        val second = rig.connect(1)
+        rig.joined(second, state = "answered")
+        pong(second)
         assertFalse(rig.controller.locked())
         assertTrue(rig.controller.pressTalk())
     }

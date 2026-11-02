@@ -896,9 +896,12 @@ past 256 entries in total (a peer that is not reading) is closed `4408`.
 
 The client sends `ping {t}` every **10 s** while connected (and may send one right after `hello`).
 The server answers at once with `pong {t, server_time}`, echoing `t` unchanged; the client computes
-RTT as `now − t` on the same clock it took `t` from; `t` is never compared with `server_time`.
-The server closes a socket `4408` that has sent no message at all (text or binary) for **30 s**. WebSocket protocol-level ping/pong frames are not used by the app
-and do not count as messages.
+RTT as `now − t` on the same clock it took `t` from; `t` is never compared with `server_time`. The
+`pong` is queued in order with the socket's other messages (§11.7), so a `ping` sent right behind
+`join` is answered after the whole join snapshot (§11.4); the app uses that `pong` to know the
+snapshot is complete. The server closes a socket `4408` that has sent no message at all (text or
+binary) for **30 s**. WebSocket protocol-level ping/pong frames are not used by the app and do not
+count as messages.
 
 ### 11.9 Revocation
 
