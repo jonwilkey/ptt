@@ -23,6 +23,11 @@ type clipMsg struct {
 	LastSeq        int    `json:"last_seq"`
 }
 
+type resumeFromMsg struct {
+	Type    string `json:"type"`
+	LastSeq int    `json:"last_seq"`
+}
+
 // joinedMember is dev's joined socket in the session, or nil.
 func (s *session) joinedMember(dev string) *conn {
 	if m := s.members[dev]; m != nil && m.joined {
@@ -279,4 +284,41 @@ func (s *session) findOwnLocked(dev string, id [audioframe.IDSize]byte, state tx
 		return t
 	}
 	return nil
+}
+
+// resumeLocked answers resume {transmission_id} from c (section 13.6). An open transmission of
+// c's device restarts its resume window and resets the idle timer. A closed one that is still
+// held only reports where it ended and that it is closed; its floor_released resets the idle
+// timer like every other (section 11.5). Anything else is bad_transmission_id.
+func (s *session) resumeLocked(c *conn, id [audioframe.IDSize]byte) {
+	h := s.h
+	t := s.buf.find(id)
+	if t == nil || t.talker != c.deviceID || t.state == txLive {
+		c.send(errorMsg{Type: "error", Code: errBadTransmission})
+		return
+	}
+	if t.state == txOpen {
+		t.windowFrom = h.clk.Now()
+		s.resetIdleLocked()
+	}
+	h.clips.resumes.Add(1)
+	c.send(resumeFromMsg{Type: "resume_from", LastSeq: t.last()})
+	if t.state == txClosed {
+		c.send(floorReleasedMsg{Type: "floor_released", Talker: t.talker, TransmissionID: t.idStr, Reason: reasonReleased})
+		s.resetIdleLocked()
+	}
+}
+
+// onResume handles resume {transmission_id} (section 13.6).
+func (c *conn) onResume(transmissionID string) {
+	id, err := uuid.Parse(transmissionID)
+	if err != nil {
+		return // canonical per the parser; cannot happen
+	}
+	h := c.h
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := c.sess; s != nil && c.joined && c.protocol >= 2 && !c.isClosing() {
+		s.resumeLocked(c, id)
+	}
 }

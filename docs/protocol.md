@@ -1494,11 +1494,12 @@ the grant as usual. The server's close rule 2 (§13.3) is only a backstop.
 **`resume` at the server.** `resume {transmission_id}` from a joined protocol-2 socket is accepted
 when the caller is the talker of an `open` transmission with that id in this session. The server
 replies `resume_from {last_seq: next − 1}`, restarts the resume window and resets the idle timer
-(§13.4); the transmission stays `open`, and frames from `next` on are appended as §13.3 describes.
+(§11.5, §13.4); the transmission stays `open`, and frames from `next` on are appended as §13.3 describes.
 If the transmission is `closed` but still held (it closed while the talker was away, for example
 when its resume window ran out), the server replies `resume_from {last_seq: next − 1}` and then
 `floor_released {talker, transmission_id, reason: "released"}`, and nothing else changes: the
-talker learns where its transmission ended and that it may free its buffer. Otherwise it replies
+talker learns where its transmission ended and that it may free its buffer. That
+`floor_released` resets the idle timer like every other (§11.5). Otherwise it replies
 `error {code: "bad_transmission_id"}` and nothing else happens. A `live`
 transmission cannot be resumed: by the time a new socket of the talker has joined, the old one
 was closed or replaced (`4409`), which released the floor with `disconnected` and made the
