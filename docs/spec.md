@@ -191,6 +191,7 @@ One Go service, `pttd`, does everything: REST API, WebSocket audio relay, FCM se
 | `GET /v1/roster` | Latest signed family roster |
 | `PUT /v1/roster` | Admin devices only: publish a new signed roster (signature and version checked) |
 | `POST /v1/pages` | Send a page: `{id, to, level: normal\|urgent, session_id, envelope}`; `id` is the client UUID and idempotency key |
+| `GET /v1/pages/{id}` | Sender only: the page's envelope and the sender's own wrapped session key, so it can rejoin after its app was killed ([ADR 0010](adr/0010-sender-wraps-session-key-for-itself.md)) |
 | `POST /v1/pages/{id}/delivered` | Receiver's phone confirms it got the push |
 | `POST /v1/pages/{id}/acknowledge` | Receiver has seen the page but can't talk yet |
 | `POST /v1/pages/{id}/answer` | Receiver answers; the first answer wins |
@@ -228,7 +229,7 @@ Day-to-day administration happens in the app on either admin's phone: creating e
 | `devices` | id, user\_id, name, token\_hash, fcm\_token, app\_version, checklist\_status, last\_seen\_at, revoked\_at, is\_test |
 | `enrollment_codes` | code\_hash, display\_name, make\_admin, created\_by\_device, expires\_at, used\_at |
 | `roster` | version, signed\_roster, signer\_device, updated\_at (latest only) |
-| `active_pages` | id (client UUID), session\_id, from\_device, to\_user, level, envelope, state, created\_at, delivered\_at, push\_attempts |
+| `active_pages` | id (client UUID), session\_id, from\_device, to\_user, level, envelope, sender\_key (nullable, ADR 0010), state, created\_at, delivered\_at, push\_attempts |
 | `page_tombstones` | id, expires\_at |
 | `audit_log` | at, actor\_device, action, detail (enrollment, revocation, roster changes, and auth failures only) |
 
@@ -253,7 +254,7 @@ Only enrolled family devices can page or talk; audio is encrypted end to end, so
 
 - Each phone has an X25519 key for receiving session keys and an Ed25519 key for signing, generated on the phone with Tink and wrapped by an Android Keystore key. Private keys never leave the phone.
 - The **family roster** lists every device (device ID, person, public keys, admin flag) with a version number. A phone accepts a new roster only if an admin device from its current roster (or, at enrollment, from the QR code) signed it and its version is higher. The server can serve the roster but cannot forge, alter, or roll it back; it also checks signatures before accepting one.
-- Each page carries a fresh random 256-bit session key, wrapped with HPKE (RFC 9180: X25519, HKDF-SHA256, ChaCha20-Poly1305) for each of the receiver's roster devices. The envelope (page ID, session ID, sender device, level, time, wrapped keys) is signed with the sender's Ed25519 key; receivers drop pages that don't verify.
+- Each page carries a fresh random 256-bit session key, wrapped with HPKE (RFC 9180: X25519, HKDF-SHA256, ChaCha20-Poly1305) for each of the receiver's roster devices. The envelope (page ID, session ID, sender device, level, time, wrapped keys) is signed with the sender's Ed25519 key; receivers drop pages that don't verify. The sender also wraps the key for its own device, in a separate signed object the server keeps with the page, so it can rejoin after its app was killed ([ADR 0010](adr/0010-sender-wraps-session-key-for-itself.md)).
 - Each transmission derives its own key from the session key and transmission ID (HKDF). Each frame is encrypted with AES-256-GCM, using the sequence number as the nonce and the frame header as associated data. The server cannot hear or alter audio; it can only drop or delay it.
 - Session keys live only in memory and are discarded when the session ends. There is no ratchet: someone who captured the encrypted traffic and later stole a device's private key could decrypt that device's past sessions. This is accepted for v1 because the server keeps no traffic.
 - What the server still learns while a page or session is active: which devices exist, who is paging whom, and who is talking and for how long. It keeps none of this afterward. Google sees the timing of pushes to each phone.

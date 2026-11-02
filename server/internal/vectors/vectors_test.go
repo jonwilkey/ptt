@@ -51,6 +51,8 @@ type File struct {
 	EnvelopeReceive []ReceiveVector  `json:"envelope_receive"`
 	RosterAccept    []AcceptVector   `json:"roster_accept"`
 	AudioFrames     AudioSection     `json:"audio_frames"`
+	ClipFallback    ClipSection      `json:"clip_fallback"`
+	SenderKeys      SenderKeySection `json:"sender_keys"`
 }
 
 // SignedVector: Wire is the JSON text of the signed object. Expect is "valid" (decodes and
@@ -339,6 +341,26 @@ func loadCache(old *File) map[string]string {
 	for _, d := range append(append([]identity(nil), family...), stranger) {
 		byID[d.id] = d
 	}
+	// addWrapped caches one wrapped key of the envelope session key. Every envelope and sender key
+	// in the file wraps the same session key, but possibly to another device, under another
+	// device's info or under the other role's label (the deliberately mismatched vectors): try
+	// them all.
+	addWrapped := func(page, session, wrapped string) {
+		raw, err := wire.B64u.DecodeString(wrapped)
+		if err != nil {
+			return
+		}
+		sk := seedOf("envelope/session-key")
+		for _, d := range byID {
+			for other := range byID {
+				for _, info := range [][]byte{hpkeInfo(page, session, other), senderInfo(page, session, other)} {
+					if got, err := hpkeOpen(d.xPriv, info, raw); err == nil && bytes.Equal(got, sk) {
+						cache[cacheKey(d.xPub(), info, sk)] = wrapped
+					}
+				}
+			}
+		}
+	}
 	addPayload := func(payload []byte) {
 		var p struct {
 			PageID    string            `json:"page_id"`
@@ -348,23 +370,11 @@ func loadCache(old *File) map[string]string {
 		if json.Unmarshal(payload, &p) != nil {
 			return
 		}
-		for dev, wrapped := range p.Keys {
-			d, ok := byID[dev]
-			raw, err := wire.B64u.DecodeString(wrapped)
-			if !ok || err != nil {
-				continue
-			}
-			// Every envelope in the file wraps the same session key, but possibly under another
-			// device's info (the deliberately mismatched vector): try them all.
-			sk := seedOf("envelope/session-key")
-			for other := range byID {
-				info := hpkeInfo(p.PageID, p.SessionID, other)
-				if got, err := hpkeOpen(d.xPriv, info, raw); err == nil && bytes.Equal(got, sk) {
-					cache[cacheKey(d.xPub(), info, sk)] = wrapped
-				}
-			}
+		for _, wrapped := range p.Keys {
+			addWrapped(p.PageID, p.SessionID, wrapped)
 		}
 	}
+	cacheSenderKeys(cache, old.SenderKeys, addWrapped, addPayload)
 	for _, v := range old.Envelopes {
 		if raw, err := wire.B64u.DecodeString(v.Payload); err == nil {
 			addPayload(raw)
@@ -491,6 +501,8 @@ func generate(old *File) File {
 	f.EnvelopeReceive = receiveVectors(s)
 	f.RosterAccept = acceptVectors()
 	f.AudioFrames = audioVectors()
+	f.ClipFallback = clipVectors()
+	f.SenderKeys = senderKeyVectors(s)
 	return f
 }
 
@@ -1007,6 +1019,8 @@ func mustB64(t *testing.T, s string) []byte {
 func checkFile(t *testing.T, f File) {
 	t.Helper()
 	checkAudio(t, f.AudioFrames)
+	checkClip(t, f.ClipFallback)
+	checkSenderKeys(t, f.SenderKeys)
 	for _, v := range f.Signed {
 		t.Run("signed/"+v.Name, func(t *testing.T) {
 			pub := ed25519.PublicKey(mustB64(t, v.Public))

@@ -82,20 +82,40 @@ type AudioReplay struct {
 // talker and id resume it, any other grant first treats it as released (its id is refused
 // forever) and is then judged as a fresh grant; frames for a suspended transmission are dropped.
 // Any other grant of an id already seen is refused.
+//
+// Protocol 2 (docs/protocol.md section 13.8, the clip_fallback section only) adds "clip" (Talker,
+// TransmissionID, LastSeq; Expect "accept" or "refuse") and "heard" (TransmissionID; Expect
+// "send" with LastSeq the cumulative seq the receiver would report now, or "none"), and
+// "peer_joined" (DeviceID; Expect "accept" or "refuse", section 13.7). A clip_fallback session
+// names its Receiver, so grants, clips and peer_joined are also judged by who the phone is.
 type AudioStep struct {
 	Op             string `json:"op"`
 	Talker         string `json:"talker,omitempty"`
 	TransmissionID string `json:"transmission_id,omitempty"`
 	Frame          string `json:"frame,omitempty"`
+	LastSeq        *int   `json:"last_seq,omitempty"`
+	DeviceID       string `json:"device_id,omitempty"`
 	Expect         string `json:"expect,omitempty"`
+}
+
+// ClipReceiver is the receiving phone of a clip_fallback session (docs/protocol.md sections 11.6
+// and 13.7): its own device id and its role. An answering device knows the envelope's
+// FromDevice; a sender knows the envelope's Keys (the recipient devices) and takes as its peer the
+// device of the first peer_joined or clip it accepts.
+type ClipReceiver struct {
+	DeviceID   string   `json:"device_id"`
+	Role       string   `json:"role"` // "answerer" | "sender"
+	FromDevice string   `json:"from_device,omitempty"`
+	Keys       []string `json:"keys,omitempty"`
 }
 
 // AudioSession is a stateful receiver scenario across floor events (rules 4 and 5 of section 12.4).
 type AudioSession struct {
-	Name       string      `json:"name"`
-	SessionKey string      `json:"session_key"`
-	SessionID  string      `json:"session_id"`
-	Steps      []AudioStep `json:"steps"`
+	Name       string        `json:"name"`
+	SessionKey string        `json:"session_key"`
+	SessionID  string        `json:"session_id"`
+	Receiver   *ClipReceiver `json:"receiver,omitempty"`
+	Steps      []AudioStep   `json:"steps"`
 }
 
 // AudioSection is the audio_frames section of the file.
@@ -106,22 +126,86 @@ type AudioSection struct {
 	Sessions      []AudioSession      `json:"sessions"`
 }
 
-// receiverModel is the floor and replay state of section 12.4-12.5.
+// seenTransmission is what a receiver keeps per transmission id it has seen (section 13.8).
+// clipLast is the last_seq of an accepted clip, -1 while none.
+type seenTransmission struct {
+	talker   string
+	accepted map[uint32]bool
+	clipLast int
+}
+
+// receiverModel is the floor and replay state of sections 12.4-12.5, with the clip rules of
+// section 13.8.
 type receiverModel struct {
 	sk        []byte
 	sessionID string
 	talker    string // current talker, "" when the floor is free
 	tid       string // current transmission id
 	suspended bool   // own socket closed during tid; waiting for the rejoin snapshot
-	seen      map[string]bool
-	accepted  map[string]map[uint32]bool
+	seen      map[string]*seenTransmission
+	// The receiver's identity (clip_fallback sessions only; nil in audio_frames) and, for a
+	// sender, its peer.
+	self *ClipReceiver
+	peer string
 }
 
-func newReceiverModel(sk []byte, sessionID string) *receiverModel {
-	return &receiverModel{sk: sk, sessionID: sessionID, seen: map[string]bool{}, accepted: map[string]map[uint32]bool{}}
+func newReceiverModel(sk []byte, sessionID string, self *ClipReceiver) *receiverModel {
+	return &receiverModel{sk: sk, sessionID: sessionID, seen: map[string]*seenTransmission{}, self: self}
 }
+
+func (m *receiverModel) inKeys(dev string) bool {
+	for _, k := range m.self.Keys {
+		if k == dev {
+			return true
+		}
+	}
+	return false
+}
+
+// grantTalkerOK is section 11.6: a phone accepts a grant naming itself or its peer.
+func (m *receiverModel) grantTalkerOK(talker string) bool {
+	switch {
+	case m.self == nil || talker == m.self.DeviceID:
+		return true
+	case m.self.Role == "answerer":
+		return talker == m.self.FromDevice
+	default:
+		return m.peer != "" && talker == m.peer
+	}
+}
+
+// peerOK is section 13.7 for a peer_joined or clip naming dev: the answering device accepts only
+// the envelope's sender; a sender accepts a device of its keys, and once it has a peer only that
+// one.
+func (m *receiverModel) peerOK(dev string) bool {
+	switch {
+	case m.self == nil:
+		return true
+	case dev == m.self.DeviceID:
+		return false
+	case m.self.Role == "answerer":
+		return dev == m.self.FromDevice
+	default:
+		return m.inKeys(dev) && (m.peer == "" || dev == m.peer)
+	}
+}
+
+func (m *receiverModel) peerJoined(dev string) string {
+	if !m.peerOK(dev) {
+		return "refuse"
+	}
+	if m.self != nil && m.self.Role == "sender" {
+		m.peer = dev
+	}
+	return "accept"
+}
+
+func (m *receiverModel) isSelf(dev string) bool { return m.self != nil && dev == m.self.DeviceID }
 
 func (m *receiverModel) granted(talker, tid string) string {
+	if !m.grantTalkerOK(talker) {
+		return "refuse"
+	}
 	if m.tid != "" && m.suspended {
 		if tid == m.tid && talker == m.talker {
 			m.suspended = false
@@ -135,11 +219,11 @@ func (m *receiverModel) granted(talker, tid string) string {
 		}
 		return "refuse"
 	}
-	if m.seen[tid] { // released before: refused forever
+	if m.seen[tid] != nil { // released before: refused forever
 		return "refuse"
 	}
-	m.talker, m.tid, m.seen[tid] = talker, tid, true
-	m.accepted[tid] = map[uint32]bool{}
+	m.talker, m.tid = talker, tid
+	m.seen[tid] = &seenTransmission{talker: talker, accepted: map[uint32]bool{}, clipLast: -1}
 	return "accept"
 }
 
@@ -151,39 +235,139 @@ func (m *receiverModel) released(tid string) {
 
 func (m *receiverModel) reconnected() { m.suspended = m.tid != "" }
 
+// clip is section 13.8: a clip of an unseen id, or of a seen id from the same talker, is accepted
+// and keeps the id's accepted set; if the id was current or suspended, the floor counts as free.
+func (m *receiverModel) clip(talker, tid string, last int) string {
+	if !m.peerOK(talker) { // section 13.7, and 13.8 step 1 for a clip naming the phone itself
+		return "refuse"
+	}
+	r := m.seen[tid]
+	switch {
+	case r == nil:
+		m.seen[tid] = &seenTransmission{talker: talker, accepted: map[uint32]bool{}, clipLast: last}
+	case r.talker != talker:
+		return "refuse"
+	default:
+		if tid == m.tid {
+			m.talker, m.tid, m.suspended = "", "", false
+		}
+		r.clipLast = last
+	}
+	if m.self != nil && m.self.Role == "sender" {
+		m.peer = talker
+	}
+	return "accept"
+}
+
+// heard is the cumulative last_seq the receiver would report for tid now, or -1.
+func (m *receiverModel) heard(tid string) int {
+	k := -1
+	if r := m.seen[tid]; r != nil && !m.isSelf(r.talker) {
+		for r.accepted[uint32(k+1)] {
+			k++
+		}
+	}
+	return k
+}
+
 func (m *receiverModel) frame(f []byte) string {
-	if m.tid == "" || m.suspended {
+	h, _, err := audioframe.Parse(f)
+	if err != nil {
 		return "drop"
 	}
-	if _, reason := receiveFrame(m.sk, m.sessionID, m.talker, m.tid, f); reason != "" {
+	tid := uuid.UUID(h.TransmissionID).String()
+	r := m.seen[tid]
+	switch {
+	case tid == m.tid && !m.suspended:
+	case r != nil && r.clipLast >= 0 && int(h.Seq) <= r.clipLast:
+	default:
 		return "drop"
 	}
-	h, _, _ := audioframe.Parse(f)
-	if m.accepted[m.tid][h.Seq] {
+	if m.isSelf(r.talker) { // section 12.5: never the receiver's own transmission
+		return "drop"
+	}
+	if _, reason := receiveFrame(m.sk, m.sessionID, r.talker, tid, f); reason != "" {
+		return "drop"
+	}
+	if r.accepted[h.Seq] {
 		return "replay"
 	}
-	m.accepted[m.tid][h.Seq] = true
+	r.accepted[h.Seq] = true
 	return "ok"
 }
 
-// run feeds the steps to a fresh model and returns the verdict of each step ("" for released).
-func (m *receiverModel) run(steps []AudioStep, frame func(AudioStep) []byte) []string {
-	var out []string
+// stepResult is a step's verdict ("" for released and reconnected) and, for "heard", the
+// reported last_seq.
+type stepResult struct {
+	verdict string
+	lastSeq *int
+}
+
+// run feeds the steps to the model and returns the result of each step.
+func (m *receiverModel) run(steps []AudioStep, frame func(AudioStep) []byte) []stepResult {
+	var out []stepResult
 	for _, st := range steps {
+		var r stepResult
 		switch st.Op {
 		case "granted":
-			out = append(out, m.granted(st.Talker, st.TransmissionID))
+			r.verdict = m.granted(st.Talker, st.TransmissionID)
 		case "released":
 			m.released(st.TransmissionID)
-			out = append(out, "")
 		case "reconnected":
 			m.reconnected()
-			out = append(out, "")
+		case "clip":
+			r.verdict = m.clip(st.Talker, st.TransmissionID, *st.LastSeq)
+		case "peer_joined":
+			r.verdict = m.peerJoined(st.DeviceID)
+		case "heard":
+			r.verdict = "none"
+			if k := m.heard(st.TransmissionID); k >= 0 {
+				r.verdict, r.lastSeq = "send", &k
+			}
 		default:
-			out = append(out, m.frame(frame(st)))
+			r.verdict = m.frame(frame(st))
 		}
+		out = append(out, r)
 	}
 	return out
+}
+
+// fillExpect runs each session through a fresh model and records the verdicts as the expected
+// ones.
+func fillExpect(sessions []AudioSession, sk []byte) {
+	for i := range sessions {
+		sessions[i].SessionKey, sessions[i].SessionID = b64(sk), audioSessionID
+		m := newReceiverModel(sk, audioSessionID, sessions[i].Receiver)
+		for j, r := range m.run(sessions[i].Steps, func(st AudioStep) []byte { return mustB64Plain(st.Frame) }) {
+			sessions[i].Steps[j].Expect = r.verdict
+			if sessions[i].Steps[j].Op == "heard" {
+				sessions[i].Steps[j].LastSeq = r.lastSeq
+			}
+		}
+	}
+}
+
+// checkSessions replays committed sessions against the model.
+func checkSessions(t *testing.T, prefix string, sessions []AudioSession) {
+	t.Helper()
+	for _, sc := range sessions {
+		t.Run(prefix+sc.Name, func(t *testing.T) {
+			m := newReceiverModel(mustB64(t, sc.SessionKey), sc.SessionID, sc.Receiver)
+			got := m.run(sc.Steps, func(st AudioStep) []byte { return mustB64(t, st.Frame) })
+			for i, st := range sc.Steps {
+				if got[i].verdict != st.Expect {
+					t.Fatalf("step %d (%s): %q, want %q", i, st.Op, got[i].verdict, st.Expect)
+				}
+				if st.Op == "heard" && !equalIntPtr(got[i].lastSeq, st.LastSeq) {
+					t.Fatalf("step %d (heard): last_seq differs", i)
+				}
+			}
+		})
+	}
+}
+
+func equalIntPtr(a, b *int) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
 }
 
 func audioSessions(sk []byte) []AudioSession {
@@ -226,14 +410,7 @@ func audioSessions(sk []byte) []AudioSession {
 			fr(alex, audioTID1, 0), gr(alex, audioTID1), rel(audioTID1), fr(alex, audioTID1, 1),
 		}},
 	}
-	for i := range sessions {
-		sessions[i].SessionKey, sessions[i].SessionID = b64(sk), audioSessionID
-		m := newReceiverModel(sk, audioSessionID)
-		verdicts := m.run(sessions[i].Steps, func(st AudioStep) []byte { return mustB64Plain(st.Frame) })
-		for j, v := range verdicts {
-			sessions[i].Steps[j].Expect = v
-		}
-	}
+	fillExpect(sessions, sk)
 	return sessions
 }
 
@@ -534,17 +711,7 @@ func checkAudio(t *testing.T, a AudioSection) {
 			}
 		})
 	}
-	for _, sc := range a.Sessions {
-		t.Run("audio-session/"+sc.Name, func(t *testing.T) {
-			m := newReceiverModel(mustB64(t, sc.SessionKey), sc.SessionID)
-			got := m.run(sc.Steps, func(st AudioStep) []byte { return mustB64(t, st.Frame) })
-			for i, st := range sc.Steps {
-				if got[i] != st.Expect {
-					t.Fatalf("step %d (%s): %q, want %q", i, st.Op, got[i], st.Expect)
-				}
-			}
-		})
-	}
+	checkSessions(t, "audio-session/", a.Sessions)
 }
 
 // rfc5869SHA256 is HKDF (RFC 5869) with HMAC-SHA256, written out so the vector check does not

@@ -33,3 +33,4 @@ ADR that supersedes the old one.
 - [0007 — The outbox abandons rows after a send window](0007-outbox-send-window.md)
 - [0008 — sops secrets are encrypted to one admin key until the second admin has one](0008-sops-secrets-one-admin-recipient.md)
 - [0009 — Firebase Installations may use the system CAs](0009-firebase-installations-trust-exception.md)
+- [0010 — The sender wraps the session key for itself](0010-sender-wraps-session-key-for-itself.md)

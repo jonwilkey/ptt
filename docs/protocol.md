@@ -1,16 +1,15 @@
-# Wire protocol — milestones 2 and 4 (enrollment, paging and live talk)
+# Wire protocol — milestones 2, 4 and 5 (enrollment, paging, live talk and clip fallback)
 
 This is the wire-format contract shared by the Go server (`pttd`) and the Android app for
-milestone 2 (enrollment and paging) and milestone 4 (live talk). It covers the REST API, the page
-state machine, the FCM data messages (§1-§10), and the WebSocket control protocol and the
-end-to-end-encrypted audio frames of live talk (§11-§12). Where this document lists more than
+milestone 2 (enrollment and paging), milestone 4 (live talk) and milestone 5 (clip fallback). It
+covers the REST API, the page state machine, the FCM data messages (§1-§10), the WebSocket control
+protocol and the end-to-end-encrypted audio frames of live talk (§11-§12), and clip fallback, which
+is protocol 2 of the WebSocket (§13). Where this document lists more than
 [`spec.md`](spec.md) (for example the FCM message list in §9), it **extends** the spec; the spec
 remains authoritative for everything this document does not cover.
 
-**Scope.** This document covers enrollment, paging and live talk. Milestone-5 items (clip
-fallback: `heard`, `listener_gap`, `clip`, `resume`, `resume_from`, the server's transmission
-buffer, and clip frames) are named in §11.12 and §12.1 as **reserved, milestone 5** and not
-otherwise specified. The in-app-update endpoints
+**Scope.** This document covers enrollment, paging, live talk and clip fallback. The in-app-update
+endpoints
 (`GET /v1/app/latest`, `GET /v1/app/apk/<version>`) are defined in the spec but omitted here.
 Test devices and two pre-provisioned test accounts are server-side details; they never appear in
 `GET /v1/contacts` or in the family roster, and this document does not give them a wire form.
@@ -129,6 +128,7 @@ Context strings:
 | --- | --- |
 | `ptt-roster-v1` | Family roster (signer: an admin device) |
 | `ptt-envelope-v1` | Page envelope (signer: the sender device) |
+| `ptt-sender-key-v1` | The sender's own copy of the session key (signer: the sender device, §7) |
 
 ## 4. Family roster
 
@@ -259,6 +259,7 @@ require the caller's **user** to be an admin.
 | `GET /v1/roster` | device |
 | `PUT /v1/roster` | admin |
 | `POST /v1/pages` | device (rate-limited) |
+| `GET /v1/pages/{id}` | sender |
 | `POST /v1/pages/{id}/delivered` | device in envelope |
 | `POST /v1/pages/{id}/acknowledge` | device in envelope |
 | `POST /v1/pages/{id}/answer` | device in envelope |
@@ -411,6 +412,31 @@ roster_stale` otherwise.
   {"id","state":"ended"}` and it is tombstoned; no `page_state` push is sent.
 - Paging your own user is allowed (Test alert).
 
+### `GET /v1/pages/{id}` (sender)
+
+Lets a sender whose process died get its page back (§13.7). Only the page's sender (the device
+that created it, the envelope's `from_device`) may call it. → `200`
+
+```json
+{
+  "envelope": { "payload": "<b64u>", "signer": "c3e9a7f1-5d2b-4b84-a6e0-9f1c8d3b2a57", "sig": "<b64u>" },
+  "sender_key": { "payload": "<b64u>", "signer": "c3e9a7f1-5d2b-4b84-a6e0-9f1c8d3b2a57", "sig": "<b64u>" }
+}
+```
+
+`envelope` is the signed object of `POST /v1/pages` and `sender_key` the one the sender sent over
+the WebSocket (§13.7), each with `payload`, `signer` and `sig` byte-equal to what the server
+received. The server checks in this order and answers the first that applies:
+
+1. no page and no tombstone with that `id` → `404 not_found`;
+2. a tombstoned page → `410 page_ended`, for any caller;
+3. a live page whose sender is not the caller → `403 forbidden`;
+4. a live page for which no sender key is stored yet → `404 not_found`.
+
+The call
+changes nothing (it does not count as `delivered` or as activity), so repeats are safe and return
+the same body.
+
 ### `POST /v1/pages/{id}/delivered`
 
 Only a device listed in the envelope's `keys` may call it (any other caller → `403 forbidden`).
@@ -490,14 +516,49 @@ own user, that their own device id is in `keys`, that `from_device` is in the ro
 any failed check. HPKE-decrypt their `keys` entry for the session key. The caller name shown
 to the user comes from the roster entry, never from the server.
 
+### The sender's own copy of the session key
+
+So that a sender whose process died can still talk and play clips after the answer (§13.7,
+[ADR 0010](adr/0010-sender-wraps-session-key-for-itself.md)), the sender also wraps the session
+key for its **own** device, in a separate signed object, the **sender key**, signed with context
+`ptt-sender-key-v1`:
+
+```json
+{
+  "format": 1,
+  "page_id": "5f0c2a9e-3b1d-4c7a-9e21-6d8b0f4a7c13",
+  "session_id": "a8d4e6b2-71c9-4f30-8b5e-2c9a1d7e3f60",
+  "from_device": "c3e9a7f1-5d2b-4b84-a6e0-9f1c8d3b2a57",
+  "key": "<b64u(HPKE enc || ciphertext)>"
+}
+```
+
+- `key` is the same session key, HPKE-wrapped (as above) to the sender device's own X25519 key,
+  with `info` = `"ptt-sender-session-key-v1" || 0x00 || page_id || session_id || sender
+  device_id`. The label differs from the receivers' `ptt-session-key-v1`, so a wrapped key cannot
+  be moved between the two roles, even on a self page where the sender is also in `keys`.
+- The strict payload rules of §3 apply; every field is required, `format` is `1`, the three ids
+  are canonical UUIDs and `key` decodes to exactly 80 bytes.
+- It is **not** part of the envelope. The envelope's format stays `1` and receivers never see the
+  sender key: a milestone-4 receiver parses the envelope strictly (exactly the fields above, format
+  1) and would drop a page whose envelope carried anything new, and a sender cannot know which app
+  version each recipient device runs. A separate field in `POST /v1/pages` would break paging on a
+  server rolled back to milestone 4 (its request parser is strict too). So the sender key travels
+  on the protocol-2 WebSocket (`sender_key`, §13.7), whose `hello` already negotiates; a server
+  that answers protocol 1 never gets one, and has no `GET /v1/pages/{id}` route, so the sender
+  simply cannot recover (as in milestone 4).
+
+The server stores the sender key with the page row (it never decrypts or verifies it) and deletes
+it with the row; the tombstone keeps only the id (§8).
+
 ### Test vectors
 
 [`testdata/protocol-vectors.json`](../testdata/protocol-vectors.json) holds shared vectors for §3-§5
 and §7: signed objects (valid and tampered), roster payloads (valid and invalid), the enrollment
-MAC, QR text, HPKE-wrapped session keys, envelope payloads, and complete receiver scenarios; the `audio_frames` section covers §12 (below). The
+MAC, QR text, HPKE-wrapped session keys, envelope payloads, and complete receiver scenarios; `sender_keys` covers the sender key above and the sender's recovery of §13.7 (the sender-key wrap, `recover` scenarios with the first failing check, and receivers refusing a sender-key wrap moved into `keys`); the `audio_frames` section covers §12 and `clip_fallback` covers §13 (below). The
 Go server module generates the file and checks it (`go test ./internal/vectors -update`); the
-Android crypto tests assert every vector. Any change to a rule in §1-§5, §7 or §12 must update the
-vectors. See [`testdata/README.md`](../testdata/README.md).
+Android crypto tests assert every vector. Any change to a rule in §1-§5, §7, §12 or §13 must update
+the vectors. See [`testdata/README.md`](../testdata/README.md).
 
 ## 8. Page states and timers
 
@@ -635,8 +696,9 @@ session is active. The upgrade is on the same TLS origin as the REST API (`wss:/
   socket starts with no session; the old socket's participation ends (the peer sees `peer_left`)
   and the device must `join` again. A client that gets `4409` must not reconnect on its own.
 
-**Versioning.** `hello` carries an integer `protocol` in both directions; **`1` is the protocol of
-this document (milestone 4)**. The client sends the highest it speaks; the server replies with
+**Versioning.** `hello` carries an integer `protocol` in both directions; **`1` is milestone 4
+(§11-§12) and `2` is milestone 5, which adds clip fallback (§13)**. The client sends the highest it
+speaks; the server replies with
 `min(client's, its own highest)`, and from then on:
 
 - the server never sends a message `type`, field, or enum value (a `state`, `reason` or `code`)
@@ -647,7 +709,7 @@ this document (milestone 4)**. The client sends the highest it speaks; the serve
   generic end of the session (the same as `ended_by_peer`), an unknown `floor_released.reason` as
   `released`, an unknown `error.code` as non-fatal, and an unknown `page_state.state` as no change.
 
-Milestone 5 therefore ships as `protocol` 2: its new types (§11.12) are sent only to clients that
+Milestone 5 therefore ships as `protocol` 2: its new types (§13.2) are sent only to clients that
 announced 2. **Rollback and the 30-day rule:** a server rolled back to the previous release answers
 a newer app with its lower `protocol` and the app falls back; and for 30 days after any protocol
 bump the new server must still serve the previous protocol and the new app must still speak it, so
@@ -705,15 +767,14 @@ unchanged and never interprets; `protocol` is an integer of at least 1.
 
 `error.code` is one of `not_found` (a `join` for a page that does not exist, has ended, or is not
 yours to join — one code for all three), `no_peer` (`floor_request` while the other participant has
-not joined, or on a self page, §11.4) or `bad_transmission_id` (`floor_request` with a
-`transmission_id` that is not a canonical lowercase version-4 UUID, or one already used in this
-session, §11.6).
+not joined, or on a self page, §11.4; narrower in protocol 2, §13.7) or `bad_transmission_id`
+(`floor_request` with a `transmission_id` that is not a canonical lowercase version-4 UUID, or one
+already used in this session, §11.6; in protocol 2 also a `resume` with no open transmission to
+resume, §13.6).
 
-**Reserved, milestone 5** (names and fields fixed now, sent only with `protocol` ≥ 2; a
-`protocol` 1 server treats the client types as unknown, `4400`): `heard {transmission_id,
-last_seq}` (client → server), `listener_gap {transmission_id}` (server → talker), `clip
-{transmission_id}` (server → listener, announcing a replay as a clip), `resume {transmission_id}`
-(client → server), `resume_from {last_seq}` (server → talker). See §11.12.
+**Protocol 2** adds `heard`, `resume`, `sender_key` (client → server), `listener_gap`, `clip`, `resume_from`
+(server → client) and a `clip` field on `floor_request`; they exist only on protocol-2 sockets
+(§13.2). A protocol-1 server treats the new client types as unknown (`4400`).
 
 ### 11.3 Authentication (`hello`)
 
@@ -764,7 +825,12 @@ On success the server sends the joiner, in order:
 3. `floor_granted {talker, transmission_id}` — only if the floor is currently held (so a phone that
    rejoins in the middle of a transmission can keep decrypting it; the receiver's rule is in §12.4).
 
-and sends the other participant `peer_joined {device_id}` (the joiner). The server processes a
+and sends the other participant `peer_joined {device_id}` (the joiner).
+
+On a protocol-2 socket, clips of what the joiner missed follow the snapshot (§13.4); they are not
+part of it.
+
+The server processes a
 socket's messages in order, so a client may send `floor_request` right behind `join`;
 `floor_request`, `floor_release` and `session_end` on a socket that has **not** joined are `4400`,
 and a binary frame on an unjoined socket is dropped silently (§11.7).
@@ -813,7 +879,8 @@ absolute maximum session length while the floor keeps changing hands.
 
 **On end** the server, in this order: **commits** the deletion of the page row (leaving the 24 h
 tombstone, §8), so a crash after this point cannot resurrect the session; then writes `session_end`
-to each joined socket; discards all in-memory session state (floor, timers, send queues); and
+to each joined socket; discards all in-memory session state (floor, timers, send queues, and in
+protocol 2 the transmission buffers, §13.11); and
 closes the sockets with `1000`. The server therefore owns closing; a client that receives
 `session_end` stops sending, discards its session key, and closes if the server has not.
 
@@ -822,7 +889,8 @@ closes the sockets with `1000`. The server therefore owns closing; a client that
 rebuilds the session (the idle timer starts over, an in-progress transmission is lost, and the
 server's record of used transmission ids is gone, which is why nonce safety does not rest on it,
 §12.4). Session keys on the phones are not persisted either, but a phone can unwrap the same
-session key again from its envelope (for example after its process died), so a phone's own state
+session key again from its envelope (for example after its process died; in protocol 2 the sender
+from its sender key, §13.7), so a phone's own state
 cannot be assumed to survive either.
 
 ### 11.6 Floor control
@@ -838,7 +906,7 @@ request processed wins**. The **talker mints the `transmission_id`** (§12.4).
   `transmission_id` echoed unchanged. If the floor is held, the requester gets `floor_busy` (and
   nothing else); the id of a request answered `floor_busy` or `error` was never granted, but a
   client MUST still use a **new** id for its next request. A `floor_request` while the peer is not
-  joined → `error no_peer`. A `floor_request` from the current talker is ignored. A revoked
+  joined → `error no_peer` (a protocol-2 requester is granted instead, §13.7). A `floor_request` from the current talker is ignored. A revoked
   device's request is refused with close `4403` (§11.9).
 - `floor_release {transmission_id}`: from the current talker with the current id, it frees the
   floor and the server sends `floor_released {talker, transmission_id, reason: "released"}` to
@@ -847,10 +915,12 @@ request processed wins**. The **talker mints the `transmission_id`** (§12.4).
 - The server also releases the floor by itself and sends `floor_released` to the participants still
   connected, with a `reason` from the closed set **`released`** (talker's `floor_release`),
   **`silence`** (1 s with no accepted frame since the last accepted frame; before the first frame
-  the allowance is **3 s from the grant**, to cover the talker's round trip and encoder start),
+  the allowance is **3 s from the grant**, to cover the talker's round trip and encoder start; a
+  clip transmission gets 5 s for both, §13.9),
   **`max_length`** (60 s after the grant), **`disconnected`** (the talker's socket closed or was
   replaced; sent to the peer only).
-- Releasing the floor never ends the session.
+- Releasing the floor never ends the session. In protocol 2 a release other than `released` leaves
+  the transmission **open** for its talker to finish (§13.3).
 - The server does **not** enforce the first-talker rule (the receiver speaks first); that is the
   sender app's concern (spec, "Sending a page").
 
@@ -858,7 +928,8 @@ request processed wins**. The **talker mints the `transmission_id`** (§12.4).
 
 - The **answering device** accepts a `talker` only if it is its own device id or the envelope's
   `from_device`. The **sender** accepts only its own id or the device id of the `peer_joined` that
-  it received, which must be a device in its envelope's `keys`. Any other grant is ignored.
+  it received, which must be a device in its envelope's `keys` (in protocol 2, its peer, which an
+  accepted `clip` can also set, §13.7). Any other grant is ignored.
 - It plays frames only when `talker` is the **peer**. It sends audio only under the rules of §12.4
   (the grant must answer its own outstanding `floor_request`).
 - A `floor_granted` that names the phone itself **without an outstanding `floor_request` of its
@@ -868,7 +939,11 @@ request processed wins**. The **talker mints the `transmission_id`** (§12.4).
 
 ### 11.7 Frame relay and the send queue
 
-Only the participant holding the floor may send audio. For each binary frame from a joined socket
+Only the participant holding the floor may send audio. This section is the relay of a
+transmission granted on a protocol-1 socket; a protocol-2 transmission is buffered and delivered
+as §13.3-§13.4 describe, which replace the first bullet below for it, and the 25-frame drop for
+it except toward a protocol-1 listener (§13.1). For
+each binary frame from a joined socket
 the server runs `audioframe.Parse` (§12.1) — a frame that fails it closes the socket with `4400` —
 and then:
 
@@ -888,13 +963,15 @@ and are handled by the receiver (§12.5).
 order the server produced them, so `floor_granted` always precedes the frames of its
 transmission and `floor_released` follows the last frame relayed for it. **The limit counts frames
 only:** when **25 frames (500 ms)** are already queued the next frame is dropped (the
-latency target is under 700 ms, so a longer queue would only deliver stale audio; milestone 5 turns
-an overflow into `listener_gap`). **Control messages are never dropped.** A socket whose queue grows
-past 256 entries in total (a peer that is not reading) is closed `4408`.
+latency target is under 700 ms, so a longer queue would only deliver stale audio; for a
+protocol-2 transmission toward a protocol-2 listener an overflow stops its live relay instead,
+and the listener gets it as a clip, §13.4). **Control messages are never dropped.** A socket
+whose queue grows past 256 entries in total (a peer that is not reading) is closed `4408`.
 
 ### 11.8 `ping` / `pong`, timeouts
 
-The client sends `ping {t}` every **10 s** while connected (and may send one right after `hello`).
+The client sends `ping {t}` every **10 s** while connected (every 2 s while joined on a protocol-2
+socket, §13.9) (and may send one right after `hello`).
 The server answers at once with `pong {t, server_time}`, echoing `t` unchanged; the client computes
 RTT as `now − t` on the same clock it took `t` from; `t` is never compared with `server_time`. The
 `pong` is queued in order with the socket's other messages (§11.7), so a `ping` sent right behind
@@ -922,7 +999,7 @@ count as messages.
 | Upgrades | 30 / minute per client IP | `429`, `Retry-After`, as §1 |
 | Unauthenticated sockets | 64 at once | `503 unavailable` on upgrade (`Retry-After`, §1) |
 | Text messages | 20 / s sustained, burst 40, per socket | close `4429` |
-| Binary frames | 100 / s sustained, burst 200 (a talker sends 50 / s), per socket | close `4429` |
+| Binary frames | 250 / s sustained, burst 500 (a talker sends 50 / s live and paces resends to 200 / s, §13.10), per socket | close `4429` |
 | Text frame / binary frame size | 1024 / 1312 bytes | close `4413` |
 
 ### 11.11 Notes for the implementers
@@ -933,18 +1010,13 @@ count as messages.
 - A phone has one page or session at a time (spec); a new session needs a new socket (the old one
   is closed by `1000` after `session_end`).
 
-### 11.12 Reserved, milestone 5
+### 11.12 Milestone 5
 
-`heard`, `listener_gap`, `clip`, `resume`, `resume_from`, binary frame type `0x02`, the server's
-in-memory transmission buffer and the clip frames are **not specified** beyond their names and
-fields in §11.2 and §12.1. To stay forward-compatible, milestone 4 already: keeps all state
-per `transmission_id`; has the talker keep each sealed frame (never the plaintext) of the
-current transmission in memory so a resend is a resend of bytes (§12.4); rejects unknown binary
-types and client message types with `4400`; and negotiates `protocol` (§11.1), so milestone-5
-messages reach only clients that announced `protocol` 2. `no_peer` is a milestone-4 behavior
-(milestone 5 may grant the floor with the peer away and buffer instead). **Milestone 5 must
-revisit the 100 frames/s binary limit of §11.10 or pace resends**: a resend of a stored
-transmission competes with live frames on the same socket.
+Clip fallback is protocol 2 and is specified in §13. Milestone 4 prepared for it: it keeps all
+state per `transmission_id`; its talker keeps each sealed frame (never the plaintext) of the
+current transmission in memory, so a resend is a resend of bytes (§12.4); it rejects unknown
+binary types and client message types with `4400`; and it negotiates `protocol` (§11.1), so
+protocol-2 messages reach only clients that announced 2.
 
 ## 12. Audio frames and per-frame encryption
 
@@ -955,7 +1027,7 @@ between the two phones. The server relays them (§11.7) and **never holds a key*
 
 ```
 offset  size  field
-0       1     type            0x01 = live audio; 0x02 reserved for milestone-5 clips; all others rejected
+0       1     type            0x01 = audio (live, resent or replayed as a clip); 0x02 reserved; all others rejected
 1       16    transmission_id raw UUID bytes (big-endian field order, as in the 36-character text form)
 17      4     seq             uint32, big-endian; starts at 0, +1 per 20 ms frame
 21      n+16  ciphertext || GCM tag    n = Opus packet length
@@ -967,8 +1039,9 @@ offset  size  field
   (`audioframe.MinFrameSize` .. `MaxFrameSize`). An empty packet is never sent.
 - `seq` is at most **4095** (`audioframe.MaxSeq`): a transmission lasts at most 60 s, which is 3000
   frames; the bound limits a receiver's replay state.
-- Type `0x02` is **reserved, milestone 5** (buffered clips) and is rejected like any unknown type;
-  milestone 4 never sends it.
+- Type `0x02` is **reserved** and is rejected like any unknown type. Protocol 2 does not use it:
+  a clip is the original `0x01` frames, announced by a `clip` message, because the type byte is
+  authenticated and cannot be changed after sealing (§13.2).
 - The server's parser (`server/internal/audioframe`, fuzzed) accepts a frame only if its length is
   in range, its type is `0x01` and `seq ≤ 4095`; a receiver applies the same checks first (§12.5).
 
@@ -1016,13 +1089,20 @@ session key from the envelope). These rules are normative; every implementation 
 2. **Sending.** A talker MUST NOT send audio unless a `floor_granted` names its own device id as
    `talker` **and** carries the `transmission_id` of its outstanding `floor_request`; every frame
    carries that id. A grant naming it without a matching outstanding request is answered with
-   `floor_release` and no audio (§11.6).
+   `floor_release` and no audio (§11.6). In protocol 2 a talker may seal frames before the grant
+   (clip mode, §13.9) but still sends none before it; and after a `resume_from` answering its own
+   `resume` it sends the rest of that granted transmission on its new socket (§13.6).
 3. **A (`transmission_id`, `seq`) pair MUST be encrypted at most once.** The talker numbers frames
    from 0 with no gaps and never reuses a `seq`; it MUST NOT encrypt a different plaintext under a
-   pair it has used. In milestone 4 a talker whose socket drops loses the floor (`disconnected`,
-   §11.6) and must send a new `floor_request` with a **new** id; continuing a transmission
-   (`resume`) is milestone 5, and a milestone-5 resend sends the **stored ciphertext frame**, never a
-   fresh encryption.
+   pair it has used. In protocol 1 a talker whose socket drops loses the floor (`disconnected`,
+   §11.6) and must send a new `floor_request` with a **new** id. In protocol 2 it can finish the
+   transmission (`resume`, §13.6), and then: it seals each `seq` **exactly once, at capture**, keeps
+   the sealed bytes, and every send of that `seq` (the first, and any resend after `resume_from`)
+   sends **those bytes**, never a fresh encryption. A `resume_from` naming a lower `seq` than the
+   talker expects (a server that lost frames, or lies) only makes it send the same bytes again. A
+   talker that no longer holds the sealed bytes of a transmission (it freed them, or its process
+   died) MUST NOT resume it and MUST NOT seal anything more under its id. The server's clip
+   replay is the bytes it received from the talker (§13.4), so a clip adds no encryption either.
 4. **A receiver refuses a repeated `transmission_id`, with one exception.** It keeps the ids it has
    seen in this session. A `floor_granted` whose id it has already seen is **refused** (and its
    frames ignored) — **unless** it equals the *current, not yet released* transmission and names the
@@ -1030,7 +1110,10 @@ session key from the envelope). These rules are normative; every implementation 
    receiver keeps its existing set of accepted `seq`s for it. An id for which it has seen
    `floor_released` is refused forever, for every talker. A grant naming another talker for an id in
    use, or a grant while another transmission is current and not released, is refused. (This is
-   defence in depth against a lying server; rule 1 is what protects the nonce.)
+   defence in depth against a lying server; rule 1 is what protects the nonce.) In protocol 2 a
+   `clip` for a released id from the **same talker** is accepted and keeps that id's accepted-`seq`
+   set, so the seqs it never accepted can still play and the ones it did are replays (§13.8); a
+   `floor_granted` for a released id is still refused forever.
 
    **Suspension.** When the receiver's own socket closes, its current transmission becomes
    *suspended*, because a `floor_released` sent while it was away never arrives. After it rejoins,
@@ -1054,8 +1137,9 @@ the first failure:
 1. length 38 to 1312 (`bad_length`);
 2. `type == 0x01` (`bad_type`);
 3. `seq ≤ 4095` (`bad_seq`);
-4. `transmission_id` equals the current one from `floor_granted` (`wrong_transmission`);
-5. derive the key (§12.2) with the talker from `floor_granted`; AES-256-GCM open with the nonce of
+4. `transmission_id` equals the current one from `floor_granted`, or, in protocol 2, an id with an
+   accepted `clip` and `seq` ≤ its `last_seq` (§13.8) (`wrong_transmission`);
+5. derive the key (§12.2) with the talker from `floor_granted` (or recorded for the clip); AES-256-GCM open with the nonce of
    §12.3 and AAD = the 21-byte header; a tag failure → `decrypt_failed`;
 6. if `seq` was already accepted → drop as a replay; else mark it accepted and hand the packet to the
    jitter buffer and decoder.
@@ -1081,7 +1165,10 @@ or forge audio, and a family-sized deployment accepts this.
 
 The session key arrives wrapped in the envelope (§7) and stays in memory only (spec: no
 persistence). There is no ratchet in v1 (spec): a stolen device key later decrypts that device's
-captured past sessions. This is accepted by the spec.
+captured past sessions. This is accepted by the spec. In protocol 2 the sender also wraps the key
+for itself (§7, §13.7), so a stolen sender key also decrypts the sessions that device started
+([ADR 0010](adr/0010-sender-wraps-session-key-for-itself.md)); the copy lives on the server only
+while the page does.
 
 ### Test vectors
 
@@ -1093,3 +1180,593 @@ key and truncation; `replay` scenarios for one transmission (verdicts `ok`, `rep
 `sessions`, stateful scenarios across floor events: grant, release, rejoin snapshot (rule 4),
 refused repeats, a receiver reconnect with a suspended transmission (resumed, or treated as
 released by a later grant) and the same `seq` under a new transmission id (rule 5).
+
+## 13. Clip fallback (protocol 2)
+
+Milestone 5 keeps talk working when live streaming can't keep up (spec, decisions table, "Bad
+signal"). The server keeps each transmission's frames in memory until the listener confirms
+them, replays what the listener missed as a **clip** when it is back, and lets a talker whose
+socket dropped finish its transmission from where the server's copy ends. No audio is written to
+disk on either side (the one new thing the server stores is the sender's wrapped session key,
+kept with the page row like the envelope, §13.7), and everything is dropped when the session ends.
+
+A clip and a resend are made of the §12 frames, **byte for byte**: the bytes the talker sealed
+once, at capture. Nothing in this section encrypts anything a second time (§12.4 rule 3), and the
+binary frame format is unchanged.
+
+### 13.1 Negotiation and mixed sessions
+
+Everything in this section applies only on a socket whose `hello` reply carried `protocol` 2, a
+**protocol-2 socket** (§11.1). A protocol-1 socket keeps the milestone-4 behaviour exactly; the
+client types of §13.2 on it are still unknown types (`4400`).
+
+A session can have one participant on each protocol (one phone updated, the other not), and a
+participant can rejoin on a socket with a different protocol. The server therefore decides per
+transmission and per delivery, never per session:
+
+| Situation | Behaviour |
+| --- | --- |
+| The talker was granted on a protocol-1 socket | A milestone-4 transmission end to end: not buffered, never **open** (§13.3), no `listener_gap`, relayed as §11.7 to any listener. Its `floor_request` while the peer is away is `error no_peer`. |
+| The talker was granted on a protocol-2 socket, and the listener is joined on a protocol-1 socket | Relayed live as §11.7 (frames past the 25-frame queue are dropped, no `listener_gap`, no clip). The server frees the transmission when it closes. The `clip` flag of the request is ignored. |
+| The talker is on protocol 2 and the listener is not joined | Buffered (§13.3, §13.4). If the listener next joins on a protocol-2 socket it gets the clips. If it joins on a protocol-1 socket, the `closed` transmissions held for it are removed unplayed, and a `live` or `open` one loses its held frames and is relayed as §11.7 for the rest of its life (§13.3, **unbuffered**). |
+| Both on protocol 2 | All of §13. |
+
+A transmission's protocol is the protocol of the socket it was granted on. "The listener's
+protocol" is that of the listener's current joined socket.
+
+The 30-day rule of §11.1 applies: for 30 days after protocol 2 ships, the server still serves
+protocol 1 and the app still speaks it. A protocol-2 app talking to a server that answers
+`protocol` 1 (a rollback) sends only protocol-1 messages and behaves as milestone 4: no buffer
+beyond its own sealed frames, no resume, no clip mode on the wire.
+
+### 13.2 Messages
+
+New and changed messages. They are sent and accepted only on protocol-2 sockets. The strict-JSON
+rules of §11.1 apply to every client message; `last_seq` is a JSON integer.
+
+**Client → server**
+
+| `type` | Other fields | Meaning |
+| --- | --- | --- |
+| `floor_request` | `transmission_id`, `clip` (boolean) | As §11.6. `clip: true` asks for a clip transmission (§13.9). In protocol 2 `clip` is required; on a protocol-1 socket the key is not allowed (`4400`). |
+| `heard` | `transmission_id`, `last_seq` (0 to 4095) | The listener has accepted every frame 0 … `last_seq` of that transmission (§13.5) |
+| `resume` | `transmission_id` | The talker asks where to continue its unfinished transmission (§13.6) |
+| `sender_key` | `key` (a signed object, §3, whose payload is the sender key of §7) | From the page's sender: the session key wrapped for itself, kept by the server for `GET /v1/pages/{id}` (§13.7) |
+
+**Server → client**
+
+| `type` | Other fields | Meaning |
+| --- | --- | --- |
+| `listener_gap` | `transmission_id` | To the talker only: the listener did not get this transmission live; the server holds it and the listener will get it as a clip if it joins again on protocol 2 within the session. Sent only while the listener's last joined socket was protocol 2, or it has not joined yet (§13.4) |
+| `clip` | `talker` (device id), `transmission_id`, `last_seq` (0 to 2999) | To the listener only: the frames of this finished transmission that follow are a replay; `last_seq` is its final frame (§13.4, §13.8) |
+| `resume_from` | `last_seq` (−1 to 2999) | Reply to `resume`: the highest seq the server holds for that transmission, −1 for none (§13.6) |
+
+`heard`, `resume` and `sender_key` on a socket that has not joined are `4400`, like
+`floor_request` (§11.4). A `last_seq` outside its range, or a field of the wrong type, is `4400`.
+The `key` object of `sender_key` is parsed as strictly as the message: exactly `payload`, `signer`
+and `sig` (§3).
+
+**Changed meanings in protocol 2.**
+
+- `error {code: "bad_transmission_id"}` also answers a `resume` that names no transmission of the
+  caller that the server still holds (§13.6). The closed set of `error.code` is unchanged.
+- `floor_released` keeps its four reasons. For the **talker** of a protocol-2 transmission,
+  `released` now means "closed: free your buffer", and `silence`, `max_length` mean "the floor is
+  gone, but the transmission is still open: finish sending" (§13.6). The talker may therefore get
+  two `floor_released` for one id (`silence`, then `released`). The listener still gets one.
+- `no_peer` is narrower: a protocol-2 talker is granted the floor while the peer is away (§13.7).
+
+**Why `clip` carries more than §11.2 reserved.** The reserved shape was `clip {transmission_id}`.
+A listener that was away for the whole transmission never saw its `floor_granted`, so it needs
+`talker` to derive the key (§12.2), and it needs `last_seq` to know when the clip is complete and
+when to send `heard`. `resume_from` keeps its reserved shape: a talker has at most one unfinished
+transmission and at most one `resume` outstanding (§13.6), so the reply needs no id.
+
+**Why there is no binary type `0x02`.** The type byte is part of the AAD (§12.1), so the server
+cannot re-type a received frame without breaking its tag, and the talker cannot know when it
+seals a frame whether it will be replayed. A replayed frame is therefore the original `0x01` frame,
+and the `clip` message, not the frame type, says it is a replay. A frame's header names its
+transmission, so the listener routes each frame by `transmission_id` (§13.8). Type `0x02` stays
+reserved and rejected (§12.1).
+
+### 13.3 The server's transmission buffer
+
+For every transmission granted on a protocol-2 socket the server keeps, in memory only:
+
+| Field | Meaning |
+| --- | --- |
+| `talker`, `clip` | From the grant |
+| `state` | `live`, `open` or `closed` (below) |
+| `frames` | The binary frames as received, byte for byte, indexed by seq. The server runs only `audioframe.Parse` on them (§12.1) and never decrypts, re-encodes or reorders them |
+| `next` | How many frames it has received; the last received seq is `next − 1` |
+| `heard` | The highest `last_seq` the listener has reported in `heard`, or −1 |
+| `sent` | The highest seq queued, in order, to the listener's **current** socket, or −1; set to `heard` whenever the listener joins, and raised to `heard` by every accepted `heard` (`sent = max(sent, heard)`, §13.5), so `sent ≥ heard` always holds |
+| `gapped` | Live relay of this transmission has stopped (§13.4) |
+
+**States.**
+
+- **`live`** from `floor_granted` while the floor is held for it.
+- **`open`** once the floor is released for it with `silence`, `max_length` or `disconnected`
+  (§11.6). The floor is free, but the transmission is unfinished: its talker can still send the
+  rest of its frames, on the same socket or after `resume` on a new one (§13.6).
+- **`closed`**: complete; no more frames are accepted. A transmission closes when:
+  1. its talker sends `floor_release` for it, from `live` (the ordinary end: `floor_released
+     {reason: "released"}` to both, §11.6) or from `open`;
+  2. its talker's next `floor_request` is processed while it is `open` (whatever the answer; a
+     `floor_request` from the current talker of a `live` one is still ignored, §11.6). A talker
+     that follows §13.6 never relies on this, because it sends the `floor_release` first; the rule
+     only bounds a client that does not;
+  3. it holds 3000 frames (seq 0 to 2999, 60 s). If it is `live`, this also releases the floor:
+     the server sends `floor_released {reason: "released"}` to both participants, as for the
+     talker's own `floor_release` (a clip transmission's backlog can reach 3000 frames before
+     `max_length`);
+  4. it has been `open` for **30 s** since the later of entering `open`, its last accepted frame,
+     and its last accepted `resume` (the **resume window**).
+
+When an `open` transmission closes and its talker is joined, the server sends the talker
+`floor_released {talker, transmission_id, reason: "released"}`. The listener got its
+`floor_released` when the floor was released and gets nothing more. So a protocol-2 talker
+receives `released` exactly when its transmission is closed.
+
+**Accepting a frame** of a protocol-2 transmission (instead of the first bullet of §11.7). A frame
+from a joined socket whose header `transmission_id` is a `live` or `open` transmission of that
+socket's device is appended if `seq == next` and `seq ≤ 2999`: `next` grows by one, it counts as
+activity for the silence timer if the transmission is `live`, and it is offered to the listener
+(§13.4). Any other `seq` (a frame the server already holds, arriving again after a resume; a gap;
+seq 3000 or more) is dropped silently. A frame for a `closed` or unknown transmission, or from a
+device that is not its talker, is dropped silently, as §11.7.
+
+**Freeing.** A `heard` frees that transmission's frames 0 … `heard` at once. The whole transmission
+is removed:
+
+- when it is `closed` and `heard` reaches its last seq;
+- when it closes while the listener's current socket is protocol 1, or after it became
+  unbuffered (below);
+- when the listener joins on a protocol-1 socket, if it is `closed`;
+- when it is evicted (below);
+- at session end (§11.5, §13.11).
+
+Removing frees its frames. The server still keeps the id in the session's set of granted ids
+(§11.6), so the id can never be granted again.
+
+**Unbuffered.** A transmission that is `live` or `open` when the listener joins on a protocol-1
+socket is not removed: the server frees the frames it holds, keeps the rest of its record, and
+marks it **unbuffered** for the rest of its life. Its frames are still accepted as above (so
+`next` keeps counting, the silence timer still sees them and the talker can still `resume`), but
+they are not held: each is relayed as §11.7 to the listener's joined socket, whatever its
+protocol, or dropped if the listener is not joined. It is never replayed and gets no
+`listener_gap`, a `heard` for it frees nothing, and it is removed when it closes, after the
+talker's `floor_released` `released` (States above, §13.6). It is charged only its 512 bytes.
+Removing it at the join instead would make its later frames unknown (Accepting a frame, above):
+the silence release would fire while the talker is still talking, and the talker would
+never get `released`.
+
+**Caps.** Each held transmission is **charged** its frame bytes plus a fixed **512 bytes** of
+overhead (its state, the index, the queue entry), from its grant until it is removed.
+
+| Cap | Limit |
+| --- | --- |
+| Per session | **4 MiB** (4 194 304 bytes) charged, over all transmissions in both directions |
+| Per session | **64** held transmissions |
+| Per process | **64 MiB** (67 108 864 bytes) charged, over all sessions |
+
+Only an **evictable** transmission is ever removed by a cap: one that is `closed` and is not
+**in replay** (its `clip` has been queued to the listener's current socket and its frame L has
+not been queued yet, §13.4). `live` and `open` ones are never evicted: a talker has at most one
+of them at a time (its next `floor_request` closes the previous one), so a session has at most
+two, each bounded by 3000 frames. Each listener has one cursor (§13.4), so at most two are in
+replay. A clip that is being sent is never cut short by an eviction.
+
+- A **grant** that would make 65 held transmissions in the session first removes the session's
+  oldest evictable one (by grant). At most four are not evictable (per direction one unfinished
+  and one in replay), so there always is one.
+- When **appending a frame** would take the session over 4 MiB, or the process over 64 MiB, the
+  server removes evictable transmissions, oldest grant first (within the session for the session
+  cap, across all sessions for the process cap), until it fits. If nothing evictable is left and
+  it still does not fit, the frame is not appended and its transmission closes as if it had
+  reached 3000 frames (rule 3 above).
+
+Nobody is told about an eviction. **The arithmetic.** At the app's 24 kbps a frame is about
+60 + 37 = 97 bytes, so a 60 s transmission is charged about 291 KB, and the four unevictable
+transmissions together about 1.2 MB: well under 4 MiB, so an honest session never hits the
+fallback, and 4 MiB holds about 14 full transmissions. The largest possible transmission is
+3000 × 1312 + 512 = 3 936 512 bytes, so one always fits alone; two of them (only a client
+sending 1275-byte Opus packets) would not, which is what the fallback is for. The server's total
+is at most 64 MiB, and 4 MiB per session.
+
+### 13.4 Delivery to the listener: live, gap, clip
+
+The **listener** of a transmission is the session's other participant. The server delivers a
+listener's transmissions in grant order. The transmissions it holds for one listener form a queue
+in grant order, and the **cursor** is the first of them that is still `live` or `open`, or `closed`
+with `sent` below its last seq. Because a talker's `floor_request` closes its previous transmission (§13.3), only
+the newest transmission in the queue can be unfinished.
+
+**Live relay.** A frame appended to transmission T (§13.3) is queued at once to the listener, byte
+for byte, when all of these hold: the listener is joined on a protocol-2 socket; T is `live`, not
+`gapped`, and the cursor; `seq == sent + 1`; and fewer than 25 frames are queued to that socket
+(§11.7). Then `sent` becomes `seq`. Otherwise the frame is only buffered and T becomes **`gapped`**:
+live relay of T stops for the rest of T, so the listener never hears T out of order. T is also
+`gapped` from its grant when the listener is not joined at that moment, or when T is a clip
+transmission (§13.9).
+
+With the listener joined on a **protocol-1** socket the frame is relayed as §11.7 instead (§13.1),
+whether or not T is already `gapped`: queued unless 25 frames are already queued, dropped
+otherwise; T never becomes `gapped` for it and `sent` is not tracked. An unbuffered T (§13.3) is
+relayed this way to any listener socket.
+
+**`listener_gap {transmission_id}`** goes to T's talker, once per transmission, at the first
+moment one of T's frames is appended without being relayed live, or at the grant when the
+listener is not joined (queued right after the requester's `floor_granted`). It is sent only when
+the listener's most recent joined socket in this session was protocol 2, or the listener has not
+joined the session yet. It is not sent for a clip transmission (the talker asked for it), nor for
+an unbuffered one. A listener whose last socket was protocol 1 runs an app that will rejoin on
+protocol 1, and then the clip is removed unplayed (§13.3), so "it will play when they're back"
+would be false. A listener that has never joined may still turn out to be on protocol 1; the
+message says only that the server holds the transmission for a protocol-2 return. It is advice
+for the talker's screen only (§13.6).
+
+**Clip replay.** When the listener is joined on a protocol-2 socket and the cursor T is `closed`
+with `sent` below T's last seq L, the server queues to that socket `clip {talker, transmission_id,
+last_seq: L}` and then T's frames `sent + 1` … L, in seq order, byte for byte as received from the
+talker. Because `sent ≥ heard` (§13.3), a replay never reads below `heard + 1`, so it never needs a
+frame that a `heard` freed. It adds a clip frame only while fewer than 25 frames are queued to the socket and tops the
+queue up as the socket drains. A replay therefore never trips the 25-frame drop or the 256-entry
+close of §11.7, and arrives as fast as the listener's link allows (faster than real time on a
+good link). Each queued frame sets `sent`. Once frame L is queued, the cursor moves to the next
+transmission, which is replayed the same way, or relayed live if it is `live` and not `gapped`.
+Control messages keep their place in the same ordered queue, so they may fall between clip
+frames.
+
+A replay starts as soon as its conditions hold: right after the join snapshot (the `clip` follows
+`page_state`, `peer_joined` and `floor_granted` of §11.4, and clips are not part of the snapshot),
+or when T closes while the listener is joined. The server sends `clip` for a transmission at most
+once per listener socket.
+
+A transmission the listener got entirely live (`sent == L` at close) gets no clip. If the
+listener's socket closes before its `heard` reaches L, its next join sets `sent` back to `heard`,
+and the rest is replayed as a clip.
+
+The 2-minute idle timer of §11.5 is also reset each time the server queues a `clip` and each time
+it accepts a `resume`, so a listener that is still catching up does not lose the session to it.
+
+Example: the listener rejoins while T3 is `live` and `gapped`, and T1 and T2 are `closed` and not
+yet heard. Its socket gets `page_state`, `peer_joined`, `floor_granted` (T3), `clip` (T1), T1's
+frames, `clip` (T2), T2's frames, and later `floor_released` (T3), `clip` (T3), T3's frames.
+
+### 13.5 `heard`
+
+The listener sends `heard {transmission_id, last_seq}` with `last_seq` = k, the highest seq such
+that it has **accepted** (§12.5 step 6) every seq 0 … k of that transmission. Accepted means
+authenticated and recorded, not played: a clip may keep playing from the listener's memory for a
+minute after it is fully heard. It sends `heard`:
+
+1. when it receives `floor_released` for a transmission whose grant it accepted, or when an
+   accepted `clip` ends such a transmission (§13.8 step 3, which counts as its release);
+2. when it accepts the frame that makes k equal an accepted clip's `last_seq`;
+3. each time k has grown by 250 (5 s of audio) since its last `heard` for that transmission.
+
+It never sends `heard` for its own transmission, before it has accepted seq 0, or with a k lower
+than one it already sent for that id. `heard` is cumulative: a later one covers every earlier one.
+
+On a `heard` from a joined protocol-2 socket for a transmission the server holds whose listener is
+the caller, the server sets `heard` to the larger of its value and `min(last_seq, next − 1)`,
+sets `sent = max(sent, heard)`, frees the frames up to `heard`, and removes the transmission if it
+is `closed` and fully heard (§13.3). `heard` can run ahead of `sent` when the listener accepted
+frames on an earlier socket; raising `sent` keeps the server from queuing them again, and the
+replay and live relay of §13.4 never read below `heard + 1`. Any other `heard` (an unknown or
+removed id, the caller's own transmission, a protocol-1 transmission) is ignored silently. The server never forwards `heard` to the talker.
+
+### 13.6 The talker: buffer, ending, resume
+
+The talker keeps every frame it sealed for its current transmission, as the **sealed bytes**,
+never the plaintext (§11.12 already required this). That is the in-memory transmission buffer of
+the spec: at most 3000 frames (60 s, a few hundred KB). It stops capturing at seq 2999. It sends
+its frames in seq order, from seq 0, with no gaps, and paces them to at most **200 frames in any
+1 s** (§13.10): in live mode they go out as captured (50 / s); after a clip-mode grant or a
+`resume_from` the backlog goes out at up to 200 / s, then frames go out as captured. The talker
+hands a backlog frame to its socket only while fewer than **16 KB** are queued on it unsent, so a
+`floor_release` or `heard` it sends is never far behind a slow uplink.
+
+**One unfinished transmission at a time.** The talker sends the `floor_request` of a new
+transmission only after every frame of its previous one and that one's `floor_release` have been
+handed to the socket. A press in the meantime waits for that; in clip mode the phone may already
+capture and seal the new transmission into its own buffer (§13.9), in live mode capture starts at
+the grant as usual. The server's close rule 2 (§13.3) is only a backstop.
+
+| Event | What the talker does |
+| --- | --- |
+| `floor_granted` for its outstanding `floor_request` | Starts sending from seq 0 |
+| `floor_busy` or `error` for its request | Discards the buffer unsent; the id is never used again (§12.4 rule 1) |
+| `listener_gap` | Screen only, for example "<name> didn't hear this live. It will play when they're back." (the peer was last on protocol 2, or has not joined yet, §13.4). The buffer is unchanged |
+| The user lets go, or seq 2999 is captured | Stops capturing. Once every frame is sent, sends `floor_release {transmission_id}` |
+| `floor_released`, reason `released` | The transmission is closed: frees the buffer and stops capturing; a press still held needs a new `floor_request` |
+| `floor_released`, reason `silence` or `max_length` | The floor is gone (the peer may now talk) but the transmission is open: keeps capturing while the user still presses, keeps sending, and ends with `floor_release` as above. Screen: "Sending as a clip" |
+| Its socket closes after its `floor_request` and before the transmission is closed or refused | Reconnects (§11.1), sends `hello` and `join`, then `resume {transmission_id}`, and sends no frame of that transmission until the reply. (If the request was never granted, the reply is `bad_transmission_id`.) |
+| `resume_from {last_seq}` | Sends its stored frames `last_seq + 1` onwards, then continues as above (capturing if the user still presses, then `floor_release`). If `floor_released` `released` follows at once, the transmission had closed while it was away: it stops sending and frees the buffer (the row above) |
+| `error bad_transmission_id` after `resume` | The server no longer holds that transmission (it was removed, or the server restarted): frees the buffer. Screen: "Not sent" if it had frames the server may lack |
+| `session_end`, or a close it must not reconnect after (`4401`, `4403`, `4409`) | Frees the buffer |
+
+**`resume` at the server.** `resume {transmission_id}` from a joined protocol-2 socket is accepted
+when the caller is the talker of an `open` transmission with that id in this session. The server
+replies `resume_from {last_seq: next − 1}`, restarts the resume window and resets the idle timer
+(§13.4); the transmission stays `open`, and frames from `next` on are appended as §13.3 describes.
+If the transmission is `closed` but still held (it closed while the talker was away, for example
+when its resume window ran out), the server replies `resume_from {last_seq: next − 1}` and then
+`floor_released {talker, transmission_id, reason: "released"}`, and nothing else changes: the
+talker learns where its transmission ended and that it may free its buffer. Otherwise it replies
+`error {code: "bad_transmission_id"}` and nothing else happens. A `live`
+transmission cannot be resumed: by the time a new socket of the talker has joined, the old one
+was closed or replaced (`4409`), which released the floor with `disconnected` and made the
+transmission `open`.
+
+**The floor does not wait for a resume.** The milestone-4 rules release it: `disconnected` when
+the server sees the talker's socket close, and `silence` 1 s after the last frame when the socket
+stalls without closing. Only the transmission survives, for the resume window, and the listener
+gets its rest as a clip. Holding the floor for a talker the server cannot reach would block the
+peer for up to 30 s, and the peer's own talking does not disturb the talker's late frames, which
+belong to a different transmission.
+
+### 13.7 The floor with the peer away; an answer to a disconnected sender
+
+**Grant with the peer away.** In protocol 2, a `floor_request` from a protocol-2 socket while the
+session exists (after `answer`, §11.5) and the peer is not joined is granted: `floor_granted` goes
+to the requester only, and the transmission is `gapped` from its grant, so `listener_gap` follows
+when §13.4 allows it. `no_peer` remains only for a `floor_request` before the
+`answer`, on a self page, or from a protocol-1 socket. The floor timers of §11.6 apply unchanged.
+
+**An answer to a disconnected sender** (spec, page lifecycle step 5). The answering device joins
+and talks first while the sender is not connected; its transmissions are buffered and `gapped`.
+The server sends `page_answered` by FCM as always (§8). The sender's notification reopens the talk
+screen, the sender joins, and after the join snapshot it gets those transmissions as clips, in
+order. Having heard the receiver satisfies the sender's first-talker rule. The 15-minute cap of
+§11.5 bounds how long the clips wait (the idle timer is not armed until both have been joined at
+once).
+
+**The sender key** ([ADR 0010](adr/0010-sender-wraps-session-key-for-itself.md)). To play those
+clips the sender needs the session key, and a sender whose process died (swiped away) has lost it.
+So on a protocol-2 socket the sender sends `sender_key {key}` (§13.2), where `key` is its signed
+sender key (§7), after **every** successful `join` of its page. The server checks that the caller
+is the page's sender, that `key.signer` is the caller, and that the payload parses strictly (§7)
+with `page_id` and `session_id` equal to the joined page's and `from_device` equal to the caller;
+anything else is `4400`. It does not verify `sig` (as for the envelope, §7). It stores the first
+accepted sender key with the page row and silently ignores every later one, so the resend after
+each join is idempotent and needs no reply. The message is about 560 bytes, within the text-frame
+limit (§11.1). The answering device never sends one (`4400`).
+
+**Recovering the key.** A sender that reopens a page without its session key in memory (from the
+`page_answered` notification after its process died) does, in order, stopping at the first
+failure:
+
+1. `GET /v1/pages/{id}` (§6) with the page id of the push; anything but `200` → no recovery.
+2. The envelope: `signer` is its own device id and `sig` verifies under its own Ed25519 public
+   key with context `ptt-envelope-v1`; the payload parses (§7); `from_device` is its own id and
+   `page_id` is the push's.
+3. The sender key: `signer` is its own device id and `sig` verifies under its own Ed25519 public
+   key with context `ptt-sender-key-v1`; the payload parses (§7); `page_id` and `session_id` equal
+   the envelope's and `from_device` is its own id.
+4. HPKE-open `key` with its own X25519 private key and the sender `info` of §7 → the 32-byte
+   session key.
+
+It then joins with the envelope's `session_id`, takes the devices in `keys` as the possible peers
+(§11.6), and the clips play. On a failure it cannot take part in the session (it can still End
+it). It verifies only its own signatures, so it needs no roster lookup, and the server, which
+cannot sign as the sender, can withhold the key but not substitute one. The key stays in memory
+only; the phone writes nothing to disk.
+
+**Which `clip.talker` a phone accepts** (the analogue of §11.6 for grants, because the server may
+lie, §12.6). The answering device accepts a `clip` only if `talker` is the envelope's
+`from_device`. The sender's **peer** is the device of the first `peer_joined` or `clip` it accepts;
+it accepts either only if the device is in its envelope's `keys` and, once it has a peer, is that
+peer. Any other `clip` is refused (§13.8), and so are its frames. In both roles a `clip` naming
+the phone itself is refused (§13.8 step 1).
+
+### 13.8 Receiving clips
+
+This amends §12.4 rule 4 and §12.5 for protocol 2.
+
+The receiver keeps, for each transmission id it has seen in the session: its talker, its set of
+accepted seqs, its status (`current`, `suspended` or `released`, as §12.4), and, once a clip for
+it has been accepted, the clip's `last_seq`.
+
+**On `clip {talker, transmission_id, last_seq}`**, after the acceptance check of §13.7:
+
+1. `talker` is the phone itself → **refuse**.
+2. The id was never seen → record it with that talker, an empty accepted set and status
+   `released`; **accept**.
+3. The id was seen with the same talker → **accept**, keeping its accepted set. If its status was
+   `current` or `suspended`, it becomes `released` and the floor counts as free, as if its
+   `floor_released` had arrived (clips are only of closed transmissions, §13.4).
+4. The id was seen with another talker → **refuse**.
+
+Accepting records `last_seq` (a later accepted `clip` for the same id replaces it). A
+`floor_granted` for a `released` id is still refused forever (rule 4); a clip never revives a
+grant.
+
+A refused `clip` changes nothing: frames of its id are judged by step 4 below as if it had never
+arrived.
+
+**§12.5 step 4 becomes:** the frame's `transmission_id` is the current transmission (from an
+accepted grant, not suspended), **or** an id with an accepted clip and `seq` ≤ that clip's
+`last_seq`; otherwise `wrong_transmission`. Step 5 derives the key with the talker recorded for
+that id. Step 6 is unchanged, and the accepted set is per id, shared by an id's live frames and
+its clip frames. So a seq accepted live is a replay when a clip brings it again, and so is a frame
+**resealed** under an accepted (`transmission_id`, `seq`): different bytes with a valid tag are
+dropped like any replay and never played. A receiver cannot tell a resealed frame that arrives
+first from the original; nonce safety rests on the talker (§12.4 rule 3), and these receiver rules
+remain defence in depth. The known limitation of §12.6 extends to clips: a receiver that restarted
+can be replayed an old clip.
+
+**Playback.** Frames accepted from a clip go to a clip player, not to the live jitter buffer.
+The phone plays each clip in seq order, from memory, automatically. It plays clips in the order of
+their `clip` messages. A live transmission whose grant arrives while a clip is playing or waiting
+is held in memory and played after the clips before it, as a clip, in grant order (the server
+delivers both in grant order, §13.4); its `heard` is still sent as frames are accepted (§13.5),
+not after it plays. A phone that is capturing, or still sending an open transmission, plays
+nothing; incoming audio waits as a clip and plays after it. It may start a clip before its last
+frame arrives. A clip counts as **finished** when the next `clip` arrives, or when no frame for it
+has arrived for 3 s: from then on the player skips the seqs it is missing instead of waiting for
+them, and moves on after the last frame it holds. A `floor_granted` does not finish a clip: it can
+fall between a clip's frames (§13.4), and a slow replay must not be cut off by the peer's next
+press. Frames that arrive after a clip is finished are accepted as usual and play if the player
+has not passed their seq; a stalled clip never blocks the ones behind it.
+
+A phone MAY skip playing a clip for whose id it had accepted frames before the `clip` arrived and
+in which fewer than **10** of the seqs 0 … `last_seq` (200 ms) are not yet accepted, so that the
+tail of an old, almost fully heard transmission does not play as a 20 ms blip. It still accepts
+the frames and sends `heard` (§13.5). A clip of an id it had accepted nothing of is always played,
+however short. It MAY play
+first the packets it accepted live for the same id, if it still holds them, so a clip that
+continues a partly heard transmission starts from its beginning. Packets are discarded after
+playing and never written to disk.
+
+### 13.9 Clip mode (client)
+
+Clip mode is decided by each phone for itself; the server does not know a phone's mode.
+
+**Measuring.** In protocol 2, while joined to a session, the client sends `ping` every **2 s**
+(10 s otherwise, §11.8). Each `pong` gives one RTT sample; a `ping` with no `pong` after 800 ms
+counts as one sample above 800 ms at that moment, and its `pong`, if it arrives later, is not a
+second sample. A **joined** socket with no message at all from the server for **6 s** is dead:
+the client closes it and reconnects with backoff (§11.1), so a talker resumes within seconds
+instead of when TCP gives up. (An unjoined socket keeps the timeouts of §11.3-§11.8.) A **reconnect** is a socket that completes `join` in a
+session after an earlier socket of the same session closed (a close after `session_end`, and
+`4409`, do not count).
+
+**Entering:** 3 consecutive samples above 800 ms (that is "sustained", about 6 s), or a second
+reconnect within 30 s of the first. **Leaving:** 15 consecutive samples at or below 400 ms (30 s)
+and no reconnect in the last 60 s. The gap between 400 and 800 ms and the 30 s stop the mode from
+flapping. The talk screen shows "Clip mode" while it is on. A change of mode applies from the next
+press; a transmission keeps the mode it started in.
+
+**Talking in clip mode.** A press mints the id, sends `floor_request {transmission_id, clip:
+true}`, and starts capturing and sealing into the buffer at once, without waiting for the grant
+(over an 800 ms round trip, waiting would cut off the first word). Nothing is sent before the
+grant, so §12.4 rule 2 holds; on `floor_busy` or an `error` the buffer is discarded unsent. On the
+grant the talker sends the backlog at up to 200 / s and then frames as captured; letting go ends
+with `floor_release` as in live mode. The server never relays a clip transmission live (§13.4), so
+the listener gets it as one clip after the talker's `floor_release` and hears it whole rather than
+choppy: "a press records and sends on release" (spec).
+
+**The silence allowance of a clip transmission** is **5 s**, both before its first frame and
+between frames, instead of 3 s and 1 s (§11.6), because a slow uplink delivers frames in bursts.
+`max_length` is unchanged. A transmission released early is not lost anyway: it stays `open`
+(§13.3).
+
+**Listening in clip mode** needs nothing on the wire. A phone in clip mode plays an incoming live
+transmission with a playout delay deep enough not to drop late frames; it may hold the whole
+transmission until its `floor_released` and play it as one clip.
+
+In live mode a protocol-2 talker sends `clip: false`, and everything else in this section (the
+buffer, gaps, clips, resume) still applies.
+
+**Testing notes.** The debug build's network impairment setting (spec, Testing) is client-only,
+and this part is normative for it: the delay is added to **each direction** of the client's
+WebSocket, and the simulated frame loss applies to **received** audio frames only. Dropping
+outgoing frames would not test anything real: the server appends only `seq == next` (§13.3), so a
+lost outgoing frame stalls the transmission until a resume, which a real network loss does not
+cause (TCP retransmits). Whether 300 ms of delay per direction takes the RTT over the 800 ms
+threshold on LTE is checked on a device in the milestone-5 device test (15e); if it does not, the
+thresholds or the test setting change then, by ADR, not here. The same test checks the 6 s
+dead-socket rule on a slow uplink: backlog frames that the talker already handed to the OS send
+buffer (the 16 KB rule of §13.6 bounds only the client's own queue) are sent before its next
+`ping`, so the `pong`, which may be the only server message while the peer is silent, can come
+late enough that the client closes a socket that is only slow. The rule stays as it is unless
+that test shows it misfiring.
+
+### 13.10 Limits and pacing
+
+| What | Limit |
+| --- | --- |
+| Binary frames received, per socket (§11.10, now for every protocol) | **250 / s** sustained, burst **500**; over it, close `4429` |
+| Talker send rate (client rule) | At most 200 frames in any 1 s, live frames and resends together; backlog frames only while under 16 KB are queued unsent (§13.6) |
+| Clip replay to a listener | Not rate limited; flow-controlled by the listener's queue (at most 25 frames queued, §13.4) |
+| Frames per transmission | 3000 (seq 0 to 2999) |
+| Buffer per session | 4 MiB charged (frame bytes + 512 bytes per held transmission) and 64 held transmissions (§13.3) |
+| Buffer per process | 64 MiB charged (§13.3) |
+| Resume window | 30 s (§13.3) |
+| Silence allowance of a clip transmission | 5 s (§13.9) |
+
+The binary limit rises from 100 / s because a resend competes with nothing but its own talker's
+frames, and pacing at 200 / s drains a full 60 s backlog in 15 s; the remaining 50 / s is
+headroom for timer jitter. The text-message limit (20 / s) is unchanged: `heard` adds about one
+message per 5 s of audio.
+
+### 13.11 Cleanup, privacy and metrics
+
+- **Server.** Buffers live in process memory only, never on disk, and are never logged. They are
+  freed as §13.3 describes, and all of a session's buffers are discarded with the rest of its
+  in-memory state when it ends (the "on end" step of §11.5), so after `session_end` nothing of its
+  audio remains. The sender key (§13.7) is stored with the page row and deleted with it. A `pttd`
+  restart loses every buffer (§11.5).
+- **Phones.** The talker's buffer and incoming clips are held in memory only; played packets are
+  discarded; at session end everything, including the session key and all per-transmission state,
+  is discarded (§12.4 rule 6). Nothing is written to files, cache or logs.
+- **Metrics** are unlabelled aggregates (Privacy):
+
+  | Metric | Type | Counts |
+  | --- | --- | --- |
+  | `pttd_ws_transmissions_total` | counter | Transmissions granted, every protocol |
+  | `pttd_ws_clip_transmissions_total` | counter | Transmissions for which at least one `clip` was sent; with the line above it gives the clip-fallback rate |
+  | `pttd_ws_listener_gaps_total` | counter | `listener_gap` messages sent |
+  | `pttd_ws_resumes_total` | counter | `resume_from` replies sent |
+  | `pttd_ws_clip_evictions_total` | counter | Transmissions removed by the cap |
+  | `pttd_ws_clip_buffer_bytes` | gauge | Bytes charged over all sessions (frames plus per-transmission overhead, §13.3) |
+
+  A frame buffered instead of relayed live is not counted in `pttd_ws_frames_dropped_total`;
+  replayed frames are not counted in `pttd_ws_frames_relayed_total`.
+
+### 13.12 Close codes, errors and changelog
+
+No close code is added. `4400` also covers: `heard`, `resume` or `sender_key` before `join`; a
+protocol-2 `floor_request` without `clip`, or a protocol-1 one with it; a `last_seq` out of range;
+a `sender_key` from the answering device or one that fails the checks of §13.7. No
+`error.code` is added; `bad_transmission_id` also answers a `resume` (§13.6).
+
+**Protocol 1 → 2.**
+
+- New client messages `heard`, `resume`, `sender_key`; new server messages `listener_gap`, `clip`,
+  `resume_from` (§13.2).
+- The sender wraps the session key for itself in a separate signed sender key (context
+  `ptt-sender-key-v1`, §7), sends it after each join and gets it back from the new
+  `GET /v1/pages/{id}` after its process died (§13.7, ADR 0010). The envelope is unchanged
+  (format 1).
+- `floor_request` carries a required `clip` boolean (§13.9).
+- `clip` carries `talker` and `last_seq` besides the reserved `transmission_id` (§13.2).
+- The server buffers protocol-2 transmissions, replays what a listener missed, and accepts a
+  talker's remaining frames after the floor is released (`open`, §13.3); it buffers only frames
+  in seq order.
+- A protocol-2 talker is granted the floor with the peer away; `no_peer` is narrower (§13.7).
+- For a protocol-2 talker, `floor_released` `released` means closed, and it can follow an earlier
+  `silence` or `max_length` for the same id (§13.6).
+- The binary-frame limit is 250 / s, burst 500, for every protocol (§13.10).
+- Clients ping every 2 s while joined and treat 6 s without a server message as a dead socket
+  (§13.9).
+- Receiver rules: §12.4 rule 4 and §12.5 step 4 admit accepted clips (§13.8); which `clip.talker`
+  a phone accepts is §13.7.
+- Reaching 3000 frames while `live` also releases the floor (`released`); a `resume` of a
+  transmission that closed while the talker was away gets `resume_from` and then `floor_released`
+  `released` (§13.3, §13.6).
+- Buffer caps: 4 MiB charged and 64 held transmissions per session, 64 MiB per process; only
+  `closed` transmissions not in replay are evicted (§13.3).
+- Binary type `0x02` stays reserved and unused (§13.2).
+
+### Test vectors
+
+The `clip_fallback` section of `testdata/protocol-vectors.json` covers this section, apart from
+`audio_frames` so that a milestone-4 receiver's checks of that section stay valid. It holds a
+contiguous transmission (seq 0 to 5); `resume` cases (given `resume_from`, the exact frames the
+talker sends next, which must be the stored bytes); and `sessions` with the steps of `audio_frames`
+plus `clip` (`talker`, `transmission_id`, `last_seq`; expect `accept` or `refuse`), `heard`
+(the cumulative `last_seq` the receiver's next `heard` for `transmission_id` would carry at that
+point: expect `send` with `last_seq`, or `none`; the vectors pin the value, not when `heard` is
+sent, §13.5) and `peer_joined` (`device_id`; expect `accept` or `refuse`). Each session names its
+`receiver` (`device_id`, `role` `answerer` with the envelope's `from_device`, or `sender` with the
+envelope's `keys`), so grants (§11.6), clips (§13.7, §13.8 step 1) and the receiver's own
+transmissions (no playing, no `heard`) are judged by who the phone is. The sessions pin clip
+replay after a release, a clip of a transmission never seen, a clip ending a suspended or current
+transmission, dedup of a seq already accepted live, a resealed frame refused, a resumed talker's
+resent frames, frames past `last_seq`, a clip of the phone's own transmission naming the peer, a
+clip naming the phone itself, the clip talkers an answering device and a sender accept (the
+sender's peer set by its first `peer_joined` or `clip`), a recovered sender hearing clips before
+the peer joins, a grant of a clipped id, and live and clip frames interleaved.
