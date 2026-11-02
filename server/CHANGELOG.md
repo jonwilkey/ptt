@@ -5,7 +5,6 @@
 
 ### Features
 
-* **android:** volume-down talk, chirps and busy buzz ([#48](https://github.com/jonwilkey/ptt/issues/48)) ([d73f2d1](https://github.com/jonwilkey/ptt/commit/d73f2d1532355775f4afa5a9885dbe8df8cbb920))
 * **server:** floor control and audio relay ([#42](https://github.com/jonwilkey/ptt/issues/42)) ([8afc4ef](https://github.com/jonwilkey/ptt/commit/8afc4ef576a77d018eb9d975e03764ff169fa447))
 * **server:** WebSocket sessions for live talk ([#40](https://github.com/jonwilkey/ptt/issues/40)) ([22f5998](https://github.com/jonwilkey/ptt/commit/22f599836f87535bc9ad459ace7cd40aae7e9996))
 
