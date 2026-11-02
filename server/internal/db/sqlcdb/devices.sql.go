@@ -301,6 +301,63 @@ func (q *Queries) ListDevicesWithUsers(ctx context.Context) ([]ListDevicesWithUs
 	return items, nil
 }
 
+const listHeartbeatDevices = `-- name: ListHeartbeatDevices :many
+SELECT d.id, u.display_name AS user_display_name, d.name, d.app_version, d.checklist_status,
+       d.created_at, d.last_seen_at, d.revoked_at,
+       CAST(d.fcm_token IS NOT NULL AND d.fcm_token <> '' AS INTEGER) AS has_token
+FROM devices d
+JOIN users u ON u.id = d.user_id
+WHERE d.is_test = 0
+ORDER BY d.id
+`
+
+type ListHeartbeatDevicesRow struct {
+	ID              string
+	UserDisplayName string
+	Name            string
+	AppVersion      sql.NullString
+	ChecklistStatus sql.NullString
+	CreatedAt       int64
+	LastSeenAt      sql.NullInt64
+	RevokedAt       sql.NullInt64
+	HasToken        int64
+}
+
+// The phone heartbeat (pttd's hourly ptt-phones check): every non-test device, revoked ones
+// included because the restart rule looks at the newest last_seen_at of all of them.
+func (q *Queries) ListHeartbeatDevices(ctx context.Context) ([]ListHeartbeatDevicesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listHeartbeatDevices)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListHeartbeatDevicesRow{}
+	for rows.Next() {
+		var i ListHeartbeatDevicesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserDisplayName,
+			&i.Name,
+			&i.AppVersion,
+			&i.ChecklistStatus,
+			&i.CreatedAt,
+			&i.LastSeenAt,
+			&i.RevokedAt,
+			&i.HasToken,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPushTargets = `-- name: ListPushTargets :many
 SELECT id, fcm_token
 FROM devices

@@ -22,6 +22,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/db/sqlcdb"
 	"github.com/jonwilkey/ptt/server/internal/httpapi"
 	"github.com/jonwilkey/ptt/server/internal/metrics"
+	"github.com/jonwilkey/ptt/server/internal/monitor"
 	"github.com/jonwilkey/ptt/server/internal/pages"
 	"github.com/jonwilkey/ptt/server/internal/push"
 	"github.com/jonwilkey/ptt/server/internal/ws"
@@ -48,6 +49,9 @@ type App struct {
 	authn    *auth.Authenticator
 	hub      *ws.Hub
 
+	monitoring bool
+	pinger     *monitor.Pinger
+
 	// The background loops started by Start.
 	bgCancel context.CancelFunc
 	bgWG     sync.WaitGroup
@@ -66,6 +70,12 @@ func WithSender(s push.Sender, fake *push.Fake) Option {
 // use a fake one. The default is the wall clock.
 func WithClock(c clock.Clock) Option {
 	return func(a *App) { a.clk = c }
+}
+
+// WithMonitoring turns on the monitoring jobs (the daily check_in push, and the Healthchecks.io
+// pings when p is non-nil). Without this option Start runs none of them.
+func WithMonitoring(p *monitor.Pinger) Option {
+	return func(a *App) { a.monitoring, a.pinger = true, p }
 }
 
 // New returns an App over an open, migrated database.
@@ -98,7 +108,7 @@ func New(version string, logger *slog.Logger, sqlDB *sql.DB, migrator *db.Migrat
 
 // Start runs the background work: the page scheduler (which first picks up any page already in
 // the database, so a restart while a page is ringing carries on) and the nightly cleanup, which
-// sweeps once now and then every 24 h. Close stops both.
+// sweeps once now and then every 24 h, plus the monitoring jobs when enabled. Close stops them.
 func (a *App) Start() {
 	if a.bgCancel != nil {
 		return
@@ -112,6 +122,16 @@ func (a *App) Start() {
 		defer a.bgWG.Done()
 		cleanup.Run(ctx, a.db, a.clk, a.logger)
 	}()
+	if a.monitoring {
+		a.bgWG.Add(1)
+		go func() {
+			defer a.bgWG.Done()
+			monitor.Run(ctx, monitor.Options{
+				Pinger: a.pinger, Clock: a.clk, Logger: a.logger, DB: a.db,
+				Version: a.version, Sender: a.sender, Health: a.healthReason,
+			})
+		}()
+	}
 }
 
 // Close stops the background loops, then lets in-flight pushes finish until ctx ends and
@@ -143,6 +163,19 @@ func (a *App) Health(ctx context.Context) error {
 		return &httpapi.UnhealthyError{Reason: reason, Err: err}
 	}
 	return nil
+}
+
+// healthReason is Health reduced to the reason /healthz would report, "" when healthy.
+func (a *App) healthReason(ctx context.Context) string {
+	err := a.Health(ctx)
+	if err == nil {
+		return ""
+	}
+	var u *httpapi.UnhealthyError
+	if errors.As(err, &u) {
+		return u.Reason
+	}
+	return "unavailable"
 }
 
 // PublicHandler serves the public API.

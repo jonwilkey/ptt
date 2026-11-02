@@ -16,6 +16,7 @@ import (
 	"github.com/jonwilkey/ptt/server/internal/app"
 	"github.com/jonwilkey/ptt/server/internal/config"
 	"github.com/jonwilkey/ptt/server/internal/db"
+	"github.com/jonwilkey/ptt/server/internal/monitor"
 	"github.com/jonwilkey/ptt/server/internal/push"
 )
 
@@ -138,7 +139,15 @@ func serve(ctx context.Context, args []string, env Env) error {
 		if err != nil {
 			return err
 		}
-		if err := app.Serve(ctx, cfg, logger, env.Version, app.WithSender(sender, fake)); err != nil {
+		hc, err := config.LoadHealthchecks(env.Lookup)
+		if err != nil {
+			return err
+		}
+		pinger := monitor.NewPinger(hc.BaseURL, hc.PingKey, logger)
+		if pinger == nil {
+			logger.Info("healthchecks ping key not set; no monitoring pings")
+		}
+		if err := app.Serve(ctx, cfg, logger, env.Version, app.WithSender(sender, fake), app.WithMonitoring(pinger)); err != nil {
 			logger.Error("pttd exited", slog.String("error", err.Error()))
 			return loggedError{err}
 		}
