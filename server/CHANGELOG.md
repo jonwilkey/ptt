@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0](https://github.com/jonwilkey/ptt/compare/server-v0.3.0...server-v0.4.0) (2026-11-02)
+
+
+### Features
+
+* **server:** protocol 2 negotiation and sender key recovery ([#52](https://github.com/jonwilkey/ptt/issues/52)) ([8a694cb](https://github.com/jonwilkey/ptt/commit/8a694cbd41d5483991a5f1c5fcbe291ed8782196))
+* **server:** talker resume ([#55](https://github.com/jonwilkey/ptt/issues/55)) ([06a2e6f](https://github.com/jonwilkey/ptt/commit/06a2e6fd046d7449b95b621db5db17bd4cc393bc))
+* **server:** transmission buffer, heard, listener gap and clip replay ([#54](https://github.com/jonwilkey/ptt/issues/54)) ([d1f27df](https://github.com/jonwilkey/ptt/commit/d1f27df72815c6ad2e99c61e4795adfb8e53e1ba))
+
 ## [0.3.0](https://github.com/jonwilkey/ptt/compare/server-v0.2.0...server-v0.3.0) (2026-11-02)
 
 
