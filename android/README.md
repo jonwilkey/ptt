@@ -250,6 +250,9 @@ rm -rf "$GH" "$GH2" "$GH3" "$ANDROID_USER_HOME"
 unset ANDROID_USER_HOME
 ```
 
+`scripts/refresh-locks.sh` runs these steps (and refuses to start while another Gradle build is
+running, unless `--force`). The manual steps above remain the reference.
+
 Run the steps one after another, never two refreshes (or a refresh and another build) at once.
 If a step fails, still run step 4.
 

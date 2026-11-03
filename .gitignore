@@ -70,3 +70,4 @@ infra/ansible/inventory/group_vars/prod/site.yaml
 Thumbs.db
 .claude/settings.local.json
 .claude/worktrees/
+/.scratch/

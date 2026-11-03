@@ -20,23 +20,38 @@ quality of the implementation.
 
 Gradle and Kotlin daemons outlive the builds that start them, and leftovers from several agents
 have exhausted the dev machine's memory. After any subagent finishes work that ran Gradle (and
-before dispatching the next one), stop them:
+before dispatching the next one), stop them with `scripts/stop-daemons.sh`.
 
-```sh
-(cd android && ./gradlew --stop)
-pkill -f '[K]otlinCompileDaemon' || true
-```
-
-(The `[K]` keeps `pkill -f` from matching, and killing, the shell that runs it.)
-
-`--stop` only reaches daemons of its own Gradle version, so also run it from any worktree whose
-wrapper pins a different version.
+`--stop` only reaches daemons of its own Gradle version, so pass any worktree whose wrapper pins a
+different version: `scripts/stop-daemons.sh <worktree>...`. Daemons it still lists as "still running"
+are not killed by default (an orphan looks like a live build); once no build is running, use
+`scripts/stop-daemons.sh --kill`. A daemon that has been told to stop may run cache cleanup for
+minutes (listed as "shutting down"); let it finish rather than kill it (`--kill` spares it).
 
 A build with an empty `--gradle-user-home` (the lockfile/checksum refresh) does not read
 `~/.gradle/gradle.properties`, so it runs without memory limits; one such run crashed the WSL VM.
 Always copy `android/gradle/cold-home.properties` into the new home as `gradle.properties` first
 (android/README.md, "Dependency locking and verification"), delete the home afterwards (6-8 GB
-each), and never run two Gradle builds at once.
+each), and never run two Gradle builds at once. `scripts/refresh-locks.sh` does all of this.
+
+## Agent working conventions
+
+Large tool outputs are the main token cost. Keep them small.
+
+- Output budget: no command output over ~300 lines. Never `cat` whole files, or several files at
+  once, to read code: `grep -n` to locate, then a narrow `sed -n a,bp` (or Read with offset/limit).
+  Run `git diff --stat` first, then diff one file at a time.
+- docs/spec.md and docs/protocol.md are large: list headings with `grep -n '^#' <file>` and read
+  only the section you need.
+- Run checks with `scripts/check.sh <server|android|buildsrc|all> [--stop]` (read the log file it
+  names only around the failure); poll PRs with `scripts/pr-status.sh <pr>`; stop daemons with
+  `scripts/stop-daemons.sh` (it lists survivors of other Gradle versions; `--kill` kills them,
+  only when no build is running). Pass `--stop` on the last check of a task.
+- Long checks (check.sh android, refresh-locks.sh ~12 min) exceed the Bash tool's 2-minute
+  default: give them a long timeout or run_in_background (a killed process group skips EXIT traps).
+- Edit files with the editor tool, not ad-hoc python/sed replace scripts. When a procedure recurs,
+  write a reusable script in scripts/.
+- The shell environment (JDK, Android SDK, ~/.local/bin) is preset; don't source profiles.
 
 ## Public repo hygiene
 
