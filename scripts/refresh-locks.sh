@@ -26,6 +26,7 @@ if [ "$force" = 0 ] && pgrep -f '[G]radleDaemon|[G]radleWrapperMain' >/dev/null;
   echo "refusing to start: a Gradle daemon or build is running (pass --force to ignore):" >&2
   pgrep -fa '[G]radleDaemon|[G]radleWrapperMain' | cut -c1-100 >&2 || true
   echo "stop idle ones with: scripts/stop-daemons.sh --kill" >&2
+  echo "daemons reported as 'shutting down' are finishing cache cleanup: wait for them to exit" >&2
   exit 2
 fi
 
@@ -34,7 +35,7 @@ cd "$top/android"
 
 homes=()
 cleanup() {
-  pkill -f '[K]otlinCompileDaemon' || true
+  if [ -z "${PTT_DRY_RUN:-}" ]; then pkill -f '[K]otlinCompileDaemon' || true; fi
   if [ "${#homes[@]}" -gt 0 ]; then
     rm -rf "${homes[@]}"
   fi

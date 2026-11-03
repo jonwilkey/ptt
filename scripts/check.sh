@@ -2,12 +2,13 @@
 # Run what CI runs, with compact output.
 #
 # Usage: scripts/check.sh <server|android|buildsrc|all> [--stop]
-#   server:   make -C server lint test build (not vuln)
+#   server:   make -C server lint sqlc-check test build (not vuln)
 #   buildsrc: ./gradlew -p buildSrc test
 #   android:  ./gradlew ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug
 #   --stop:   run scripts/stop-daemons.sh at the end (success or failure)
-# Each step logs fully under ${PTT_CHECK_LOG_DIR:-<repo>/.scratch/check} (overwritten each run); the terminal gets one
-# PASS/FAIL line per step plus at most ~60 relevant lines for a failure. Stops at the first failure.
+# Each step logs fully under ${PTT_CHECK_LOG_DIR:-<repo>/.scratch/check} (overwritten each run);
+# the terminal gets one PASS/FAIL line per step plus at most ~60 relevant lines for a failure.
+# Stops at the first failure.
 # Not run here although CI runs them: the release guard (compileReleaseKotlin and
 # ReleaseHasNoImpairmentTest, ci.yml android job), server vuln (govulncheck), and the Docker,
 # OpenTofu and workflow lint jobs. Server `sqlc diff` (make sqlc-check) is included.
@@ -62,7 +63,7 @@ step() {
   local lines total
   lines=$("excerpt_$kind" "$log" | awk '!seen[$0]++')
   total=$(printf '%s\n' "$lines" | grep -c . || true)
-  printf '%s\n' "$lines" | head -n "$cap"
+  head -n "$cap" <<<"$lines"
   if [ "$total" -gt "$cap" ]; then
     echo "... $((total - cap)) more relevant lines cut (see log)"
   fi

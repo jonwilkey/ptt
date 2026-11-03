@@ -25,7 +25,8 @@ before dispatching the next one), stop them with `scripts/stop-daemons.sh`.
 `--stop` only reaches daemons of its own Gradle version, so pass any worktree whose wrapper pins a
 different version: `scripts/stop-daemons.sh <worktree>...`. Daemons it still lists as "still running"
 are not killed by default (an orphan looks like a live build); once no build is running, use
-`scripts/stop-daemons.sh --kill`.
+`scripts/stop-daemons.sh --kill`. A daemon that has been told to stop may run cache cleanup for
+minutes (listed as "shutting down"); let it finish rather than kill it (`--kill` spares it).
 
 A build with an empty `--gradle-user-home` (the lockfile/checksum refresh) does not read
 `~/.gradle/gradle.properties`, so it runs without memory limits; one such run crashed the WSL VM.

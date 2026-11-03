@@ -16,13 +16,22 @@ fi
 gh pr view "$1" --json title,state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision \
   --jq '"#'"$1"' \(.title)\nstate: \(.state)  draft: \(.isDraft)  head: \(.headRefOid[0:7])\nmergeable: \(.mergeable)  mergeState: \(.mergeStateStatus)  review: \(if .reviewDecision == "" then "none" else .reviewDecision end)"'
 
-# gh pr checks exits nonzero (8 pending, 1 failing) while still printing JSON.
-# A real failure (auth, network) prints nothing on stdout, so it is told apart from those exits.
+# gh pr checks exits nonzero (8 pending, 1 failing) while still printing JSON. With no checks at
+# all it prints "no checks reported" to stderr, exits 1 and prints nothing on stdout: that is `[]`.
+# Any other failure (auth, network) also prints nothing on stdout and exits nonzero with its stderr shown.
 rc=0
-checks=$(gh pr checks "$1" --json name,bucket,link) || rc=$?
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+checks=$(gh pr checks "$1" --json name,bucket,link 2>"$err") || rc=$?
 if [ -z "$checks" ]; then
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 8 ]; then exit "$rc"; fi
-  checks='[]'
+  if grep -q 'no checks reported' "$err"; then
+    checks='[]'
+  elif [ "$rc" -ne 0 ] && [ "$rc" -ne 8 ]; then
+    cat "$err" >&2
+    exit "$rc"
+  else
+    checks='[]'
+  fi
 fi
 if [ "$checks" = '[]' ]; then
   echo "checks: none reported"

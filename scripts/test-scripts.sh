@@ -57,7 +57,27 @@ not json
 JSON
 out=$(python3 -I "$here/agent-usage.py" --project-dir "$tmp/proj" 2>&1)
 # 1M input at $4 once = 4.00; 1M 1h write at 2x = 8.00; total 12.00 (a double count would be 16.00).
-if grep -q '^TOTAL \$12\.00 ' <<<"$out"; then ok "agent-usage dedupes and prices 1h writes at 2x"; else bad "agent-usage total: $(head -1 <<<"$out")"; fi
+if grep -q '^TOTAL [$]12\.00 ' <<<"$out"; then ok "agent-usage dedupes and prices 1h writes at 2x"; else bad "agent-usage total: $(head -1 <<<"$out")"; fi
 if grep -q 'skipped 1 malformed' <<<"$out"; then ok "agent-usage skips malformed lines"; else bad "agent-usage malformed line count"; fi
+
+# stop-daemons.sh with pgrep/pkill stubs that exit 1 (nothing running) must still report.
+stubs="$tmp/stubs"
+mkdir -p "$stubs"
+printf '#!/bin/sh\nexit 1\n' >"$stubs/pgrep"
+cp "$stubs/pgrep" "$stubs/pkill"
+chmod +x "$stubs/pgrep" "$stubs/pkill"
+sd=$(PATH="$stubs:$PATH" PTT_SKIP_GRADLEW_STOP=1 "$here/stop-daemons.sh" 2>&1)
+if grep -q 'stopped Gradle daemons' <<<"$sd"; then ok "stop-daemons.sh reports with no daemons running"; else bad "stop-daemons.sh silent: $sd"; fi
+
+# is_shutting_down reads the daemon log under the Gradle home.
+# shellcheck source=stop-daemons.sh
+. "$here/stop-daemons.sh"
+mkdir -p "$tmp/gh/daemon/9.9.9"
+echo 'Starting 1' >"$tmp/gh/daemon/9.9.9/daemon-111.out.log"
+printf 'x\nDaemon stop command received\n' >"$tmp/gh/daemon/9.9.9/daemon-222.out.log"
+if is_shutting_down "$tmp/gh" 9.9.9 222 && ! is_shutting_down "$tmp/gh" 9.9.9 111 \
+  && ! is_shutting_down "$tmp/gh" 9.9.9 333; then
+  ok "is_shutting_down tells stopping daemons from live ones"
+else bad "is_shutting_down"; fi
 
 exit "$fail"
