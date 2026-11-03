@@ -41,6 +41,9 @@ Large tool outputs are the main token cost. Keep them small.
 - Output budget: no command output over ~300 lines. Never `cat` whole files, or several files at
   once, to read code: `grep -n` to locate, then a narrow `sed -n a,bp` (or Read with offset/limit).
   Run `git diff --stat` first, then diff one file at a time.
+- Go (server/): find definitions, references and types with the LSP tool (gopls, enabled by the
+  project's `gopls-lsp` plugin) before grep + sed, and check its diagnostics after edits. It needs
+  `gopls` on PATH: `GOBIN=$HOME/.local/bin go install golang.org/x/tools/gopls@latest`.
 - docs/spec.md and docs/protocol.md are large: list headings with `grep -n '^#' <file>` and read
   only the section you need.
 - Run checks with `scripts/check.sh <server|android|buildsrc|all> [--stop]` (read the log file it
