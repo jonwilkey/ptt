@@ -46,10 +46,13 @@ class PageNotifierTest {
     @Test
     fun theFourChannelsExistWithTheirIds() {
         val ids = manager.notificationChannels.map { it.id }.toSet()
-        assertEquals(setOf("page_normal", "page_urgent", "page_status", "page_quiet", "alert_service"), ids)
+        assertEquals(
+            setOf("page_normal", "page_urgent", "page_status", "page_quiet", "alert_service", "app_update"),
+            ids
+        )
         // Creating them again (every app start, and the service) changes nothing.
         AlertChannels.create(app)
-        assertEquals(5, manager.notificationChannels.size)
+        assertEquals(6, manager.notificationChannels.size)
     }
 
     @Test

@@ -169,6 +169,18 @@ class PageSenderTest {
         assertTrue(rows().isEmpty())
     }
 
+    @Test
+    fun anOutdatedAppSendsNothingButStillRingsAnIncomingPage() = runTest {
+        val rig = rig()
+        h.updateRequired = true
+        assertEquals(SendResult.UpdateRequired, rig.sender.send(ADMIN_USER, "normal"))
+        assertEquals(SendOutcome.UpdateRequired, rig.sender.attempt(ADMIN_USER, "Pat", "normal", false))
+        assertTrue(rows().isEmpty())
+        assertNull(f.activePage.current())
+        rig.engine.start(IncomingPage(OLD, "normal", ADMIN_USER, "Pat", "session-1"))
+        assertTrue(rig.engine.knows(OLD))
+    }
+
     // --- one page or session at a time ---
 
     @Test

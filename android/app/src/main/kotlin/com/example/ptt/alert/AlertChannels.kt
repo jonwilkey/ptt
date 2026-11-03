@@ -35,6 +35,9 @@ object AlertChannels {
     const val STATUS = "page_status"
     const val QUIET = "page_quiet"
 
+    /** The "Update ready" notice of the self-updater (docs/protocol.md section 14.4). */
+    const val UPDATE = "app_update"
+
     /** Foreground notices of [AlertService] and background sync; apart from [QUIET] so blocking them is harmless. */
     const val SERVICE = "alert_service"
 
@@ -49,7 +52,7 @@ object AlertChannels {
     fun create(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         manager.createNotificationChannels(
-            listOf(normal(context), urgent(context), status(context), quiet(context), service(context))
+            listOf(normal(context), urgent(context), status(context), quiet(context), service(context), update(context))
         )
     }
 
@@ -107,6 +110,17 @@ object AlertChannels {
         NotificationManager.IMPORTANCE_LOW
     ).apply {
         description = context.getString(R.string.channel_service_description)
+        setSound(null, null)
+        enableVibration(false)
+        setShowBadge(false)
+    }
+
+    private fun update(context: Context) = NotificationChannel(
+        UPDATE,
+        context.getString(R.string.channel_update),
+        NotificationManager.IMPORTANCE_LOW
+    ).apply {
+        description = context.getString(R.string.channel_update_description)
         setSound(null, null)
         enableVibration(false)
         setShowBadge(false)

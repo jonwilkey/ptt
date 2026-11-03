@@ -8,7 +8,7 @@ and the setup checklist, and receiving a page: FCM handling and alerting (`push`
 a page, the real talk screen (`TalkActivity` is a stub), the widget, live talk and the clip fallback
 follow in the next PRs and milestones 3-5.
 `version.txt` holds the app version that release-please bumps (tags `android-vX.Y.Z`). Release
-signing is not configured yet (milestone 6), so release builds stay unsigned.
+builds are signed only when the signing variables below are set; otherwise they stay unsigned.
 
 ## Layout
 
@@ -41,6 +41,33 @@ Security-relevant configuration: `allowBackup="false"` with data-extraction rule
 everything, and a network security config that forbids cleartext and trusts only ISRG Root X1
 and X2 (the certificates are in `res/raw`, fingerprints in the config's comment).
 The `FirebaseInitProvider` is removed and Firebase's auto-init and default data collection are off.
+
+## Self-update and release signing
+
+The `update` package implements docs/protocol.md section 14: `UpdateWorker` (daily) and the app-start run
+(at most every 6 hours, from `PttApplication` and `MainActivity`) call `UpdateChecker`, which downloads the
+newest APK from our server into `noBackupFilesDir`, verifies size, SHA-256, package name, version code and
+the signing certificates (`ApkVerifier`), and installs it through a `PackageInstaller` session. It never
+installs while a page rings, a talk session is active or the page slot holds a live page (it tries again on
+the next run). `min_supported_version_code` is stored; while the installed version code is below it the home
+screen is replaced by "Update required" and sending a page (app or widget) opens that screen. Incoming pages,
+`check_in` and registration are unaffected.
+
+`min-supported-version.txt` holds the minimum supported version name (`0.0.0`: none). Only the release
+workflow reads it, to publish `min_supported_version_code`; raising it is a deliberate PR.
+
+Release signing reads its keystore from environment variables (the `android-release` workflow supplies them
+from the protected `release` environment; never commit a keystore or a password):
+
+| Variable | Meaning |
+| --- | --- |
+| `PTT_RELEASE_KEYSTORE_FILE` | Path to the keystore file |
+| `PTT_RELEASE_KEYSTORE_PASSWORD` | Keystore password |
+| `PTT_RELEASE_KEY_ALIAS` | Key alias |
+| `PTT_RELEASE_KEY_PASSWORD` | Key password; optional, defaults to the keystore password |
+
+With none set, `assembleRelease` produces an unsigned APK (as CI's release check does). With only some set the
+build fails.
 
 ## Local setup
 

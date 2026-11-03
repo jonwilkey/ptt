@@ -87,7 +87,12 @@ class FamilyViewModel @Inject constructor(
             try {
                 when (val outcome = sender.attempt(person.userId, person.name, level, endCurrent)) {
                     is SendOutcome.Open -> eventChannel.send(FamilyEvent.Open(outcome.pageId, person.name))
+
                     is SendOutcome.Ask -> _confirm.value = FamilyConfirm(person, level, outcome.peerName)
+
+                    SendOutcome.UpdateRequired ->
+                        eventChannel.send(FamilyEvent.Message(R.string.send_update_required))
+
                     is SendOutcome.Message -> eventChannel.send(FamilyEvent.Message(outcome.res, outcome.name))
                 }
             } finally {
@@ -101,6 +106,7 @@ class FamilyViewModel @Inject constructor(
 @StringRes
 internal fun SendResult.failureMessage(): Int = when (this) {
     SendResult.KeysUnavailable -> R.string.send_keys_unavailable
+    SendResult.UpdateRequired -> R.string.send_update_required
     SendResult.Error -> R.string.send_error
     else -> R.string.send_not_ready
 }

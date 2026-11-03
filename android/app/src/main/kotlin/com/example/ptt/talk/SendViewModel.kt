@@ -1,8 +1,10 @@
 package com.example.ptt.talk
 
 import android.content.Context
+import android.content.Intent
 import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
+import com.example.ptt.MainActivity
 import com.example.ptt.data.ActivePageEntity
 import com.example.ptt.data.ActivePageRepository
 import com.example.ptt.data.PageRole
@@ -129,6 +131,7 @@ class SendViewModel @Inject constructor(
                 when (next) {
                     is SendOutcome.Open -> open(next.pageId, req.name)
                     is SendOutcome.Ask -> _ui.value = SendUi.Confirm(next.peerName)
+                    SendOutcome.UpdateRequired -> openUpdateRequired()
                     is SendOutcome.Message -> _ui.value = SendUi.Failed(next.res, next.name)
                 }
             }
@@ -154,6 +157,12 @@ class SendViewModel @Inject constructor(
     private fun open(pageId: String, name: String?) {
         context.startActivity(TalkIntents.intent(context, pageId, TalkIntents.MODE_OUTGOING, name))
         finish(SendEvent.Open(pageId, name))
+    }
+
+    /** The home screen is the "Update required" screen while the app is too old; show it instead of sending. */
+    private fun openUpdateRequired() {
+        context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        finish(SendEvent.Close)
     }
 
     private fun ActivePageEntity.isSentTo(req: SendRequest) =
