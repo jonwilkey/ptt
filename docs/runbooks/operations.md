@@ -98,10 +98,14 @@ Target: under 60 minutes. Choose one:
 
 **A. Restore the latest Vultr backup** (preferred; keeps data). The procedure is the one of the
 [restore drill](restore-drill.md), minus the isolation: restore the newest automatic backup onto
-the replacement instance, **remove the lost `ptt-prod` node from the Tailscale console first**
-(otherwise the node joins as `ptt-prod-1`), then boot normally. Re-point the reserved IP to the
-new instance in Vultr if it is a new one. Then run `site.yml` (below) and deploy the current
-digest.
+the replacement instance, then boot normally. Do **not** remove `ptt-prod` from the tailnet: the
+restored disk is the same node (it carries production's `/var/lib/tailscale`, the same `100.x`
+addresses that `20-ptt-listen.conf` and node-exporter rely on), and removing it first locks admins
+and CI out. Make sure the old instance is destroyed or powered off first, because two copies of
+one node key conflict. Prefer restoring onto the existing instance (its **Backups > Restore**):
+this keeps the reserved IP, the firewall group and the OpenTofu state. Only if the instance is
+gone, restore onto a new one, move the reserved IP to it, and expect `tofu plan` drift. Then run
+`site.yml` (below) and deploy the current digest.
 
 **B. A fresh VPS from OpenTofu.** `tofu apply` in `infra/tofu/prod` recreates the instance and
 reuses the reserved IP ([infra-bootstrap.md](infra-bootstrap.md), steps 6, 8 and 9; this needs a

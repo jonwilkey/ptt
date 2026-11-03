@@ -640,12 +640,14 @@ name. Before its first normal boot it must lose all of that.
    no DNS record, its own default firewall group with nothing open. Restore the latest
    automatic backup of production onto it.
 2. Boot it from a rescue ISO (Vultr's ISO library) instead of its disk. Mount the disk, then:
-   delete `/var/lib/tailscale/` (the production node identity) and leave a one-time,
-   non-reusable `tag:ptt-server` auth key with hostname `ptt-drill` for a first-boot
-   `tailscale up`; delete `/opt/ptt/secrets/*` (FCM and ping keys); disable the snapshot timer;
-   make Docker not start the compose project at boot (`restart: unless-stopped` would otherwise
-   bring back Caddy and `pttd`).
-3. Boot the disk. Connect with `ssh` over Tailscale to `ptt-drill`.
+   delete `/var/lib/tailscale/` (the production node identity) and
+   `/etc/ssh/sshd_config.d/20-ptt-listen.conf`; delete `/opt/ptt/secrets/*` (FCM and ping keys)
+   and blank `PTTD_FCM_CREDENTIALS_FILE` and `PTTD_HEALTHCHECKS_PING_KEY_FILE` in
+   `/opt/ptt/.env`; disable the snapshot timer; set a temporary root password; make Docker not
+   start the compose project at boot (move `/var/lib/docker/containers` aside, otherwise
+   `restart: unless-stopped` would bring back Caddy and `pttd`).
+3. Boot the disk. After the first boot, join from the Vultr web console with a one-time,
+   non-reusable `tag:ptt-server` key as `ptt-drill`, then connect with `ssh` over Tailscale.
 4. Check the data with the image already on the disk (no `sqlite3` needed):
    `docker compose -f /opt/ptt/compose.yaml run --rm --no-deps pttd migrate status` and
    `... pttd admin devices`
@@ -657,4 +659,4 @@ name. Before its first normal boot it must lose all of that.
 6. Record the result and timings in the runbook log, destroy the instance, and remove `ptt-drill`
    from the tailnet.
 
-The spec's target for a real restore is under 60 minutes; the drill times steps 1-5 against it.
+The spec's target for a real restore is under 60 minutes; the drill times steps 2-6 of the runbook against it.

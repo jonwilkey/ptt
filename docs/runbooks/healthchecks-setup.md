@@ -102,7 +102,7 @@ From a machine on the tailnet with the sops key, the same play by hand is
 (from `infra/ansible/`, with the site vars of [infra/ansible/README.md](../../infra/ansible/README.md)):
 
 ```sh
-ansible-playbook -i inventory/prod.yml site.yml -u deploy --tags app,snapshot
+ansible-playbook -i inventory/prod.yml site.yml --tags app,snapshot
 ```
 
 ## 5. Confirm each check goes green

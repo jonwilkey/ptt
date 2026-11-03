@@ -7,7 +7,7 @@ serves it. It is the milestone 6 exit check and a yearly item in the maintenance
 isolation steps are in
 [docs/operations.md](../operations.md#restore-drill-a-vultr-backup-onto-a-scratch-vps).
 
-The spec's target for a real restore is **under 60 minutes**; time steps 2 to 7 against it.
+The spec's target for a real restore is **under 60 minutes**; time steps 2 to 6 against it.
 
 **The restored disk is a copy of production.** On its own it would rejoin the tailnet as
 `ptt-prod`, push to the family's phones with the real FCM key, ping Healthchecks.io with the real
@@ -29,6 +29,7 @@ and about two hours the first time. The scratch instance costs a few cents.
 
    ```sh
    ssh <admin>@ptt-prod 'sudo docker compose -f /opt/ptt/compose.yaml exec pttd /pttd admin devices'
+   ssh <admin>@ptt-prod 'sudo docker compose -f /opt/ptt/compose.yaml exec pttd /pttd admin status'
    ssh <admin>@ptt-prod 'sudo ls -l /data/snapshots'
    ```
 
@@ -50,11 +51,14 @@ In the Vultr portal, **outside OpenTofu** (nothing here may be added to `infra/t
    (the instance's **Backups** tab lists automatic backups; choose **Restore** for the newest one
    and the scratch instance as the target; this overwrites the scratch disk). Note the backup's
    timestamp for step 6.
+   Watch the web console during the restore, in case the instance boots the disk instead of the ISO.
 4. Reboot the scratch instance from the ISO (web console) and stay in the console.
 
 > If the scratch instance booted the restored disk by mistake: power it off at once, then check
 > that the real `ptt-prod` shows as connected in the Tailscale console, that `ptt-uptime` is green
-> in Healthchecks.io, and tell the other admin. Then carry on from step 2.4 on a clean instance.
+> in Healthchecks.io, confirm SSH to `ptt-prod` still works (the same node key briefly ran
+> twice), and tell the other admin. Then reboot into the ISO and continue at step 3, or destroy
+> the instance and start again at 2.1.
 
 ## 3. Strip production's identity (rescue ISO)
 
@@ -63,6 +67,7 @@ In the rescue shell. The root filesystem is usually the first partition of the d
 
 ```sh
 mount /dev/vda1 /mnt
+test -f /mnt/opt/ptt/.env || echo "wrong partition"   # the first partition may be the EFI one; try vda2
 # 1. The tailnet identity of production, and the tailnet-only sshd listener (it names
 #    production's tailnet addresses, which this node will not have).
 rm -rf /mnt/var/lib/tailscale
@@ -81,6 +86,7 @@ rm -f /mnt/etc/systemd/system/timers.target.wants/ptt-snapshot.timer
 #    recreates pttd in step 5.
 mv /mnt/var/lib/docker/containers /mnt/var/lib/docker/containers.parked
 grep -E '^PTTD_(FCM|HEALTHCHECKS)' /mnt/opt/ptt/.env     # empty values (a line is absent if never configured)
+chroot /mnt passwd root   # one-time drill password; keep it in the password manager until teardown
 umount /mnt
 ```
 
@@ -91,8 +97,7 @@ open ([infra/ansible/README.md](../../infra/ansible/README.md), "Lock-out recove
 
 ## 4. Join the tailnet as `ptt-drill`
 
-SSH is tailnet-only, so use the **Vultr web console** (log in as `root` with the password
-the instance page shows; root login is blocked for SSH only):
+SSH is tailnet-only, so use the **Vultr web console** (log in as `root` with the drill password from step 3; root login is blocked for SSH only):
 
 ```sh
 tailscale up --auth-key=tskey-auth-EXAMPLE --advertise-tags=tag:ptt-server --hostname=ptt-drill --accept-dns=false
@@ -128,6 +133,9 @@ sudo ls -l /data/snapshots
 
 ## 6. Start `pttd` alone
 
+If compose reports an existing endpoint or network, run `sudo docker network rm ptt_default`
+(scratch box only) and rerun.
+
 ```sh
 sudo docker compose -f /opt/ptt/compose.yaml up -d --no-deps pttd
 sudo docker compose -f /opt/ptt/compose.yaml exec pttd /pttd admin status
@@ -151,7 +159,7 @@ configured; do not try to make it work.
    from step 1 is revoked or expired.
 4. Confirm production is untouched: `ptt-prod` shows connected in Tailscale, and all six checks
    in Healthchecks.io are as before the drill (no unexplained state change).
-5. Delete any copy of the auth key from the password manager.
+5. Delete any copy of the auth key, and the drill root password entry, from the password manager.
 
 ## What to verify (summary)
 
@@ -163,7 +171,7 @@ configured; do not try to make it work.
 | Roster | `admin devices` matches production's devices and people |
 | Snapshot | A `nightly-*.db` at most 24 hours older than the backup |
 | Serves | `admin status` healthy; `/internal/status` healthy |
-| Time | Steps 2 to 7 under 60 minutes |
+| Time | Steps 2 to 6 under 60 minutes |
 | Production | Untouched; checks green; no emails |
 
 ## Drill log

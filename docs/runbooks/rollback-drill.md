@@ -87,8 +87,7 @@ All of these:
   deployed again.
 - Delete `/data/rolled-back-<timestamp>/` when you have looked at it, or leave it: the next
   rollback replaces it.
-- Record the date and result in the restore drill log
-  ([restore-drill.md](restore-drill.md#drill-log)).
+- Record the date and result in the [drill log](#drill-log) below.
 
 ## If the drill fails
 
@@ -98,3 +97,11 @@ All of these:
 | Failed, production healthy on the previous image | The rollback ran but a check (restored snapshot, schema version) did not hold. Read the summary; production is fine, the drill is not proven |
 | Production still down after the run | The rollback itself failed: follow "Server down, VPS reachable" in [operations.md](operations.md#server-down-vps-reachable) |
 | `schema version` is `99999` or `newer than binary's` | The restore did not happen. Treat as an incident: restore the newest `pre-migrate-*` snapshot by hand ([operations.md](operations.md#a-bad-release-or-a-bad-migration)) and tell the other admin |
+
+## Drill log
+
+Add a row after each drill (dates and durations only; no names or addresses).
+
+| Date | Run id | Result and notes |
+| --- | --- | --- |
+| (none yet) | | |
