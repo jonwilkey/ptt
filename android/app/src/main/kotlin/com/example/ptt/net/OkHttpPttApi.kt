@@ -2,6 +2,8 @@ package com.example.ptt.net
 
 import com.example.ptt.crypto.ProtocolException
 import java.io.IOException
+import java.io.OutputStream
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -91,19 +93,75 @@ class OkHttpPttApi(
     private suspend fun pageAction(pageId: String, action: String) =
         enrolledCall("POST", listOf("v1", "pages", pageId, action), EMPTY_BODY) { }
 
+    override suspend fun getAppLatest() =
+        enrolledCall("GET", listOf("v1", "app", "latest"), null) { decode(AppLatestResponse.serializer(), it) }
+
+    override suspend fun downloadApk(downloadPath: String, sink: OutputStream, maxBytes: Long): ApiResult<Long> {
+        if (!APK_PATH.matches(downloadPath)) return ApiResult.Final(0, ErrorCode.BAD_RESPONSE)
+        return enrolled { base ->
+            val request = Request.Builder().url(base.newBuilder().encodedPath(downloadPath).build()).get().build()
+            try {
+                downloadClient.newCall(request).await().use { response ->
+                    withContext(io) { copyApk(response, sink, maxBytes) }
+                }
+            } catch (e: NotEnrolledException) {
+                ApiResult.NotEnrolled(e.reason)
+            } catch (e: IOException) {
+                ApiResult.Retryable(status = null, cause = e)
+            }
+        }
+    }
+
+    private fun copyApk(response: Response, sink: OutputStream, maxBytes: Long): ApiResult<Long> {
+        val status = response.code
+        val body = response.body
+        return when {
+            status == STATUS_OK -> {
+                var total = 0L
+                val buffer = ByteArray(COPY_BUFFER_BYTES)
+                val input = body.byteStream()
+                while (total <= maxBytes) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    sink.write(buffer, 0, read)
+                    total += read
+                }
+                if (total > maxBytes) ApiResult.Final(status, ErrorCode.TOO_LARGE) else ApiResult.Success(total)
+            }
+
+            response.isSuccessful -> ApiResult.Final(status, ErrorCode.BAD_RESPONSE)
+
+            status == STATUS_TOO_MANY_REQUESTS || status >= STATUS_SERVER_ERROR ->
+                ApiResult.Retryable(status, retryAfterMs(response))
+
+            else -> ApiResult.Final(status, null)
+        }
+    }
+
+    private val downloadClient by lazy {
+        client.newBuilder()
+            .callTimeout(DOWNLOAD_CALL_TIMEOUT_MIN, TimeUnit.MINUTES)
+            .readTimeout(DOWNLOAD_READ_TIMEOUT_S, TimeUnit.SECONDS)
+            .build()
+    }
+
     private suspend fun <T> enrolledCall(
         method: String,
         segments: List<String>,
         body: RequestBody?,
         onlyStatus: Int? = null,
         parse: (String) -> T
-    ): ApiResult<T> {
+    ): ApiResult<T> = enrolled { base ->
+        call(base, method, segments, body, authenticated = true, onlyStatus, parse)
+    }
+
+    private suspend fun <T> enrolled(block: suspend (HttpUrl) -> ApiResult<T>): ApiResult<T> {
         val needsReenrollment = state.needsReenrollment()
         val base = state.serverUrl()?.toHttpUrlOrNull()
         return when {
             needsReenrollment -> ApiResult.NotEnrolled(NotEnrolledReason.NEEDS_REENROLLMENT)
             base == null -> ApiResult.NotEnrolled(NotEnrolledReason.NOT_ENROLLED)
-            else -> call(base, method, segments, body, authenticated = true, onlyStatus, parse)
+            else -> block(base)
         }
     }
 
@@ -186,6 +244,12 @@ class OkHttpPttApi(
         val JSON = "application/json".toMediaType()
         val EMPTY_BODY = ByteArray(0).toRequestBody(null)
         const val MAX_BODY_BYTES = 1L shl 20
+        const val COPY_BUFFER_BYTES = 64 * 1024
+        const val DOWNLOAD_CALL_TIMEOUT_MIN = 10L
+        const val DOWNLOAD_READ_TIMEOUT_S = 60L
+
+        /** Protocol section 14.3: the only path an APK is fetched from. */
+        val APK_PATH = Regex("^/v1/app/apk/(0|[1-9][0-9]{0,2})\\.(0|[1-9][0-9]{0,2})\\.(0|[1-9][0-9]{0,2})$")
         const val STATUS_OK = 200
         const val STATUS_TOO_MANY_REQUESTS = 429
         const val STATUS_SERVER_ERROR = 500

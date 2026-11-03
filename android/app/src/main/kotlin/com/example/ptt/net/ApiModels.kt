@@ -143,6 +143,17 @@ data class DeliveredResponse(val state: String)
 @Serializable
 data class ErrorBody(val error: String)
 
+/** `GET /v1/app/latest` (docs/protocol.md section 14.2). */
+@Serializable
+data class AppLatestResponse(
+    @SerialName("version_name") val versionName: String,
+    @SerialName("version_code") val versionCode: Long,
+    val sha256: String,
+    val size: Long,
+    @SerialName("min_supported_version_code") val minSupportedVersionCode: Long,
+    @SerialName("download_path") val downloadPath: String
+)
+
 /** The signed roster exactly as the server sent it, plus its parsed three fields. */
 data class RosterResponse(val rawJson: String, val signed: SignedObjectDto) {
     override fun toString() = "RosterResponse(signer=${signed.signer})"
@@ -156,4 +167,7 @@ object ErrorCode {
 
     /** Not a server code: a 2xx whose body could not be read. */
     const val BAD_RESPONSE = "bad_response"
+
+    /** Not a server code: a download that is longer than the size announced for it. */
+    const val TOO_LARGE = "too_large"
 }

@@ -23,6 +23,22 @@ fun firebaseSetting(name: String): String = providers.gradleProperty("ptt.fireba
     .getOrElse("")
     .trim()
 
+// Release signing comes from the environment, never the repo (docs/operations.md, "Publishing an APK"). With none
+// of the variables set the release build stays unsigned, which is what CI's release check builds. A partial set
+// fails the build: a half-configured release must not quietly produce an unsigned APK.
+val signingVariables = listOf(
+    "PTT_RELEASE_KEYSTORE_FILE",
+    "PTT_RELEASE_KEYSTORE_PASSWORD",
+    "PTT_RELEASE_KEY_ALIAS"
+)
+fun signingEnv(name: String): String? = providers.environmentVariable(name).orNull?.takeIf { it.isNotEmpty() }
+val releaseSigningConfigured = signingVariables.all { signingEnv(it) != null }
+if (!releaseSigningConfigured && (signingVariables + "PTT_RELEASE_KEY_PASSWORD").any { signingEnv(it) != null }) {
+    throw GradleException(
+        "Release signing needs all of ${signingVariables.joinToString()} (PTT_RELEASE_KEY_PASSWORD is optional)"
+    )
+}
+
 android {
     namespace = "com.example.ptt"
     compileSdk = 37
@@ -53,9 +69,21 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(signingEnv("PTT_RELEASE_KEYSTORE_FILE")!!)
+                storePassword = signingEnv("PTT_RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = signingEnv("PTT_RELEASE_KEY_ALIAS")
+                // A PKCS12 keystore uses one password for both.
+                keyPassword = signingEnv("PTT_RELEASE_KEY_PASSWORD") ?: signingEnv("PTT_RELEASE_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // Signing is configured in milestone 6; release builds stay unsigned until then.
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

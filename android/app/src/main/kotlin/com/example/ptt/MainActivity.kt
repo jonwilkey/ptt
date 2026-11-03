@@ -12,7 +12,12 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import com.example.ptt.setup.Route
 import com.example.ptt.setup.SetupApp
 import com.example.ptt.setup.SetupViewModel
+import com.example.ptt.update.InstallPrompt
+import com.example.ptt.update.UpdateChecker
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * Hosts the setup screens. It deliberately does not use showWhenLocked/turnScreenOn: nothing here
@@ -20,6 +25,12 @@ import dagger.hilt.android.AndroidEntryPoint
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @Inject
+    lateinit var updates: UpdateChecker
+
+    @Inject
+    lateinit var appScope: CoroutineScope
+
     /** The route wants FLAG_SECURE (loading, enrollment). */
     private var routeSecure = true
 
@@ -32,6 +43,16 @@ class MainActivity : ComponentActivity() {
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        InstallPrompt.foreground = true
+    }
+
+    override fun onStop() {
+        InstallPrompt.foreground = false
+        super.onStop()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,6 +72,7 @@ class MainActivity : ComponentActivity() {
             // or the re-enroll flag set while Home was showing must be acted on.
             LifecycleStartEffect(viewModel) {
                 viewModel.onStart()
+                appScope.launch { updates.checkOnAppStart() }
                 onStopOrDispose { }
             }
             SetupApp(viewModel, onSecureScreen = {

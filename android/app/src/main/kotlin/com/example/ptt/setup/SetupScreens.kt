@@ -31,11 +31,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.ptt.R
 import com.example.ptt.talk.FamilyHost
+import com.example.ptt.update.UpdateRequiredScreen
+import com.example.ptt.update.UpdateViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -51,9 +54,22 @@ fun SetupApp(viewModel: SetupViewModel, onSecureScreen: (Boolean) -> Unit = {}) 
                 null -> Centered { Text(stringResource(R.string.loading)) }
                 is Route.Enroll -> EnrollmentScreen(viewModel, r.explain)
                 Route.Waiting -> WaitingScreen(viewModel)
-                Route.Home -> HomeHost(viewModel, onSecureScreen)
+                Route.Home -> HomeOrUpdateRequired(viewModel, onSecureScreen)
             }
         }
+    }
+}
+
+/** The home screen, or "Update required" in its place while the app is older than the server's minimum. */
+@Composable
+private fun HomeOrUpdateRequired(viewModel: SetupViewModel, onSecureScreen: (Boolean) -> Unit) {
+    val updates: UpdateViewModel = hiltViewModel()
+    val required by remember { updates.required }.collectAsState(initial = false)
+    val status by updates.status.collectAsState()
+    if (required) {
+        UpdateRequiredScreen(status, updates::updateNow)
+    } else {
+        HomeHost(viewModel, onSecureScreen)
     }
 }
 

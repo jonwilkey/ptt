@@ -24,6 +24,7 @@
         android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
         tools:ignore="BatteryLife" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
     <application
         android:name=".PttApplication"
@@ -98,6 +99,11 @@
         <!-- The Acknowledged action on the incoming-page notification. -->
         <receiver
             android:name=".alert.AlertActionReceiver"
+            android:exported="false" />
+
+        <!-- The PackageInstaller's answer to a self-update; only the system's PendingIntent reaches it. -->
+        <receiver
+            android:name=".update.UpdateInstallReceiver"
             android:exported="false" />
 
         <!--

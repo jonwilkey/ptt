@@ -1,5 +1,7 @@
 package com.example.ptt.net
 
+import java.io.OutputStream
+
 /**
  * Typed client for the milestone-2 endpoints of docs/protocol.md section 6. Every call returns an
  * [ApiResult]; none throws for a network, HTTP or decoding problem.
@@ -7,6 +9,7 @@ package com.example.ptt.net
  * All calls except [enroll] use the stored server URL and fail fast with [ApiResult.NotEnrolled]
  * when the device is not enrolled (or needs re-enrollment).
  */
+@Suppress("TooManyFunctions")
 interface PttApi {
     /** `POST /v1/enroll` (no auth) against [serverUrl], which is not stored yet. */
     suspend fun enroll(serverUrl: String, request: EnrollRequest): ApiResult<EnrollResponse>
@@ -52,4 +55,14 @@ interface PttApi {
 
     /** `POST /v1/pages/{id}/cancel` -> 204. */
     suspend fun cancel(pageId: String): ApiResult<Unit>
+
+    /** `GET /v1/app/latest` (docs/protocol.md section 14.2). 404 is [ApiResult.Final]: nothing published. */
+    suspend fun getAppLatest(): ApiResult<AppLatestResponse>
+
+    /**
+     * `GET` of [downloadPath] (section 14.3), whose shape is checked here: the body is copied to [sink] and the
+     * result is the number of bytes copied. More than [maxBytes] is a [ApiResult.Final] with
+     * [ErrorCode.TOO_LARGE]. The call is not subject to the 30 s call timeout of the other calls.
+     */
+    suspend fun downloadApk(downloadPath: String, sink: OutputStream, maxBytes: Long): ApiResult<Long>
 }

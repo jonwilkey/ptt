@@ -486,6 +486,44 @@ class PttApiTest {
         assertEquals(0, server.requestCount)
     }
 
+    @Test(timeout = 60_000)
+    fun downloadApkStreamsTheBodyToTheSink() = runBlocking {
+        reply(200, "apk-bytes")
+        val sink = java.io.ByteArrayOutputStream()
+        assertEquals(ApiResult.Success(9L), api.downloadApk("/v1/app/apk/0.5.0", sink, 100))
+        assertEquals("apk-bytes", sink.toString())
+        assertEquals("/v1/app/apk/0.5.0", take().url.encodedPath)
+    }
+
+    @Test(timeout = 60_000)
+    fun downloadApkOverTheCapIsTooLarge() = runBlocking {
+        reply(200, "x".repeat(50))
+        val result = api.downloadApk("/v1/app/apk/0.5.0", java.io.ByteArrayOutputStream(), 10)
+        assertEquals(ApiResult.Final(200, ErrorCode.TOO_LARGE), result)
+    }
+
+    @Test(timeout = 60_000)
+    fun downloadApkRefusesAPathThatIsNotAnApkPathWithoutARequest() = runBlocking {
+        listOf("/v1/app/latest", "/v1/app/apk/0.5", "/v1/app/apk/0.5.0/x", "//evil.example.com/v1/app/apk/0.5.0", "")
+            .forEach {
+                val result = api.downloadApk(it, java.io.ByteArrayOutputStream(), 100)
+                assertEquals(ApiResult.Final(0, ErrorCode.BAD_RESPONSE), result)
+            }
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test(timeout = 60_000)
+    fun downloadApkMapsNotFoundToFinalAndServerErrorsToRetryable() = runBlocking {
+        reply(404)
+        assertEquals(
+            ApiResult.Final(404, null),
+            api.downloadApk("/v1/app/apk/0.5.0", java.io.ByteArrayOutputStream(), 100)
+        )
+        reply(503)
+        val result = api.downloadApk("/v1/app/apk/0.5.0", java.io.ByteArrayOutputStream(), 100)
+        assertTrue(result is ApiResult.Retryable && result.status == 503)
+    }
+
     private fun samplePage() = CreatePageRequest(PAGE, USER, "normal", SESSION, SignedObjectDto("p", DEVICE, "s"))
 
     private companion object {

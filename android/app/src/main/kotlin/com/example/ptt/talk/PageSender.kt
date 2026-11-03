@@ -49,6 +49,9 @@ sealed interface SendResult {
     /** The device keys cannot be used; the start-up check (AppStartup) routes the phone back to enrollment. */
     data object KeysUnavailable : SendResult
 
+    /** The app is older than the server's minimum (docs/protocol.md section 14.5): nothing is sent. */
+    data object UpdateRequired : SendResult
+
     data object Error : SendResult
 }
 
@@ -70,7 +73,8 @@ class PageSender(
     private val notices: PageNotices,
     private val selfPages: SelfPages,
     private val clock: Clock,
-    private val newId: () -> String = { UUID.randomUUID().toString() }
+    private val newId: () -> String = { UUID.randomUUID().toString() },
+    private val updateRequired: suspend () -> Boolean = { false }
 ) {
     private val rules = ActivePageRules(engine, sessionKeys, clock)
 
@@ -94,6 +98,7 @@ class PageSender(
      */
     @Suppress("ReturnCount")
     suspend fun send(toUser: String, level: String, endCurrent: Boolean = false): SendResult = lock.withLock {
+        if (updateRequired()) return SendResult.UpdateRequired
         val self = tokens.deviceId() ?: return SendResult.NotReady
         val roster = rosterSync.heldRoster() ?: return SendResult.NotReady
         val selfUser = roster.find(self)?.userId ?: return SendResult.NotReady

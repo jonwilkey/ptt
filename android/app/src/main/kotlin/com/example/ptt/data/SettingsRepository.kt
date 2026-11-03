@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.example.ptt.crypto.B64u
@@ -48,6 +49,9 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
      * [clearEnrollment]: the widget hides the badge while not enrolled, and the updater only rewrites it on a change.
      */
     val checklistRegressed: Flow<Boolean> = store.data.map { it[CHECKLIST_REGRESSED] ?: false }
+
+    /** The newest `min_supported_version_code` the server reported (protocol section 14.5); 0 when none. */
+    val minSupportedCode: Flow<Long> = store.data.map { it[MIN_SUPPORTED_CODE] ?: 0L }
 
     val profileFlow: Flow<DeviceProfile?> = store.data.map { it.toProfile() }
 
@@ -173,6 +177,17 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
         }
     }
 
+    suspend fun setMinSupportedCode(code: Long) {
+        store.edit { it[MIN_SUPPORTED_CODE] = code }
+    }
+
+    /** When the update check last heard from the server (epoch ms), or null. */
+    suspend fun lastUpdateCheck(): Long? = store.data.first()[LAST_UPDATE_CHECK]
+
+    suspend fun setLastUpdateCheck(epochMs: Long) {
+        store.edit { it[LAST_UPDATE_CHECK] = epochMs }
+    }
+
     suspend fun setChecklistRegressed(value: Boolean) {
         store.edit { it[CHECKLIST_REGRESSED] = value }
     }
@@ -201,6 +216,8 @@ class SettingsRepository(private val store: DataStore<Preferences>) : Enrollment
         val PENDING_REVOCATIONS = stringSetPreferencesKey("pending_revocations")
         const val ANCHOR_SEPARATOR = ","
         const val ID_KEY_SEPARATOR = ":"
+        val MIN_SUPPORTED_CODE = longPreferencesKey("min_supported_code")
+        val LAST_UPDATE_CHECK = longPreferencesKey("last_update_check")
         val CHECKLIST_REGRESSED = booleanPreferencesKey("checklist_regressed")
         val NORMAL_VIBRATE = booleanPreferencesKey("alert_normal_vibrate")
         val URGENT_MAX_VOLUME = booleanPreferencesKey("alert_urgent_max_volume")

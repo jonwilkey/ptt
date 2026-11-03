@@ -11,6 +11,9 @@ sealed interface SendOutcome {
     /** A live page holds the slot (with [peerName], if known): ask before ending it. */
     data class Ask(val peerName: String?) : SendOutcome
 
+    /** The app is too old to send pages: show the "Update required" screen. */
+    data object UpdateRequired : SendOutcome
+
     /** Nothing was sent; [name] fills the message's `%1$s`, if it has one. */
     data class Message(@StringRes val res: Int, val name: String? = null) : SendOutcome
 }
@@ -24,6 +27,7 @@ internal suspend fun PageSender.attempt(
 ): SendOutcome = when (val result = send(userId, level, endCurrent)) {
     is SendResult.Sent -> SendOutcome.Open(result.pageId)
     is SendResult.Busy -> SendOutcome.Ask(result.peerName)
+    SendResult.UpdateRequired -> SendOutcome.UpdateRequired
     SendResult.NoDevices -> SendOutcome.Message(R.string.family_no_phones, name)
     else -> SendOutcome.Message(result.failureMessage())
 }

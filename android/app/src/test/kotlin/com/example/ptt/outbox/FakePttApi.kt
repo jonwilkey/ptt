@@ -1,6 +1,7 @@
 package com.example.ptt.outbox
 
 import com.example.ptt.net.ApiResult
+import com.example.ptt.net.AppLatestResponse
 import com.example.ptt.net.ContactsResponse
 import com.example.ptt.net.CreateEnrollmentCodeRequest
 import com.example.ptt.net.CreateEnrollmentCodeResponse
@@ -89,6 +90,14 @@ class FakePttApi : PttApi {
     override suspend fun getRoster(): ApiResult<RosterResponse> = unused()
 
     override suspend fun putRoster(signedObjectJson: String): ApiResult<Unit> = unused()
+
+    override suspend fun getAppLatest(): ApiResult<AppLatestResponse> = unused()
+
+    override suspend fun downloadApk(
+        downloadPath: String,
+        sink: java.io.OutputStream,
+        maxBytes: Long
+    ): ApiResult<Long> = unused()
 
     private fun unused(): Nothing = error("not used by the outbox")
 }

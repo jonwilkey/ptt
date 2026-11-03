@@ -63,6 +63,10 @@ class SenderHarness(tmp: File) {
         }
     }
 
+    /** What the sender's "app too old" test answers. */
+    @Volatile
+    var updateRequired = false
+
     class Rig(val sender: PageSender, val engine: AlertEngine, val outbox: Outbox)
 
     /** Epoch plus the virtual time, so `created_at` is positive. */
@@ -83,8 +87,10 @@ class SenderHarness(tmp: File) {
         var counter = 0
         // Predictable ids, in the UUID shape the envelope demands.
         val ids = { "00000000-0000-4000-8000-%012d".format(++counter) }
-        val sender =
-            PageSender(f.sync, f.tokens, f.keyStore, outbox, f.activePage, keys, engine, notices, selfPages, clock, ids)
+        val sender = PageSender(
+            f.sync, f.tokens, f.keyStore, outbox, f.activePage, keys, engine, notices, selfPages, clock, ids,
+            updateRequired = { updateRequired }
+        )
         return Rig(sender, engine, outbox)
     }
 

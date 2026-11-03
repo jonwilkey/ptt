@@ -51,6 +51,7 @@ import com.example.ptt.talk.TalkHosting
 import com.example.ptt.talk.TalkServiceControl
 import com.example.ptt.talk.TalkSessionController
 import com.example.ptt.talk.TalkSessions
+import com.example.ptt.update.MinSupported
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -265,8 +266,12 @@ object AlertModule {
         engine: AlertEngine,
         notices: PageNotices,
         selfPages: SelfPages,
-        clock: Clock
-    ) = PageSender(rosterSync, tokens, keyStore, outbox, activePage, sessionKeys, engine, notices, selfPages, clock)
+        clock: Clock,
+        minSupported: MinSupported
+    ) = PageSender(
+        rosterSync, tokens, keyStore, outbox, activePage, sessionKeys, engine, notices, selfPages, clock,
+        updateRequired = minSupported::isRequired
+    )
 
     /** What the talk screen listens to for a page ending. */
     @Provides

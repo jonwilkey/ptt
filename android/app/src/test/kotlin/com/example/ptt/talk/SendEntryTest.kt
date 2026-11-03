@@ -202,6 +202,20 @@ class SendEntryTest {
     }
 
     @Test(timeout = TEST_TIMEOUT_MS)
+    fun anOutdatedAppOpensTheUpdateRequiredHomeInsteadOfSending() = runTest {
+        val vm = with(h) { viewModel(rig().sender) }
+        h.updateRequired = true
+        val events = CopyOnWriteArrayList<SendEvent>()
+        backgroundScope.launch(Dispatchers.Unconfined) { vm.events.toList(events) }
+        send(vm, PAT_NORMAL)
+        poll { events.isNotEmpty() }
+        assertEquals(SendEvent.Close, events.single())
+        assertTrue(pageRows().isEmpty())
+        val started = shadowOf(app).nextStartedActivity
+        assertEquals(com.example.ptt.MainActivity::class.java.name, started.component?.className)
+    }
+
+    @Test(timeout = TEST_TIMEOUT_MS)
     fun nothingIsSentUntilTheUnlockAnswersAndOnlyTheLatestPromptCounts() = runTest {
         val vm = with(h) { viewModel(rig().sender) }
         val events = CopyOnWriteArrayList<SendEvent>()
