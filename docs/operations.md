@@ -28,7 +28,7 @@ the daily reminders of [Re-alerting](#re-alerting).
 Checks are addressed by **slug** under the project's ping key,
 `https://hc-ping.com/<ping-key>/<slug>[/fail]`
 (<https://healthchecks.io/docs/http_api/>). The slugs are fixed in code; the checks are created
-by hand in the setup runbook with the period and grace below (auto-provisioning with `?create=1`
+by hand in the [setup runbook](runbooks/healthchecks-setup.md) with the period and grace below (auto-provisioning with `?create=1`
 is not used, because it would create checks with default timing).
 
 | Slug | Pinged by | Schedule | Grace | `/fail` when |
@@ -621,8 +621,8 @@ which fails a waiver that has no statement or reason or whose date is past the 3
 
 ## Restore drill: a Vultr backup onto a scratch VPS
 
-The exit check and the yearly calendar item. The full runbook is a later PR
-(`docs/runbooks/restore-drill.md`); this is what it proves and its rough steps.
+The exit check and the yearly calendar item. The step-by-step runbook is
+[`runbooks/restore-drill.md`](runbooks/restore-drill.md); this is what it proves and its rough steps.
 
 **What it proves.** The newest Vultr backup boots, holds a consistent database with every device
 and the current roster, has a recent nightly snapshot next to it, and `pttd` from that disk starts
@@ -640,12 +640,14 @@ name. Before its first normal boot it must lose all of that.
    no DNS record, its own default firewall group with nothing open. Restore the latest
    automatic backup of production onto it.
 2. Boot it from a rescue ISO (Vultr's ISO library) instead of its disk. Mount the disk, then:
-   delete `/var/lib/tailscale/` (the production node identity) and leave a one-time,
-   non-reusable `tag:ptt-server` auth key with hostname `ptt-drill` for a first-boot
-   `tailscale up`; delete `/opt/ptt/secrets/*` (FCM and ping keys); disable the snapshot timer;
-   make Docker not start the compose project at boot (`restart: unless-stopped` would otherwise
-   bring back Caddy and `pttd`).
-3. Boot the disk. Connect with `ssh` over Tailscale to `ptt-drill`.
+   delete `/var/lib/tailscale/` (the production node identity) and
+   `/etc/ssh/sshd_config.d/20-ptt-listen.conf`; delete `/opt/ptt/secrets/*` (FCM and ping keys)
+   and blank `PTTD_FCM_CREDENTIALS_FILE` and `PTTD_HEALTHCHECKS_PING_KEY_FILE` in
+   `/opt/ptt/.env`; disable the snapshot timer; set a temporary root password; make Docker not
+   start the compose project at boot (move `/var/lib/docker/containers` aside, otherwise
+   `restart: unless-stopped` would bring back Caddy and `pttd`).
+3. Boot the disk. After the first boot, join from the Vultr web console with a one-time,
+   non-reusable `tag:ptt-server` key as `ptt-drill`, then connect with `ssh` over Tailscale.
 4. Check the data with the image already on the disk (no `sqlite3` needed):
    `docker compose -f /opt/ptt/compose.yaml run --rm --no-deps pttd migrate status` and
    `... pttd admin devices`
@@ -654,7 +656,7 @@ name. Before its first normal boot it must lose all of that.
 5. Start `pttd` alone (`docker compose up -d --no-deps pttd`, FCM unset so pushes are disabled,
    no ping key) and check `curl 127.0.0.1:9090/internal/status`: healthy, schema at the
    expected version, roster present. Caddy is never started.
-6. Record the result and timings in the runbook log, destroy the instance, and remove `ptt-drill`
-   from the tailnet.
+6. Record the result and timings in the runbook log, destroy the instance, remove `ptt-drill`
+   from the tailnet, and delete the temporary root password.
 
-The spec's target for a real restore is under 60 minutes; the drill times steps 1-5 against it.
+The spec's target for a real restore is under 60 minutes; the drill times steps 2-6 of the runbook against it.
