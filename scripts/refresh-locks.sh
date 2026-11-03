@@ -8,6 +8,7 @@
 #   strict confirmation, and deletes every temp home on exit (6-8 GB each) and kills Kotlin daemons.
 #   Refuses to start when a Gradle daemon or build is already running, because two Gradle builds
 #   at once can exhaust the machine; --force overrides that guard.
+#   PTT_DRY_RUN=1 creates the homes, prints them and exits 0 before any Gradle call (for tests).
 # Ends by printing `git status --short` and `git diff --stat` for the lock/verification files.
 # Exit codes: 0 refreshed and confirmed, 1 a step failed, 2 usage error or Gradle already running.
 
@@ -22,7 +23,9 @@ esac
 [ $# -le 1 ] || { echo "usage: $0 [--force]" >&2; exit 2; }
 
 if [ "$force" = 0 ] && pgrep -f '[G]radleDaemon|[G]radleWrapperMain' >/dev/null; then
-  echo "refusing to start: a Gradle daemon or build is running (stop it, or pass --force)" >&2
+  echo "refusing to start: a Gradle daemon or build is running (pass --force to ignore):" >&2
+  pgrep -fa '[G]radleDaemon|[G]radleWrapperMain' | cut -c1-100 >&2 || true
+  echo "stop idle ones with: scripts/stop-daemons.sh --kill" >&2
   exit 2
 fi
 
@@ -43,12 +46,19 @@ newgh() {
   d=$(mktemp -d)
   homes+=("$d")
   cp gradle/cold-home.properties "$d/gradle.properties"
-  echo "$d"
+  NEWGH=$d
 }
 
-GH=$(newgh)
+newgh; GH=$NEWGH
 FLAGS=(--gradle-user-home "$GH" --no-daemon --no-configuration-cache --no-build-cache --rerun-tasks)
 TASKS=(ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug assembleRelease)
+
+if [ -n "${PTT_DRY_RUN:-}" ]; then
+  # Test hook: homes exist, no Gradle call is made; the EXIT trap removes the homes.
+  newgh; newgh
+  echo "dry run: homes ${homes[*]}"
+  exit 0
+fi
 
 echo "1/3 removing stale checksums and locks"
 rm -f gradle/verification-metadata.xml buildSrc/gradle/verification-metadata.xml
@@ -59,12 +69,12 @@ echo "2/3 writing checksums, then locks"
 ./gradlew "${FLAGS[@]}" "${TASKS[@]}" --write-locks
 # buildSrc is a separate build with its own verification file: use ANOTHER empty Gradle home.
 rm -f buildSrc/gradle/verification-metadata.xml buildSrc/gradle.lockfile
-GH2=$(newgh)
+newgh; GH2=$NEWGH
 ./gradlew --gradle-user-home "$GH2" --no-daemon --no-configuration-cache -p buildSrc test \
   --rerun-tasks --write-locks --write-verification-metadata sha256
 
 echo "3/3 confirming with a second empty Gradle home, strict, as CI runs it"
-GH3=$(newgh)
+newgh; GH3=$NEWGH
 ANDROID_USER_HOME=$(mktemp -d)
 homes+=("$ANDROID_USER_HOME")
 export ANDROID_USER_HOME

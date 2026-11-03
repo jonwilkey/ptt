@@ -37,6 +37,15 @@ if [ "$rc" -eq 2 ]; then ok "pr-status.sh no argument exits 2"; else bad "pr-sta
 rc=$?
 if [ "$rc" -eq 2 ]; then ok "refresh-locks.sh bad flag exits 2"; else bad "refresh-locks.sh bad flag exits $rc, want 2"; fi
 
+# Dry run: the homes are created (so the list grew) and the EXIT trap removes all of them.
+dry=$(PTT_DRY_RUN=1 "$here/refresh-locks.sh" --force 2>&1)
+rc=$?
+made=$(grep '^dry run: homes ' <<<"$dry" | cut -d' ' -f4-)
+n=$(wc -w <<<"$made")
+left=0
+for d in $made; do [ -e "$d" ] && left=$((left + 1)); done
+if [ "$rc" -eq 0 ] && [ "$n" -eq 3 ] && [ "$left" -eq 0 ]; then ok "refresh-locks.sh dry run tracks and removes homes"; else bad "refresh-locks.sh dry run rc=$rc homes=$n left=$left"; fi
+
 # Synthetic transcripts: the same message id twice counts once; a 1h write prices at 2x input.
 proj="$tmp/proj/session1"
 mkdir -p "$proj"

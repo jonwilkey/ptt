@@ -6,15 +6,18 @@
 #   buildsrc: ./gradlew -p buildSrc test
 #   android:  ./gradlew ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug
 #   --stop:   run scripts/stop-daemons.sh at the end (success or failure)
-# Each step logs fully under ${PTT_CHECK_LOG_DIR:-a new mktemp dir}; the terminal gets one
+# Each step logs fully under ${PTT_CHECK_LOG_DIR:-<repo>/.scratch/check} (overwritten each run); the terminal gets one
 # PASS/FAIL line per step plus at most ~60 relevant lines for a failure. Stops at the first failure.
+# Not run here although CI runs them: the release guard (compileReleaseKotlin and
+# ReleaseHasNoImpairmentTest, ci.yml android job), server vuln (govulncheck), and the Docker,
+# OpenTofu and workflow lint jobs. Server `sqlc diff` (make sqlc-check) is included.
 # Exit codes: 0 all passed, 1 a step failed, 2 usage error.
 
 set -euo pipefail
 
 usage() { echo "usage: $0 <server|android|buildsrc|all> [--stop]" >&2; exit 2; }
 
-[ $# -ge 1 ] && [ $# -le 2 ] || usage
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then usage; fi
 target=$1
 stop=0
 if [ $# -eq 2 ]; then
@@ -24,7 +27,7 @@ fi
 case "$target" in server | android | buildsrc | all) ;; *) usage ;; esac
 
 top=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
-logdir=${PTT_CHECK_LOG_DIR:-$(mktemp -d)}
+logdir=${PTT_CHECK_LOG_DIR:-$top/.scratch/check}
 mkdir -p "$logdir"
 cap=60
 
@@ -32,12 +35,15 @@ if [ "$stop" = 1 ]; then
   trap '"$top/scripts/stop-daemons.sh" >/dev/null 2>&1 || true' EXIT
 fi
 
+# Two passes: error lines first, then warnings/context (the cap cuts the latter).
 excerpt_go() {
-  grep -E -- '--- FAIL|^FAIL|^panic:|\.go:[0-9]+' "$1" || true
+  grep -E -- '--- FAIL|^FAIL|^panic:' "$1" || true
+  grep -E -- '\.go:[0-9]+' "$1" || true
 }
 
 excerpt_gradle() {
-  grep -E -- 'FAILED|^e: |^w: |Error:|error:|Warning:|Expected|expected|AssertionError|\.kt:[0-9]+|\.xml:[0-9]+|What went wrong|Execution failed|^> ' "$1" || true
+  grep -E -- '^e: |FAILED|What went wrong|Execution failed|AssertionError|^> (There were|Process|Could not|Compilation|A problem|Failed)|Error:|error:|Expected|expected' "$1" || true
+  grep -E -- '^w: |Warning:|\.kt:[0-9]+|\.xml:[0-9]+' "$1" || true
 }
 
 # step <name> <kind go|gradle> <dir> <cmd...>
@@ -66,14 +72,15 @@ step() {
 
 run_server() {
   step server-lint go "$top/server" make lint
+  step server-sqlc go "$top/server" make sqlc-check
   step server-test go "$top/server" make test
   step server-build go "$top/server" make build
 }
 run_buildsrc() {
-  step buildsrc gradle "$top/android" ./gradlew -q --console=plain -p buildSrc test
+  step buildsrc gradle "$top/android" ./gradlew --console=plain -p buildSrc test
 }
 run_android() {
-  step android gradle "$top/android" ./gradlew -q --console=plain \
+  step android gradle "$top/android" ./gradlew --console=plain \
     ktlintCheck detekt lintDebug testDebugUnitTest assembleDebug
 }
 

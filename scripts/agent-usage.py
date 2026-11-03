@@ -63,13 +63,19 @@ def parse_ts(s):
         return None
 
 
+IMPLEMENT_WORDS = ("implement", "fix", "add ", "build", "refactor", "write", "update", "create",
+                   "migrate", "rework", "feat", "chore", "task", "pr ")
+
+
 def role_of(sub, meta):
     if not sub:
         return "main"
+    if (meta.get("agentType") or "") in ("Explore", "Plan", "claude-code-guide"):
+        return "other"
     desc = (meta.get("description") or "").lower()
     if "review" in desc:
         return "review"
-    if desc:
+    if any(w in desc for w in IMPLEMENT_WORDS):
         return "implement"
     return "other"
 
@@ -90,10 +96,17 @@ def result_text(c):
 
 
 def analyze(path, since, st):
+    if since:
+        try:
+            if D.date.fromtimestamp(os.path.getmtime(path)) < since:
+                return
+        except OSError:
+            return
     sub = "/subagents/" in path
     meta = load_meta(path) if sub else {}
-    seen = {}
+    seen = st["seen"]
     idmap = {}
+    file_calls = 0
     prev_ts = None
     rebuilds = []
     turns = 0
@@ -119,13 +132,15 @@ def analyze(path, since, st):
             content = m.get("content")
             if d.get("type") == "assistant" and isinstance(m.get("usage"), dict):
                 mid = m.get("id") or d.get("uuid")
-                first_time = mid not in seen
-                seen[mid] = True
+                first_time = mid is None or mid not in seen
+                if mid is not None:
+                    seen[mid] = True
                 if first_time:
                     u = m["usage"]
                     model = m.get("model")
                     comp = components(model, u)
                     turns += 1
+                    file_calls += 1
                     model_of_file = model_of_file or model
                     if comp is None:
                         st["unknown_models"][model] += 1
@@ -155,7 +170,7 @@ def analyze(path, since, st):
                         st["tool_bytes"][name] += n
                         if name == "Bash":
                             st["bash"].append((n, " ".join(str(cmd).split())[:100]))
-    if not seen:
+    if not file_calls:
         return
     st["files"] += 1
     st["calls"] += turns
@@ -197,7 +212,7 @@ def main():
 
     st = dict(bad_lines=0, files=0, calls=0, unknown_models=C.Counter(), comp=C.Counter(),
               model=C.Counter(), role=C.Counter(), role_n=C.Counter(), agents=[], rebuilds=[],
-              tool_bytes=C.Counter(), bash=[])
+              tool_bytes=C.Counter(), bash=[], seen={})
     for f in files:
         analyze(f, since, st)
 

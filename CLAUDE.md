@@ -23,7 +23,9 @@ have exhausted the dev machine's memory. After any subagent finishes work that r
 before dispatching the next one), stop them with `scripts/stop-daemons.sh`.
 
 `--stop` only reaches daemons of its own Gradle version, so pass any worktree whose wrapper pins a
-different version: `scripts/stop-daemons.sh <worktree>...`.
+different version: `scripts/stop-daemons.sh <worktree>...`. Daemons it still lists as "still running"
+are not killed by default (an orphan looks like a live build); once no build is running, use
+`scripts/stop-daemons.sh --kill`.
 
 A build with an empty `--gradle-user-home` (the lockfile/checksum refresh) does not read
 `~/.gradle/gradle.properties`, so it runs without memory limits; one such run crashed the WSL VM.
@@ -42,7 +44,10 @@ Large tool outputs are the main token cost. Keep them small.
   only the section you need.
 - Run checks with `scripts/check.sh <server|android|buildsrc|all> [--stop]` (read the log file it
   names only around the failure); poll PRs with `scripts/pr-status.sh <pr>`; stop daemons with
-  `scripts/stop-daemons.sh`.
+  `scripts/stop-daemons.sh` (it lists survivors of other Gradle versions; `--kill` kills them,
+  only when no build is running). Pass `--stop` on the last check of a task.
+- Long checks (check.sh android, refresh-locks.sh ~12 min) exceed the Bash tool's 2-minute
+  default: give them a long timeout or run_in_background (a killed process group skips EXIT traps).
 - Edit files with the editor tool, not ad-hoc python/sed replace scripts. When a procedure recurs,
   write a reusable script in scripts/.
 - The shell environment (JDK, Android SDK, ~/.local/bin) is preset; don't source profiles.

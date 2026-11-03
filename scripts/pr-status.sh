@@ -17,8 +17,17 @@ gh pr view "$1" --json title,state,isDraft,headRefOid,mergeable,mergeStateStatus
   --jq '"#'"$1"' \(.title)\nstate: \(.state)  draft: \(.isDraft)  head: \(.headRefOid[0:7])\nmergeable: \(.mergeable)  mergeState: \(.mergeStateStatus)  review: \(if .reviewDecision == "" then "none" else .reviewDecision end)"'
 
 # gh pr checks exits nonzero (8 pending, 1 failing) while still printing JSON.
-checks=$(gh pr checks "$1" --json name,bucket,link 2>/dev/null || true)
-[ -n "$checks" ] || checks='[]'
+# A real failure (auth, network) prints nothing on stdout, so it is told apart from those exits.
+rc=0
+checks=$(gh pr checks "$1" --json name,bucket,link) || rc=$?
+if [ -z "$checks" ]; then
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 8 ]; then exit "$rc"; fi
+  checks='[]'
+fi
+if [ "$checks" = '[]' ]; then
+  echo "checks: none reported"
+  exit 0
+fi
 jq -r '
   "checks: pass \([.[] | select(.bucket == "pass")] | length)"
   + "  fail \([.[] | select(.bucket == "fail" or .bucket == "cancel")] | length)"
