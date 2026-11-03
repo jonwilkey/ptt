@@ -17,6 +17,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
@@ -52,8 +53,12 @@ fun interface InstallGate {
 
 /** Hands a verified APK to the system installer. */
 fun interface ApkInstaller {
-    /** Returns once the session is committed; the system's answer arrives at [UpdateInstallReceiver]. */
-    fun install(file: File)
+    /**
+     * Returns true once the session is committed (the system's answer arrives at [UpdateInstallReceiver]). The
+     * session is abandoned and false returned when [stillClear] says, right before the commit, that it is no
+     * longer safe to install.
+     */
+    fun install(file: File, stillClear: () -> Boolean): Boolean
 }
 
 /**
@@ -107,6 +112,7 @@ class UpdateChecker(
 
     @Suppress("ReturnCount")
     private suspend fun runCheck(): UpdateOutcome {
+        withContext(io) { workDir.listFiles()?.forEach { it.delete() } }
         val release = when (val result = api.getAppLatest()) {
             is ApiResult.Success -> result.body
             is ApiResult.Final -> return if (result.status == HTTP_NOT_FOUND) nothingPublished() else failed("http")
@@ -148,8 +154,8 @@ class UpdateChecker(
             val rejection = ApkVerifier.verify(release, installed, download, archive)
             if (rejection != null) return UpdateOutcome.Rejected(rejection)
             if (gate.busy()) return UpdateOutcome.Deferred
-            withContext(io) { installer.install(file) }
-            return UpdateOutcome.Installing
+            val committed = withContext(io) { installer.install(file) { runBlocking { !gate.busy() } } }
+            return if (committed) UpdateOutcome.Installing else UpdateOutcome.Deferred
         } catch (e: CancellationException) {
             throw e
         } catch (e: IOException) {

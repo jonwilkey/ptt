@@ -78,9 +78,10 @@ class UpdateCheckerTest {
 
             override fun instant(): Instant = Instant.ofEpochMilli(now)
         }
-        val installer = ApkInstaller {
+        val installer = ApkInstaller { file, _ ->
             installs++
-            installedFileExistedDuringInstall = it.exists() && it.length() == apk.size.toLong()
+            installedFileExistedDuringInstall = file.exists() && file.length() == apk.size.toLong()
+            true
         }
         return UpdateChecker(api, settings, packages, installer, { busy }, clock, workDir, Dispatchers.Unconfined)
     }
@@ -148,8 +149,9 @@ class UpdateCheckerTest {
             flip,
             settings,
             packages,
-            ApkInstaller {
+            ApkInstaller { _, _ ->
                 installs++
+                true
             },
             { busy },
             Clock.systemUTC(),
@@ -160,6 +162,40 @@ class UpdateCheckerTest {
         assertEquals(0, installs)
         assertTrue(leftovers().isEmpty())
         assertNull(c.status.value)
+    }
+
+    @Test(timeout = 60_000)
+    fun aPageArrivingWhileTheSessionIsWrittenAbandonsTheInstallAndDefers() = runBlocking {
+        checker()
+        var committed = false
+        val racing = UpdateChecker(
+            api,
+            settings,
+            packages,
+            ApkInstaller { _, stillClear ->
+                busy = true
+                stillClear().also { committed = it }
+            },
+            { busy },
+            Clock.systemUTC(),
+            workDir,
+            Dispatchers.Unconfined
+        )
+        assertEquals(UpdateOutcome.Deferred, racing.check())
+        assertFalse(committed)
+        assertTrue(leftovers().isEmpty())
+    }
+
+    @Test(timeout = 60_000)
+    fun aFileLeftByAKilledRunIsRemovedAtTheNextRun() = runBlocking {
+        val c = checker()
+        workDir.mkdirs()
+        val stale = File(workDir, "update.apk").apply { writeBytes(apk) }
+        val other = File(workDir, "other.tmp").apply { writeBytes(apk) }
+        latest = ApiResult.Final(404, null)
+        assertEquals(UpdateOutcome.NothingPublished, c.check())
+        assertFalse(stale.exists())
+        assertFalse(other.exists())
     }
 
     @Test(timeout = 60_000)

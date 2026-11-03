@@ -23,6 +23,8 @@ class UpdateViewModel @Inject constructor(
     /** The Update button: the check at once, and the install confirmation opened directly when one is needed. */
     fun updateNow() {
         InstallPrompt.expectDirect()
-        scope.launch { checker.check() }
+        scope.launch {
+            if (checker.check() !is UpdateOutcome.Installing) InstallPrompt.clearDirect()
+        }
     }
 }

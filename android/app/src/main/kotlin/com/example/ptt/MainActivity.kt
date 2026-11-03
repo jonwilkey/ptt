@@ -12,6 +12,7 @@ import androidx.lifecycle.compose.LifecycleStartEffect
 import com.example.ptt.setup.Route
 import com.example.ptt.setup.SetupApp
 import com.example.ptt.setup.SetupViewModel
+import com.example.ptt.update.InstallPrompt
 import com.example.ptt.update.UpdateChecker
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -42,6 +43,16 @@ class MainActivity : ComponentActivity() {
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        InstallPrompt.foreground = true
+    }
+
+    override fun onStop() {
+        InstallPrompt.foreground = false
+        super.onStop()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

@@ -18,10 +18,11 @@ import java.io.IOException
 
 /** Installs through a [PackageInstaller] session; the answer comes to [UpdateInstallReceiver]. */
 class SessionApkInstaller(private val context: Context) : ApkInstaller {
-    override fun install(file: File) {
+    override fun install(file: File, stillClear: () -> Boolean): Boolean {
         val installer = context.packageManager.packageInstaller
         // A session left waiting for a confirmation nobody gave would hold an older APK.
         installer.mySessions.forEach { installer.abandonSession(it.sessionId) }
+        context.getSystemService(NotificationManager::class.java)?.cancel(UpdateInstallReceiver.NOTIFICATION_ID)
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)
             setSize(file.length())
@@ -31,7 +32,11 @@ class SessionApkInstaller(private val context: Context) : ApkInstaller {
         }
         val id = installer.createSession(params)
         try {
-            commit(installer, id, file)
+            if (!commit(installer, id, file, stillClear)) {
+                installer.abandonSession(id)
+                return false
+            }
+            return true
         } catch (e: IOException) {
             installer.abandonSession(id)
             throw e
@@ -41,15 +46,16 @@ class SessionApkInstaller(private val context: Context) : ApkInstaller {
         }
     }
 
-    private fun commit(installer: PackageInstaller, id: Int, file: File) {
+    private fun commit(installer: PackageInstaller, id: Int, file: File, stillClear: () -> Boolean): Boolean =
         installer.openSession(id).use { session ->
             session.openWrite(SESSION_FILE, 0, file.length()).use { out ->
                 file.inputStream().use { it.copyTo(out) }
                 session.fsync(out)
             }
+            if (!stillClear()) return@use false
             session.commit(resultSender(id))
+            true
         }
-    }
 
     private fun resultSender(sessionId: Int) = PendingIntent.getBroadcast(
         context,
@@ -91,7 +97,7 @@ class UpdateInstallReceiver : BroadcastReceiver() {
 
     private fun promptUser(context: Context, confirm: Intent) {
         confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (InstallPrompt.consumeDirect()) {
+        if (InstallPrompt.consumeDirect() && InstallPrompt.foreground) {
             try {
                 context.startActivity(confirm)
                 return
@@ -116,8 +122,8 @@ class UpdateInstallReceiver : BroadcastReceiver() {
         context.getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification)
     }
 
-    private companion object {
-        const val TAG = "UpdateInstall"
+    companion object {
+        private const val TAG = "UpdateInstall"
         const val NOTIFICATION_ID = 5
     }
 }
@@ -131,5 +137,13 @@ object InstallPrompt {
         direct = true
     }
 
+    /** True while MainActivity is started: only then may the confirmation open without a tap on a notification. */
+    @Volatile
+    var foreground = false
+
     fun consumeDirect(): Boolean = direct.also { direct = false }
+
+    fun clearDirect() {
+        direct = false
+    }
 }

@@ -45,7 +45,7 @@ The `FirebaseInitProvider` is removed and Firebase's auto-init and default data 
 ## Self-update and release signing
 
 The `update` package implements docs/protocol.md section 14: `UpdateWorker` (daily) and the app-start run
-(at most every 6 hours, from `PttApplication` and `MainActivity`) call `UpdateChecker`, which downloads the
+(at most every 6 hours, from `MainActivity` start) call `UpdateChecker`, which downloads the
 newest APK from our server into `noBackupFilesDir`, verifies size, SHA-256, package name, version code and
 the signing certificates (`ApkVerifier`), and installs it through a `PackageInstaller` session. It never
 installs while a page rings, a talk session is active or the page slot holds a live page (it tries again on
@@ -55,6 +55,10 @@ screen is replaced by "Update required" and sending a page (app or widget) opens
 
 `min-supported-version.txt` holds the minimum supported version name (`0.0.0`: none). Only the release
 workflow reads it, to publish `min_supported_version_code`; raising it is a deliberate PR.
+
+Manual test: the first update on a phone shows the system install confirmation (an "Update ready" notification, or
+the screen itself after the Update button); once the app is the installer of record, the second update installs
+with no prompt (`UPDATE_PACKAGES_WITHOUT_USER_ACTION`, API 31+).
 
 Release signing reads its keystore from environment variables (the `android-release` workflow supplies them
 from the protected `release` environment; never commit a keystore or a password):

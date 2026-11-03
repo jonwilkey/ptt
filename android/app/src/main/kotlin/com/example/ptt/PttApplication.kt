@@ -9,13 +9,11 @@ import com.example.ptt.alert.SenderWaiting
 import com.example.ptt.crypto.TinkKeys
 import com.example.ptt.push.FirebaseInitializer
 import com.example.ptt.talk.TalkSessionController
-import com.example.ptt.update.UpdateChecker
 import com.example.ptt.update.UpdateWorker
 import com.example.ptt.widget.WidgetUpdater
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
 
 @HiltAndroidApp
 open class PttApplication :
@@ -36,9 +34,6 @@ open class PttApplication :
 
     @Inject
     lateinit var widgetUpdater: WidgetUpdater
-
-    @Inject
-    lateinit var updates: UpdateChecker
 
     // WorkManager's default initializer is removed in the manifest so workers get Hilt injection.
     override val workManagerConfiguration: Configuration
@@ -66,8 +61,7 @@ open class PttApplication :
         talkSessions.start()
         // The home-screen widget follows the roster, presence and the setup checklist (never incoming pages).
         widgetUpdater.start()
-        // The daily self-update check, and one now unless the last one was under six hours ago.
+        // The daily self-update check; the app-start one runs from MainActivity.
         UpdateWorker.schedule(this)
-        appScope.launch { updates.checkOnAppStart() }
     }
 }

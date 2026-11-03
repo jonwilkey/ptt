@@ -169,7 +169,7 @@ class PageSenderTest {
         assertTrue(rows().isEmpty())
     }
 
-    @Test
+    @Test(timeout = 60_000)
     fun anOutdatedAppSendsNothingButStillRingsAnIncomingPage() = runTest {
         val rig = rig()
         h.updateRequired = true
