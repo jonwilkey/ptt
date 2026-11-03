@@ -229,6 +229,11 @@ jobs:
       - name: Scheduled workflow script tests
         run: .github/scripts/scheduled-test.sh
 
+      # The APK publish step's host side: immutable versions, lower-version refusal, latest.json
+      # after the APK, pruning.
+      - name: APK publish script tests
+        run: .github/scripts/publish-apk-test.sh
+
       - name: Agent tooling script tests
         run: scripts/test-scripts.sh
 
