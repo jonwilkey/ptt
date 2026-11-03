@@ -229,6 +229,9 @@ jobs:
       - name: Scheduled workflow script tests
         run: .github/scripts/scheduled-test.sh
 
+      - name: Agent tooling script tests
+        run: scripts/test-scripts.sh
+
   osv-scanner:
     name: osv-scanner
     runs-on: ubuntu-24.04
