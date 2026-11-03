@@ -1,0 +1,320 @@
+name: android-release
+
+# Builds and signs the release APK for an android-vX.Y.Z tag, attaches it to the GitHub Release,
+# and, after a second approval, publishes it to the server so phones self-update
+# (docs/operations.md, "Publishing an APK"; ADR 0011).
+#
+# Entry points (ADR 0005), all running the same jobs against the tag's tree:
+#   - release-please.yml calls this workflow (workflow_call) right after it creates the android
+#     release; tags created with GITHUB_TOKEN do not trigger workflows by themselves.
+#   - An admin pushes an android-v* tag (the GitHub Release is created if it does not exist).
+#   - workflow_dispatch with an existing tag: rebuilds the tag. A version is published once: if the
+#     rebuilt APK differs from the one already attached to the release or on the server, the run
+#     fails (builds are not byte-reproducible; ship a new patch version instead).
+#     allow_older lets `publish` re-point latest at a version lower than the published one.
+#
+# Two approvals per release: `build` runs in the `release` environment (the only one holding the
+# keystore), `publish` in `production` (the only one holding the Tailscale and SSH secrets).
+# The repository and its Actions logs are public: only the APK's version and the signer's
+# certificate fingerprint (public, not a secret) are printed.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, e.g. android-v1.2.3"
+        required: true
+        type: string
+  push:
+    tags: ["android-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to rebuild, e.g. android-v1.2.3"
+        required: true
+        type: string
+      allow_older:
+        description: "Let publish re-point latest at a version lower than the published one (only after deleting a bad release from the server by hand)"
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: android-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build and sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Required reviewers on release, and the keystore secrets (docs/runbooks/github-setup.md).
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      version_code: ${{ steps.verify.outputs.version_code }}
+      min_code: ${{ steps.verify.outputs.min_code }}
+    steps:
+      - name: Resolve the tag
+        id: meta
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^android-v((0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2}))$ ]]; then
+            echo "::error::'$TAG' is not an android release tag (android-vX.Y.Z, each part 0-999)."
+            exit 1
+          fi
+          # Signing happens only for main (release-please, manual runs) or the tag itself; the
+          # environment's deployment rules rely on it.
+          case "$GITHUB_REF" in
+            refs/heads/main | "refs/tags/$TAG") ;;
+            *)
+              echo "::error::$EVENT runs must start from main or the tag, not $GITHUB_REF."
+              exit 1
+              ;;
+          esac
+          {
+            echo "tag=$TAG"
+            echo "version=${BASH_REMATCH[1]}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.meta.outputs.tag }}
+          persist-credentials: false
+
+      - name: android/version.txt matches the tag
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          file="$(tr -d '[:space:]' < android/version.txt)"
+          if [ "$file" != "$VERSION" ]; then
+            echo "::error::android/version.txt is '$file' but the tag builds $VERSION."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          validate-wrappers: true
+          cache-provider: basic
+          # The signing build reads caches but never writes them.
+          cache-read-only: true
+
+      - name: Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          [ -n "$KEYSTORE_BASE64" ] || { echo "::error::The release environment secret ANDROID_KEYSTORE_BASE64 is empty or missing."; exit 1; }
+          (umask 077 && printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks")
+          [ -s "$RUNNER_TEMP/release.jks" ] || { echo "::error::ANDROID_KEYSTORE_BASE64 decodes to an empty file."; exit 1; }
+
+      # The release environment secrets reach only this step. The build fails on a partial signing
+      # set (android/app/build.gradle.kts), and here also when the alias, a password or a Firebase
+      # value is missing: an unsigned or push-less APK must never be published.
+      - name: Build the signed release APK
+        working-directory: android
+        env:
+          PTT_RELEASE_KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          PTT_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          PTT_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          PTT_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          PTT_FIREBASE_PROJECT_ID: ${{ secrets.PTT_FIREBASE_PROJECT_ID }}
+          PTT_FIREBASE_APP_ID: ${{ secrets.PTT_FIREBASE_APP_ID }}
+          PTT_FIREBASE_API_KEY: ${{ secrets.PTT_FIREBASE_API_KEY }}
+          PTT_FIREBASE_SENDER_ID: ${{ secrets.PTT_FIREBASE_SENDER_ID }}
+        run: |
+          set -euo pipefail
+          for v in PTT_RELEASE_KEYSTORE_PASSWORD PTT_RELEASE_KEY_ALIAS PTT_FIREBASE_PROJECT_ID PTT_FIREBASE_APP_ID PTT_FIREBASE_API_KEY PTT_FIREBASE_SENDER_ID; do
+            [ -n "${!v}" ] || { echo "::error::The release environment secret for $v is empty or missing."; exit 1; }
+          done
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Verify the APK
+        id: verify
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          EXPECTED_CERT: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          norm() { tr -d ': \t\r\n' | tr 'A-F' 'a-f'; }
+          code_of() {
+            local re='^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$'
+            [[ $1 =~ $re ]] || return 1
+            echo $((BASH_REMATCH[1] * 1000000 + BASH_REMATCH[2] * 1000 + BASH_REMATCH[3]))
+          }
+
+          mapfile -t apks < <(find android/app/build/outputs/apk/release -name '*.apk' -type f)
+          [ "${#apks[@]}" -eq 1 ] || { echo "::error::Expected one release APK, found ${#apks[@]}."; exit 1; }
+          tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          out="$RUNNER_TEMP/out"
+          apk="$out/ptt-${VERSION}.apk"
+          mkdir -p "$out"
+          cp "${apks[0]}" "$apk"
+
+          # The signer must be exactly the release certificate (a repository variable).
+          want="$(printf '%s' "$EXPECTED_CERT" | norm)"
+          [[ $want =~ ^[0-9a-f]{64}$ ]] || { echo "::error::The repository variable ANDROID_SIGNING_CERT_SHA256 is not a SHA-256 fingerprint."; exit 1; }
+          "$tools/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
+          # Lines look like "V2 Signer: certificate SHA-256 digest: <hex>" (v2, v3 schemes) or
+          # "Signer #1 certificate SHA-256 digest: <hex>"; every one must be the same certificate.
+          mapfile -t signers < <(sed -n 's/^.*[Ss]igner.* certificate SHA-256 digest: *//p' "$RUNNER_TEMP/certs.txt" | while read -r d; do printf '%s' "$d" | norm; echo; done | sort -u)
+          [ "${#signers[@]}" -eq 1 ] || { echo "::error::Expected one distinct signer certificate, apksigner reports ${#signers[@]}."; exit 1; }
+          got="${signers[0]}"
+          if [ "$got" != "$want" ]; then
+            echo "::error::The APK is signed by $got, not the release certificate $want."
+            exit 1
+          fi
+          echo "ok    signed by the release certificate $got"
+
+          badging="$("$tools/aapt2" dump badging "$apk")"
+          pkg="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$badging")"
+          name="$(sed -n "s/.* versionName='\([^']*\)'.*/\1/p" <<< "$badging")"
+          code="$(sed -n "s/.* versionCode='\([0-9]*\)'.*/\1/p" <<< "$badging")"
+          want_code="$(code_of "$VERSION")"
+          [ "$want_code" -ge 1 ] || want_code=1
+          [ "$pkg" = com.example.ptt ] || { echo "::error::The APK's package is '$pkg'."; exit 1; }
+          [ "$name" = "$VERSION" ] || { echo "::error::The APK's versionName is '$name', not $VERSION."; exit 1; }
+          [ "$code" = "$want_code" ] || { echo "::error::The APK's versionCode is '$code', not $want_code."; exit 1; }
+          echo "ok    $pkg $name ($code)"
+
+          min_name="$(tr -d '[:space:]' < android/min-supported-version.txt)"
+          min_code="$(code_of "$min_name")" || { echo "::error::android/min-supported-version.txt is '$min_name', not MAJOR.MINOR.PATCH."; exit 1; }
+          [ "$min_code" -le "$code" ] || { echo "::error::min supported version $min_name ($min_code) is above $VERSION ($code)."; exit 1; }
+          echo "ok    min supported version $min_name ($min_code)"
+
+          (cd "$out" && sha256sum "ptt-${VERSION}.apk" > "ptt-${VERSION}.apk.sha256")
+          printf '{"version_name":"%s","version_code":%s,"min_supported_version_code":%s}\n' \
+            "$VERSION" "$code" "$min_code" > "$out/release.json"
+          {
+            echo "version_code=$code"
+            echo "min_code=$min_code"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Android ${VERSION}"
+            echo
+            echo "Version code ${code}, minimum supported ${min_code}, signer \`${got}\`."
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 < "$out/ptt-${VERSION}.apk.sha256")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-${{ steps.meta.outputs.version }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Delete the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+  # Separate from build so the job that runs Gradle with the signing secrets holds no write token.
+  attach:
+    name: attach to the GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release if needed and upload its assets
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.build.outputs.tag }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: android-${{ needs.build.outputs.version }}
+          path: out
+
+      # Idempotent: a rerun finds the identical APK already attached and leaves it. A different one
+      # (a rebuild is not byte-for-byte reproducible) is an error, as on the server.
+      - name: Attach ptt-${{ needs.build.outputs.version }}.apk and its checksum
+        run: |
+          set -euo pipefail
+          cd out
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "Android ${VERSION}"
+          fi
+          mkdir ../existing
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "ptt-${VERSION}.apk" --dir ../existing 2> /dev/null; then
+            if ! cmp -s "../existing/ptt-${VERSION}.apk" "ptt-${VERSION}.apk"; then
+              echo "::error::Release $TAG already has a different ptt-${VERSION}.apk. Versions are immutable; ship a new patch version."
+              exit 1
+            fi
+            echo "ptt-${VERSION}.apk is already attached with the same bytes."
+          else
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "ptt-${VERSION}.apk"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "ptt-${VERSION}.apk.sha256"
+
+  publish:
+    name: publish to the server
+    needs: [build, attach]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # The production approval is the second gate. No environment URL: it would show the domain.
+    environment: production
+    concurrency:
+      # Shared with deploy-prod and the infra workflow's Ansible job: one change to the host at a time.
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      # renovate: datasource=github-releases depName=tailscale/tailscale extractVersion=^v(?<version>.+)$
+      TAILSCALE_VERSION: 1.104.1
+    steps:
+      # The pipeline scripts come from the commit this workflow file was loaded from (main for
+      # release-please and manual runs, the tag for a tag push), as in deploy-prod.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: android-${{ needs.build.outputs.version }}
+          path: ${{ runner.temp }}/out
+
+      - name: Connect to the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: ${{ env.TAILSCALE_VERSION }}
+
+      - name: SSH access to ptt-prod
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: .github/scripts/ssh-setup.sh
+
+      - name: Publish the APK
+        env:
+          APK_FILE: ${{ runner.temp }}/out/ptt-${{ needs.build.outputs.version }}.apk
+          APP_VERSION: ${{ needs.build.outputs.version }}
+          APP_VERSION_CODE: ${{ needs.build.outputs.version_code }}
+          APP_MIN_CODE: ${{ needs.build.outputs.min_code }}
+          ALLOW_OLDER: ${{ inputs.allow_older && 'true' || 'false' }}
+        run: .github/scripts/publish-apk.sh
+
+      - name: Summary
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: echo "Published ${VERSION}; /internal/status reports it as app_latest." >> "$GITHUB_STEP_SUMMARY"

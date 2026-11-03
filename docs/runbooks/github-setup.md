@@ -1,7 +1,7 @@
 # Runbook: GitHub settings for CI/CD
 
 The repository settings, secrets, and variables that the `ci`, `release-please`,
-`server-release` (with `deploy-prod`), `rollback-drill`, `weekly-maintenance`, `nightly-security`,
+`server-release` (with `deploy-prod`), `android-release`, `rollback-drill`, `weekly-maintenance`, `nightly-security`,
 and `infra` workflows need, and the
 order of the first deploy. Values come from [infra-bootstrap.md](infra-bootstrap.md) and the
 steps below; keep each one in the shared password-manager vault, never in the repository.
@@ -53,10 +53,44 @@ Actions) can still create tags, or releases stop.
   - Branch `main`: release-please's calls of `server-release`, manual `server-release` runs
     (they run from `main`), `rollback-drill`, and the `infra` workflow.
   - Tag `server-v*`: `server-release` runs started by pushing a tag.
+  - Tag `android-v*`: `android-release` runs started by pushing a tag (its `publish` job). Its
+    runs from release-please and by hand run from `main`.
 
 Jobs that use it: `deploy-prod` / `deploy (production)` (called by `server-release` and
-`rollback-drill`), `infra` / `apply`, `infra` / `ansible`. Each waits for an approval before it
+`rollback-drill`), `android-release` / `publish to the server`, `infra` / `apply`,
+`infra` / `ansible`. Each waits for an approval before it
 starts.
+
+## 2a. The `release` environment
+
+Holds the Android signing keystore. **Settings > Environments > New environment** `release`:
+
+- **Required reviewers:** both admins (the first of the two approvals an Android release needs;
+  the second is `production`, which publishes the APK).
+- **Prevent self-review: off**, for the same reason as `production`.
+- **Deployment branches and tags: Selected branches and tags**, with two rules:
+  - Branch `main`: release-please's calls of `android-release` and manual runs.
+  - Tag `android-v*`: runs started by pushing a tag.
+
+Jobs that use it: `android-release` / `build and sign`. Only that job can read the environment
+secrets below, and nothing else in the repository can read them.
+
+Also add the tag rule `android-v*` to the `production` environment (section 2): `android-release`
+/ `publish to the server` runs there.
+
+**Create the release keystore** on a trusted laptop (once; the APK's signing certificate can
+never change without every phone reinstalling the app):
+
+```sh
+cd "$(mktemp -d)"
+keytool -genkeypair -keystore ptt-release.jks -alias ptt -keyalg RSA -keysize 4096 \
+  -validity 10000 -dname "CN=Family PTT"
+keytool -list -keystore ptt-release.jks -alias ptt | grep SHA-256   # certificate fingerprint
+base64 -w0 ptt-release.jks                                           # ANDROID_KEYSTORE_BASE64
+```
+
+Keep `ptt-release.jks` and its passwords in the password-manager vault (a lost keystore means a
+new app identity), then delete the local copy.
 
 ## 3. Secrets and variables
 
@@ -81,6 +115,11 @@ Environment secrets are readable only by jobs that passed the approval gate.
 | `PTT_DOMAIN` | `production` secret | `deploy-prod` deploy (Ansible `ptt_domain`, `/healthz`, smoke test), `infra` ansible (`/healthz`, smoke test) | The server's name, the same value as `TOFU_RECORD_NAME` |
 | `ANSIBLE_SITE_VARS` | `production` secret | `infra` ansible | The full YAML content of `infra/ansible/inventory/group_vars/prod/site.yml` (section 6) |
 | `SOPS_AGE_KEY` | `production` secret, **required** (prod `app_secrets` lists the FCM key) | `deploy-prod` deploy, `infra` ansible (only the `ansible-playbook` step) | The CI age identity (section 6, "The CI age key") |
+| `ANDROID_KEYSTORE_BASE64` | `release` secret | `android-release` build | `base64 -w0` of the release keystore (section 2a) |
+| `ANDROID_KEYSTORE_PASSWORD` | `release` secret | `android-release` build | The keystore password |
+| `ANDROID_KEY_ALIAS` | `release` secret | `android-release` build | The key alias (`ptt` in section 2a) |
+| `ANDROID_KEY_PASSWORD` | `release` secret, **optional** | `android-release` build | The key password; leave unset when it equals the keystore password |
+| `PTT_FIREBASE_PROJECT_ID`, `PTT_FIREBASE_APP_ID`, `PTT_FIREBASE_API_KEY`, `PTT_FIREBASE_SENDER_ID` | `release` secrets (four) | `android-release` build | firebase-setup.md, step 7; the build fails if one is missing, because an APK without them cannot receive pages |
 
 Repository **variables** (**Settings > Secrets and variables > Actions > Variables**):
 
@@ -88,6 +127,7 @@ Repository **variables** (**Settings > Secrets and variables > Actions > Variabl
 | --- | --- | --- |
 | `TOFU_ENABLED` | `true` after infra-bootstrap.md step 11 | Turns on `tofu plan` in `ci` and the `infra` plan/apply jobs |
 | `ANSIBLE_ENABLED` | `true` after the first manual `site.yml` run (section 7) | Turns on the `infra` workflow's Ansible job |
+| `ANDROID_SIGNING_CERT_SHA256` | The release certificate's SHA-256 fingerprint (`keytool -list` output, colons optional), section 2a | `android-release` refuses an APK signed by any other certificate |
 
 `GITHUB_TOKEN` is automatic. The deploy jobs pass it to Ansible as `GHCR_TOKEN` (with
 `packages: read`) so the server can pull the image while the job runs.
@@ -203,7 +243,16 @@ merge.
 Merging the server release PR makes release-please tag `server-vX.Y.Z`, create the GitHub
 release, and call `server-release` in the same run.
 
-To rebuild and redeploy an existing release (for example after a failed deploy, or to go back to
+Merging the android release PR makes release-please tag `android-vX.Y.Z`, create the GitHub
+release, and call `android-release`: approve the `release` environment (build and sign; the APK
+and its checksum are attached to the release), then the `production` environment (publish to
+the server; phones pick it up within a day). If `publish` fails, re-run the failed job (it reuses
+the built APK). **Actions > android-release > Run workflow** with an existing tag rebuilds it; a
+rebuilt APK that differs from the one already attached or published fails, because versions are
+immutable. `allow_older` is only for re-pointing `latest` after deleting a bad release from the
+server by hand ([operations.md](../operations.md#publishing-an-apk)).
+
+To rebuild and redeploy an existing server release (for example after a failed deploy, or to go back to
 an older release): **Actions > server-release > Run workflow**, branch `main`, tag
 `server-vX.Y.Z`. It rebuilds and redeploys the tag as-is, with the same pinned base images from
 that tag's Dockerfile; base-image updates ship as a new release (Renovate PRs; the

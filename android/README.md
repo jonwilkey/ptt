@@ -73,6 +73,10 @@ from the protected `release` environment; never commit a keystore or a password)
 With none set, `assembleRelease` produces an unsigned APK (as CI's release check does). With only some set the
 build fails.
 
+The `release` environment, its secrets (keystore, passwords, the four `PTT_FIREBASE_*` values) and the
+repository variable `ANDROID_SIGNING_CERT_SHA256` are set up in `docs/runbooks/github-setup.md` (section 2a);
+what the workflow does is in `docs/operations.md`, "Publishing an APK".
+
 ## Local setup
 
 - JDK 21 (`JAVA_HOME`).
