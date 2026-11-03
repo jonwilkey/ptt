@@ -33,7 +33,7 @@ for root in "$top" ${roots[@]+"${roots[@]}"}; do
   fi
 done
 
-kotlin=$(pgrep -f '[K]otlinCompileDaemon' | wc -l)
+kotlin=$( { pgrep -f '[K]otlinCompileDaemon' || true; } | wc -l)
 pkill -f '[K]otlinCompileDaemon' || true
 echo "stopped Gradle daemons for $stopped checkout(s); Kotlin daemons killed: $kotlin"
 
