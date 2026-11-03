@@ -656,7 +656,7 @@ name. Before its first normal boot it must lose all of that.
 5. Start `pttd` alone (`docker compose up -d --no-deps pttd`, FCM unset so pushes are disabled,
    no ping key) and check `curl 127.0.0.1:9090/internal/status`: healthy, schema at the
    expected version, roster present. Caddy is never started.
-6. Record the result and timings in the runbook log, destroy the instance, and remove `ptt-drill`
-   from the tailnet.
+6. Record the result and timings in the runbook log, destroy the instance, remove `ptt-drill`
+   from the tailnet, and delete the temporary root password.
 
 The spec's target for a real restore is under 60 minutes; the drill times steps 2-6 of the runbook against it.

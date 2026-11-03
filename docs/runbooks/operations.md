@@ -115,7 +115,7 @@ still have one, or use C.
 
 Then, for A and B:
 
-1. `ssh-keygen -R ptt-prod` (the host key changed), then run the Ansible play:
+1. `ssh-keygen -R ptt-prod` (B only: the host key changed; A restores the same host keys), then run the Ansible play:
    **Actions > infra > Run workflow**, approve the plan and the Ansible job. It writes `/opt/ptt`,
    the secrets (including the Healthchecks.io ping key) and the snapshot timer.
 2. Deploy the digest production should run: **Actions > server-release > Run workflow** with the

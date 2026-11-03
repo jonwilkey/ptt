@@ -50,7 +50,7 @@ In the Vultr portal, **outside OpenTofu** (nothing here may be added to `infra/t
 3. Restore the newest automatic backup of the production instance onto the scratch instance
    (the instance's **Backups** tab lists automatic backups; choose **Restore** for the newest one
    and the scratch instance as the target; this overwrites the scratch disk). Note the backup's
-   timestamp for step 6.
+   timestamp for step 5.
    Watch the web console during the restore, in case the instance boots the disk instead of the ISO.
 4. Reboot the scratch instance from the ISO (web console) and stay in the console.
 
