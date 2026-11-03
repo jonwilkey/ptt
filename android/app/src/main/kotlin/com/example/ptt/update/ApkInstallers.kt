@@ -82,6 +82,7 @@ class UpdateInstallReceiver : BroadcastReceiver() {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> confirmation(intent)?.let { promptUser(context, it) }
 
             else -> {
+                InstallPrompt.clearDirect()
                 context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
                 if (status != PackageInstaller.STATUS_SUCCESS) Log.w(TAG, "install failed: status $status")
             }
