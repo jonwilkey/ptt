@@ -371,7 +371,7 @@ the first time. Both admins watching the repository get the emails.
 - If the `tag deployed` job fails after a good deploy (a GHCR hiccup), re-run that job before the
   next `weekly-maintenance` run: until then the tag names the older release, and
   `weekly-maintenance` would rebuild and deploy that one.
-- The rollback drill (milestone 6 exit check): **Actions > rollback-drill > Run workflow** on
+- The rollback drill ([rollback-drill.md](rollback-drill.md); milestone 6 exit check): **Actions > rollback-drill > Run workflow** on
   `main`, `confirm` = `break production`, then approve its deploy. Production is down for a few
   minutes and both admins get a "down" and an "up" email; run it at a quiet time. It passes only
   if production rolled back to the previous image and schema with the snapshot restored.

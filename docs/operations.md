@@ -28,7 +28,7 @@ the daily reminders of [Re-alerting](#re-alerting).
 Checks are addressed by **slug** under the project's ping key,
 `https://hc-ping.com/<ping-key>/<slug>[/fail]`
 (<https://healthchecks.io/docs/http_api/>). The slugs are fixed in code; the checks are created
-by hand in the setup runbook with the period and grace below (auto-provisioning with `?create=1`
+by hand in the [setup runbook](runbooks/healthchecks-setup.md) with the period and grace below (auto-provisioning with `?create=1`
 is not used, because it would create checks with default timing).
 
 | Slug | Pinged by | Schedule | Grace | `/fail` when |
@@ -621,8 +621,8 @@ which fails a waiver that has no statement or reason or whose date is past the 3
 
 ## Restore drill: a Vultr backup onto a scratch VPS
 
-The exit check and the yearly calendar item. The full runbook is a later PR
-(`docs/runbooks/restore-drill.md`); this is what it proves and its rough steps.
+The exit check and the yearly calendar item. The step-by-step runbook is
+[`runbooks/restore-drill.md`](runbooks/restore-drill.md); this is what it proves and its rough steps.
 
 **What it proves.** The newest Vultr backup boots, holds a consistent database with every device
 and the current roster, has a recent nightly snapshot next to it, and `pttd` from that disk starts
