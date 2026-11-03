@@ -71,6 +71,7 @@ if grep -q 'stopped Gradle daemons' <<<"$sd"; then ok "stop-daemons.sh reports w
 
 # is_shutting_down reads the daemon log under the Gradle home.
 # shellcheck source=stop-daemons.sh
+# shellcheck source=scripts/stop-daemons.sh disable=SC1091
 . "$here/stop-daemons.sh"
 mkdir -p "$tmp/gh/daemon/9.9.9"
 echo 'Starting 1' >"$tmp/gh/daemon/9.9.9/daemon-111.out.log"
