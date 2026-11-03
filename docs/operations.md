@@ -433,12 +433,14 @@ published version name, or `null`; `pttd admin status` prints it.
 4. Write `.latest.json.tmp`, then `mv -f` to `latest.json`. The APK is in place before the
    metadata names it, so `latest` never points to a missing file.
 5. Delete `ptt-*.apk` files other than the newest three versions, never the one `latest.json`
-   names.
+   names (so four can remain after `allow_older` re-points `latest` to an older version).
 6. Verify: `/internal/status` reports `app_latest` equal to the version.
 
 A version lower than the published one is refused unless the workflow is run by hand with
 `allow_older: true`; that is only for re-pointing `latest` after deleting a bad release from the
-server by hand, and phones that already installed the newer one keep it either way.
+server by hand, and phones that already installed the newer one keep it either way. The run
+rebuilds the older tag, so it succeeds only if that rebuild is byte-identical to the APK already
+attached and on the server; otherwise re-point `latest.json` on the host by hand.
 
 ### The workflow
 
@@ -451,9 +453,12 @@ server by hand, and phones that already installed the newer one keep it either w
    builds and signs `assembleRelease`, checks with `apksigner verify --print-certs` that the
    signer is the release certificate (its SHA-256 is a repository variable
    `ANDROID_SIGNING_CERT_SHA256` *(new)*), checks the APK's `versionCode` equals the formula, and
-   reads `android/min-supported-version.txt` *(new)*. It attaches `ptt-<version>.apk` and
-   `ptt-<version>.apk.sha256` to the GitHub Release and uploads both as a workflow artifact.
-2. `publish` (environment `production`: a second approval, the same gate as a server deploy,
+   reads `android/min-supported-version.txt` *(new)*. It uploads `ptt-<version>.apk` and
+   `ptt-<version>.apk.sha256` as a workflow artifact.
+2. `attach` (no environment, `contents: write`; kept apart from `build` so the job holding the
+   signing secrets has no write token): attaches both files to the GitHub Release, creating the
+   release for a tag push, and refuses if a different APK is already attached.
+3. `publish` (environment `production`: a second approval, the same gate as a server deploy,
    and the only environment holding the Tailscale and SSH secrets): downloads the artifact and
    runs `publish-apk.sh`. It shares the `deploy-production` concurrency group.
 

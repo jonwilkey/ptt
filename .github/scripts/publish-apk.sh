@@ -126,6 +126,7 @@ fi
 : "${APP_MIN_CODE:?APP_MIN_CODE must be set}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID must be set}"
 allow_older="${ALLOW_OLDER:-false}"
+case "$allow_older" in true | false) ;; *) die "ALLOW_OLDER must be true or false" ;; esac
 [[ $GITHUB_RUN_ID =~ ^[0-9]+$ ]] || die "GITHUB_RUN_ID '$GITHUB_RUN_ID' is not numeric"
 code_of "$APP_VERSION" > /dev/null || die "'$APP_VERSION' is not a MAJOR.MINOR.PATCH version"
 [[ $APP_VERSION_CODE =~ ^[0-9]+$ && $APP_MIN_CODE =~ ^[0-9]+$ ]] || die "version codes must be integers"

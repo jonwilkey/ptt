@@ -249,9 +249,9 @@ jobs:
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "Android ${VERSION}"
           fi
-          mkdir ../existing
-          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "ptt-${VERSION}.apk" --dir ../existing 2> /dev/null; then
-            if ! cmp -s "../existing/ptt-${VERSION}.apk" "ptt-${VERSION}.apk"; then
+          mkdir "$RUNNER_TEMP/existing"
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "ptt-${VERSION}.apk" --dir "$RUNNER_TEMP/existing" 2> /dev/null; then
+            if ! cmp -s "$RUNNER_TEMP/existing/ptt-${VERSION}.apk" "ptt-${VERSION}.apk"; then
               echo "::error::Release $TAG already has a different ptt-${VERSION}.apk. Versions are immutable; ship a new patch version."
               exit 1
             fi

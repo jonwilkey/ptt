@@ -109,9 +109,9 @@ check "lower version is refused" 1 publish 0.4.0 apk-0.4.0 0
 grep -q 'allow_older' "$work/out" && echo "ok    ... for the right reason" || { echo "FAIL  reason"; failures=$((failures + 1)); }
 expect_names "refused lower version leaves the directory alone" "latest.json ptt-0.5.0.apk"
 
-check "bad staged hash is refused" 1 "$here/publish-apk.sh" host "$work/stage-0.5.0" 0.6.0 6000 "$(printf 'a%.0s' $(seq 64))" 9 0 false
+check "bad staged hash is refused" 1 "$here/publish-apk.sh" host "$work/stage-0.5.0" 0.6.0 6000 "$(printf 'a%.0s' $(seq 64))" "$(stat -c %s "$work/stage-0.5.0")" 0 false
 expect_names "bad hash leaves the directory alone" "latest.json ptt-0.5.0.apk"
-check "wrong version code is refused" 1 "$here/publish-apk.sh" host "$work/stage-0.5.0" 0.6.0 6001 "$(sha256sum < "$work/stage-0.5.0" | cut -d' ' -f1)" 9 0 false
+check "wrong version code is refused" 1 "$here/publish-apk.sh" host "$work/stage-0.5.0" 0.6.0 6001 "$(sha256sum < "$work/stage-0.5.0" | cut -d' ' -f1)" "$(stat -c %s "$work/stage-0.5.0")" 0 false
 check "min code above the version code is refused" 1 publish 0.6.0 apk-0.6.0 7000
 
 : > "$FAKE_LOG"
