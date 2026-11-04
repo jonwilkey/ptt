@@ -53,7 +53,8 @@ jobs:
       tag: ${{ needs.release-please.outputs.server_tag }}
     # A called workflow sees no secrets unless the caller passes them. inherit passes the
     # repository and organization secrets; the production environment secrets (TS_OAUTH_*,
-    # DEPLOY_SSH_KEY, PTT_DOMAIN) reach server-release's deploy job through its environment.
+    # DEPLOY_SSH_KEY, PTT_DOMAIN) reach the nested deploy job only because both this call and
+    # server-release's deploy call use inherit.
     secrets: inherit
 
   android-release:
