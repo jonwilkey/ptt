@@ -63,7 +63,7 @@ The image is built only in CI: `docker buildx build --platform linux/amd64 --bui
 | `PTTD_PUBLIC_URL` | unset | The address phones reach the server at, e.g. `https://ptt.example.com` (absolute `https` URL, no path or query; `http` only for `localhost`/`127.0.0.1`). Optional; `pttd admin bootstrap` requires it, to put it in the enrollment QR |
 | `PTTD_FCM_CREDENTIALS_FILE` | unset | Path of the Firebase service-account JSON; selects the real FCM sender (a secret file, see below; empty counts as unset) |
 | `PTTD_FCM_FAKE` | `false` | `true` records pushes in memory and serves them at `GET`/`DELETE /internal/fake-fcm` on the internal listener (CI only). Setting it together with credentials is an error |
-| `PTTD_HEALTHCHECKS_PING_KEY_FILE` | unset | Path of the file holding the Healthchecks.io project ping key (a secret file). Unset: one `info` log line and no pings; the daily `check_in` push still runs |
+| `PTTD_HEALTHCHECKS_PING_KEY_FILE` | unset | Path of the file holding the Healthchecks.io project ping key (a secret file). Unset: one `info` log line and no pings; the daily `check_in` push still runs. In production the `app` role sets it from the `healthchecks-ping-key` entry of `app_secrets`, and a deploy uses the release tag's inventory: a release cut before that entry existed (0.5.0) deploys without the key |
 | `PTTD_HEALTHCHECKS_URL` | `https://hc-ping.com` | Ping base URL (tests point it at a local fake) |
 
 With neither FCM variable set, pttd starts with pushes disabled: it logs one warning and every
