@@ -363,3 +363,6 @@ jobs:
     with:
       image: ${{ needs.build.outputs.image }}
       tag: ${{ needs.build.outputs.tag }}
+    # Without inherit the called deploy job's environment secrets resolve empty (server-v0.5.0's
+    # deploy failed at the Tailscale step this way), even though the job declares the environment.
+    secrets: inherit

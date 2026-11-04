@@ -405,6 +405,8 @@ jobs:
       tag: ${{ needs.resolve.outputs.base_tag }}
       environment: maintenance
       expect_previous: ${{ needs.resolve.outputs.expect_previous }}
+    # Needed for the called job's environment secrets; see server-release.yml.
+    secrets: inherit
 
   ping:
     name: ping ptt-weekly

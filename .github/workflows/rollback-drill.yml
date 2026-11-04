@@ -145,3 +145,5 @@ jobs:
       tag: ${{ needs.build.outputs.tag }}
       environment: production
       drill: true
+    # Needed for the called job's environment secrets; see server-release.yml.
+    secrets: inherit

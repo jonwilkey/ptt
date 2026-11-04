@@ -18,8 +18,9 @@ name: deploy-prod
 # is rolled back anyway, and the drill fails.
 #
 # The caller grants contents: read and packages: write (for the deployed job); the deploy job
-# keeps packages: read, because its token is handed to the host for `docker login`. Environment
-# secrets come from the environment named by the input, never from the caller. The domain is a
+# keeps packages: read, because its token is handed to the host for `docker login`. Secrets come
+# from the environment named by the input; every caller must pass `secrets: inherit`, or they
+# resolve empty (server-v0.5.0's first deploy failed at the Tailscale step). The domain is a
 # secret (masked) and ssh-setup.sh masks the tailnet address.
 
 on:
