@@ -66,5 +66,6 @@ jobs:
     uses: ./.github/workflows/android-release.yml
     with:
       tag: ${{ needs.release-please.outputs.android_tag }}
-    # The keystore and Firebase secrets reach build through the release environment, the Tailscale
-    # and SSH secrets reach publish through production; nothing needs inheriting.
+    # The keystore and Firebase secrets (release environment) and the Tailscale and SSH secrets
+    # (production) reach the called jobs only with inherit; see server-release.yml's deploy call.
+    secrets: inherit
