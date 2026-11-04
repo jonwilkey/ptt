@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/jonwilkey/ptt/compare/server-v0.5.0...server-v0.5.1) (2026-11-04)
+
+
+### Documentation
+
+* **server:** note that deploys use the release tag's inventory for the ping key ([#80](https://github.com/jonwilkey/ptt/issues/80)) ([06957a7](https://github.com/jonwilkey/ptt/commit/06957a7d3c2a4d463205b6d0f6a582d97dbd0d85))
+
 ## [0.5.0](https://github.com/jonwilkey/ptt/compare/server-v0.4.0...server-v0.5.0) (2026-11-02)
 
 
