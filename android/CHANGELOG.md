@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/jonwilkey/ptt/compare/android-v0.5.0...android-v0.6.0) (2026-11-04)
+
+
+### Features
+
+* **android:** self-update and update-required screen ([#74](https://github.com/jonwilkey/ptt/issues/74)) ([da50fe7](https://github.com/jonwilkey/ptt/commit/da50fe76065d4810dbf5be2212833c649fe3296f))
+* **ci:** android-release workflow and APK publish ([#76](https://github.com/jonwilkey/ptt/issues/76)) ([1c3d46d](https://github.com/jonwilkey/ptt/commit/1c3d46da4e10039e88f74645e3f60cc5e7d1b701))
+
 ## [0.5.0](https://github.com/jonwilkey/ptt/compare/android-v0.4.0...android-v0.5.0) (2026-11-02)
 
 
